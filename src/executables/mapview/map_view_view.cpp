@@ -614,7 +614,7 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   // exist before GenerateFoliage -- which means an empty field can no longer
   // save that cost after the fact. On a generated map (mapgen emits no Forest
   // biome yet) this is ~1 s of meshing that would be discarded immediately.
-  std::vector<TreeFieldModel> forest_models;
+  std::vector<InstancedLodModel> forest_models;
   foliage::FoliageField foliage_field;
   if (foliage::AnyCoverage(forest_query, foliage_params)) {
     forest_models = BuildForestModels(forest_catalog);

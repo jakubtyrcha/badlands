@@ -25,7 +25,8 @@
 #include "game/visual/alpha_coverage.hpp"
 #include "game/visual/impostor_baker.hpp"
 #include "game/visual/octahedral.hpp"
-#include "game/visual/tree_field.hpp"
+#include "game/visual/instanced_lod_field.hpp"
+#include "game/visual/tree_lod_model.hpp"
 #include "gpu_test_helpers.hpp"
 
 using namespace badlands;
@@ -59,9 +60,9 @@ BakeGpu& GetBakeGpu() {
 
 // Two presets with deliberately different crown shapes: a broad deciduous and a
 // narrow conifer, so a bug that only bites one silhouette cannot hide.
-std::vector<TreeFieldModel> TestModels() {
+std::vector<InstancedLodModel> TestModels() {
   const std::vector<NamedTreeOptions> catalog = TreeCatalog();
-  std::vector<TreeFieldModel> models;
+  std::vector<InstancedLodModel> models;
   for (const char* name : {"Oak (large)", "Pine (large)"}) {
     for (const NamedTreeOptions& n : catalog) {
       if (n.name == name) {
@@ -102,7 +103,7 @@ TEST_CASE("Every impostor tile bakes real coverage", "[impostor][gpu]") {
   // a silhouette that rasterizes to nothing produces a transparent tile, which
   // at runtime is an invisible tree rather than an error.
   BakeGpu& g = GetBakeGpu();
-  const std::vector<TreeFieldModel> models = TestModels();
+  const std::vector<InstancedLodModel> models = TestModels();
 
   const ImpostorBakeResult baked =
       BakeImpostorAtlas(g.device, g.queue, *g.gen, models);
@@ -134,18 +135,22 @@ TEST_CASE("A model's placement frame contains its geometry", "[impostor][gpu]") 
   // If the radius under-covers, the bake clips the tree at the tile edge from
   // some views -- which reads as a tree with a flat side.
   BakeGpu& g = GetBakeGpu();
-  const std::vector<TreeFieldModel> models = TestModels();
+  const std::vector<InstancedLodModel> models = TestModels();
   const ImpostorBakeResult baked =
       BakeImpostorAtlas(g.device, g.queue, *g.gen, models);
   REQUIRE(baked.ok);
 
   for (size_t m = 0; m < models.size(); ++m) {
-    // The frame must contain what the bake DRAWS -- bark plus the voxel L0
-    // crown, which is what the field's own LOD0 shows.
-    Aabb bounds = models[m].bark_lod0.local_bounds;
-    if (!models[m].leaf_lod_meshes.empty() &&
-        models[m].leaf_lod_meshes[0].mesh.vertex_count > 0) {
-      bounds = bounds.Union(models[m].leaf_lod_meshes[0].local_bounds);
+    // The frame must contain what the bake DRAWS, and the bake draws exactly
+    // what the model's ImpostorBakeSpec names -- so the expectation is derived
+    // from the spec rather than from a second hardcoded idea of which submeshes
+    // those are. For a tree that resolves to LOD0's bark plus its voxel crown,
+    // which is what the field's own LOD0 shows.
+    Aabb bounds = Aabb::Empty();
+    for (const ImpostorBakeSubmesh& sub : models[m].impostor.submeshes) {
+      const TexturedMeshResult& mesh = models[m].levels[sub.lod][sub.submesh];
+      if (mesh.mesh.vertex_count == 0) continue;
+      bounds = bounds.Union(mesh.local_bounds);
     }
     const ImpostorPlacement& p = baked.placement[m];
     INFO("model " << m);
@@ -173,7 +178,7 @@ TEST_CASE("Each tile's baked normals face that tile's own view", "[impostor][gpu
   // local), views rendered into the wrong TILE (a transposed index), and the
   // octahedral remap losing its sign.
   BakeGpu& g = GetBakeGpu();
-  const std::vector<TreeFieldModel> models = TestModels();
+  const std::vector<InstancedLodModel> models = TestModels();
   const ImpostorBakeResult baked =
       BakeImpostorAtlas(g.device, g.queue, *g.gen, models);
   REQUIRE(baked.ok);
@@ -235,7 +240,7 @@ TEST_CASE("Coverage survives the mip chain", "[impostor][gpu]") {
   // disappears. leaf_texture.cpp already learned this; the atlas shares the
   // kernel (alpha_coverage.hpp) so it cannot relearn it.
   BakeGpu& g = GetBakeGpu();
-  const std::vector<TreeFieldModel> models = TestModels();
+  const std::vector<InstancedLodModel> models = TestModels();
   const ImpostorBakeResult baked =
       BakeImpostorAtlas(g.device, g.queue, *g.gen, models);
   REQUIRE(baked.ok);
@@ -276,7 +281,7 @@ TEST_CASE("The bake is deterministic", "[impostor][gpu]") {
   // Content built at load must be identical run to run, or a screenshot
   // comparison and a bug report stop meaning anything.
   BakeGpu& g = GetBakeGpu();
-  const std::vector<TreeFieldModel> models = TestModels();
+  const std::vector<InstancedLodModel> models = TestModels();
 
   const ImpostorBakeResult a =
       BakeImpostorAtlas(g.device, g.queue, *g.gen, models);
@@ -308,7 +313,7 @@ TEST_CASE("The bake is deterministic", "[impostor][gpu]") {
 
 TEST_CASE("A field builds its impostor LOD and keeps the voxel chain intact",
           "[impostor][gpu]") {
-  // The wiring test. Asserted through what TreeField itself exposes -- the
+  // The wiring test. Asserted through what InstancedLodField itself exposes -- the
   // factory, the shared quad, and the material-handle count -- rather than by
   // reaching into GpuInstanceRenderer, which is private and not worth widening
   // the engine's interface for.
@@ -318,35 +323,35 @@ TEST_CASE("A field builds its impostor LOD and keeps the voxel chain intact",
   // shadow variant), so a level that silently failed to configure shows up here
   // as a short count rather than as trees quietly vanishing at range.
   BakeGpu& g = GetBakeGpu();
-  const std::vector<TreeFieldModel> models = TestModels();
+  const std::vector<InstancedLodModel> models = TestModels();
   const ImpostorBakeResult baked =
       BakeImpostorAtlas(g.device, g.queue, *g.gen, models);
   REQUIRE(baked.ok);
 
-  std::unique_ptr<TreeField> plain =
-      BuildTreeField(g.device, g.queue, *g.gen, models, 64);
+  std::unique_ptr<InstancedLodField> plain =
+      BuildInstancedLodField(g.device, g.queue, *g.gen, models, 64);
   REQUIRE(plain);
   CHECK(plain->impostor_factory == nullptr);
   CHECK(plain->impostor_vertex_buffer == nullptr);
   const size_t plain_handles = plain->material_handles.size();
 
-  TreeFieldImpostor imp;
+  InstancedLodImpostor imp;
   imp.atlas = &baked.atlas;
   imp.placement = baked.placement;
   REQUIRE(imp.active(models.size()));
 
-  std::unique_ptr<TreeField> with =
-      BuildTreeField(g.device, g.queue, *g.gen, models, 64, imp);
+  std::unique_ptr<InstancedLodField> with =
+      BuildInstancedLodField(g.device, g.queue, *g.gen, models, 64, imp);
   REQUIRE(with);
   CHECK(with->impostor_factory != nullptr);
   CHECK(with->impostor_vertex_buffer != nullptr);
   CHECK(with->impostor_index_buffer != nullptr);
   CHECK(with->material_handles.size() == plain_handles + 2 * models.size());
-  // The voxel levels are untouched: same models, same per-model LOD buffers.
-  CHECK(with->lod_buffers.size() == plain->lod_buffers.size());
+  // The mesh levels are untouched: same models, same per-model level count.
+  CHECK(with->buffers.size() == plain->buffers.size());
   for (size_t m = 0; m < models.size(); ++m) {
     INFO("model " << m);
-    CHECK(with->lod_buffers[m].size() == plain->lod_buffers[m].size());
+    CHECK(with->buffers[m].size() == plain->buffers[m].size());
   }
 }
 
@@ -357,18 +362,18 @@ TEST_CASE("A half-supplied impostor is refused, not half-enabled",
   // nothing configured, which draws nothing -- trees disappearing at distance,
   // with no error anywhere.
   BakeGpu& g = GetBakeGpu();
-  const std::vector<TreeFieldModel> models = TestModels();
+  const std::vector<InstancedLodModel> models = TestModels();
   const ImpostorBakeResult baked =
       BakeImpostorAtlas(g.device, g.queue, *g.gen, models);
   REQUIRE(baked.ok);
 
-  TreeFieldImpostor imp;
+  InstancedLodImpostor imp;
   imp.atlas = &baked.atlas;
   imp.placement = std::span<const ImpostorPlacement>(baked.placement).first(1);
   CHECK_FALSE(imp.active(models.size()));
 
-  std::unique_ptr<TreeField> tf =
-      BuildTreeField(g.device, g.queue, *g.gen, models, 64, imp);
+  std::unique_ptr<InstancedLodField> tf =
+      BuildInstancedLodField(g.device, g.queue, *g.gen, models, 64, imp);
   REQUIRE(tf);
   CHECK(tf->impostor_factory == nullptr);
 }
@@ -382,7 +387,7 @@ TEST_CASE("The baked thickness has real interior structure", "[impostor][gpu]") 
   // Asserted as a DISTRIBUTION rather than as values: the crown's silhouette
   // edge must be thin and its middle thick, which is the whole claim.
   BakeGpu& g = GetBakeGpu();
-  const std::vector<TreeFieldModel> models = TestModels();
+  const std::vector<InstancedLodModel> models = TestModels();
   const ImpostorBakeResult baked =
       BakeImpostorAtlas(g.device, g.queue, *g.gen, models);
   REQUIRE(baked.ok);

@@ -342,7 +342,7 @@ glm::mat4 BakeView(glm::vec3 dir, glm::vec3 center, float radius) {
 
 ImpostorBakeResult BakeImpostorAtlas(wgpu::Device device, wgpu::Queue queue,
                                      GpuPipelineGenerator& pipeline_gen,
-                                     std::span<const TreeFieldModel> models) {
+                                     std::span<const InstancedLodModel> models) {
   ImpostorBakeResult result;
   const wgpu::Instance instance = device.GetAdapter().GetInstance();
   if (models.empty()) {
@@ -421,70 +421,99 @@ ImpostorBakeResult BakeImpostorAtlas(wgpu::Device device, wgpu::Queue queue,
   depth_desc.usage = wgpu::TextureUsage::RenderAttachment;
   wgpu::Texture depth = device.CreateTexture(&depth_desc);
 
-  // Bark has no texture of its own; an opaque white 1x1 with a zero cutoff
-  // makes the single bake pipeline's leaf path degenerate to a bark path.
+  // The fallback albedo for a submesh that binds none (solid-colour bark, a
+  // voxel crown): an opaque white 1x1, so `tint` alone becomes the albedo.
   const uint8_t white[4] = {255, 255, 255, 255};
-  wgpu::Texture bark_tex = MakeRgbaTexture(device, queue, 1, white);
+  wgpu::Texture white_tex = MakeRgbaTexture(device, queue, 1, white);
+  wgpu::TextureView white_view = white_tex ? white_tex.CreateView() : nullptr;
 
   wgpu::SamplerDescriptor samp_desc;
   samp_desc.magFilter = wgpu::FilterMode::Linear;
   samp_desc.minFilter = wgpu::FilterMode::Linear;
   wgpu::Sampler sampler = device.CreateSampler(&samp_desc);
 
-  if (!depth || !bark_tex || !sampler) {
+  if (!depth || !white_view || !sampler) {
     spdlog::error("BakeImpostorAtlas: failed to create bake resources");
     return result;
   }
 
   result.placement.resize(models.size());
   TextureReadback readback(instance, device, queue);
+  size_t total_draws = 0;
 
   for (size_t m = 0; m < models.size(); ++m) {
-    const TreeFieldModel& model = models[m];
-    if (model.bark_lod0.mesh.indices.empty()) {
+    const InstancedLodModel& model = models[m];
+
+    // Resolve the spec's (lod, submesh) references into drawables, dropping
+    // any that turned out empty.
+    //
+    // Range-checked HERE rather than relying on ValidateLodModel: that runs
+    // inside BuildInstancedLodField, and every real caller bakes BEFORE
+    // building the field (the field needs the atlas this produces), so an
+    // out-of-range index would read out of bounds here with nothing having
+    // checked it.
+    struct Drawable {
+      const ImpostorBakeSubmesh* spec = nullptr;
+      const TexturedMeshResult* mesh = nullptr;
+      wgpu::Buffer vertex_buffer;
+      wgpu::Buffer index_buffer;
+      uint32_t index_count = 0;
+    };
+    std::vector<Drawable> drawables;
+
+    // One frame for all 16 views: centre and radius of the silhouette's
+    // bounding sphere, in native units, over exactly what gets baked.
+    Aabb bounds = Aabb::Empty();
+
+    for (const ImpostorBakeSubmesh& sub : model.impostor.submeshes) {
+      if (sub.lod >= model.levels.size() ||
+          sub.submesh >= model.levels[sub.lod].size()) {
+        spdlog::error(
+            "BakeImpostorAtlas: model {} bakes (lod {}, submesh {}), outside "
+            "its {} levels",
+            m, sub.lod, sub.submesh, model.levels.size());
+        return result;
+      }
+      const TexturedMeshResult& mesh = model.levels[sub.lod][sub.submesh];
+      if (mesh.mesh.vertex_count == 0 || mesh.mesh.indices.empty()) continue;
+      bounds = bounds.Union(mesh.local_bounds);
+
+      Drawable d;
+      d.spec = &sub;
+      d.mesh = &mesh;
+      d.vertex_buffer = MakeVertexBuffer(device, mesh.mesh.vertices);
+      d.index_buffer = MakeIndexBuffer(device, mesh.mesh.indices);
+      d.index_count = static_cast<uint32_t>(mesh.mesh.indices.size());
+      if (!d.vertex_buffer || !d.index_buffer) {
+        spdlog::error("BakeImpostorAtlas: buffer creation failed at model {}",
+                      m);
+        return result;
+      }
+      drawables.push_back(std::move(d));
+    }
+
+    if (drawables.empty()) {
       spdlog::error(
-          "BakeImpostorAtlas: model {} has no bark geometry -- its atlas layer "
-          "would render as a hole at LOD4",
-          m);
+          "BakeImpostorAtlas: model {} named {} bake submesh(es) but none has "
+          "geometry -- its atlas layer would render as a hole with nothing in "
+          "the log",
+          m, model.impostor.submeshes.size());
       return result;
     }
 
-    // The crown comes from the VOXEL L0 mesh, not the leaf cards: the field's
-    // own LOD0 is the voxel crown, so baking cards would make the impostor a
-    // picture of a tree the chain never draws and the L2 -> L4 switch would
-    // change the tree's look, not just its cost.
-    const TexturedMeshResult& crown =
-        model.leaf_lod_meshes.empty() ? model.bark_lod0 : model.leaf_lod_meshes[0];
-    const bool has_leaves =
-        !model.leaf_lod_meshes.empty() && crown.mesh.vertex_count > 0;
-
-    // One frame for all 16 views: centre and radius of the silhouette's
-    // bounding sphere, in native units.
-    Aabb bounds = model.bark_lod0.local_bounds;
-    if (has_leaves) bounds = bounds.Union(crown.local_bounds);
     const glm::vec3 center = bounds.Center();
     const float radius =
         std::max(0.5f * glm::length(bounds.max - bounds.min), 1e-3f);
     result.placement[m] = ImpostorPlacement{center, radius};
 
-    wgpu::Buffer bark_vb = MakeVertexBuffer(device, model.bark_lod0.mesh.vertices);
-    wgpu::Buffer bark_ib = MakeIndexBuffer(device, model.bark_lod0.mesh.indices);
-    wgpu::Buffer leaf_vb =
-        has_leaves ? MakeVertexBuffer(device, crown.mesh.vertices) : nullptr;
-    wgpu::Buffer leaf_ib =
-        has_leaves ? MakeIndexBuffer(device, crown.mesh.indices) : nullptr;
-    if (!bark_vb || !bark_ib) {
-      spdlog::error("BakeImpostorAtlas: buffer/texture creation failed at "
-                    "model {}", m);
-      return result;
-    }
-
-    // Two bind groups per view (bark, leaves): they differ in tint, cutoff and
+    // One bind group per (view, drawable): they differ in tint, brightness and
     // texture, and all three live in the same group.
     std::vector<wgpu::Buffer> uniforms;
     std::vector<wgpu::BindGroup> bind_groups;
-    uniforms.reserve(static_cast<size_t>(kImpostorViewCount) * 2);
-    bind_groups.reserve(static_cast<size_t>(kImpostorViewCount) * 2);
+    const size_t groups_per_view = drawables.size();
+    uniforms.reserve(static_cast<size_t>(kImpostorViewCount) * groups_per_view);
+    bind_groups.reserve(static_cast<size_t>(kImpostorViewCount) *
+                        groups_per_view);
 
     // The thickness pass needs only the MVP, so it gets its own (much smaller)
     // uniform per view.
@@ -501,23 +530,7 @@ ImpostorBakeResult BakeImpostorAtlas(wgpu::Device device, wgpu::Queue queue,
         const glm::vec3 view_dir = ImpostorViewDirection(i, j);
         const glm::mat4 mvp = proj * BakeView(view_dir, center, radius);
 
-        BakeUniforms bark_u;
-        bark_u.mvp = mvp;
-        bark_u.tint = glm::vec4(kTreeBarkColor, 1.0f);
-        bark_u.params = glm::vec4(0.0f, 0.0f, 1.0f, 0.0f);
-        bark_u.view_dir = glm::vec4(view_dir, 0.0f);
-
-        // The voxel crown is SOLID -- no cutout, and its albedo is the
-        // voxelizer's per-tet brightness times the leaf tint, which is exactly
-        // what voxel_foliage.wesl computes. Hence cutoff 0 and brightness 1.
-        BakeUniforms leaf_u;
-        leaf_u.mvp = mvp;
-        leaf_u.tint = glm::vec4(model.options.leaves.tint, 1.0f);
-        leaf_u.params = glm::vec4(model.options.leaves.transmission_strength,
-                                  0.0f, 1.0f, 1.0f);
-        leaf_u.view_dir = glm::vec4(view_dir, 0.0f);
-
-        {
+        if (!model.impostor.opaque) {
           wgpu::BufferDescriptor tdesc;
           tdesc.size = sizeof(glm::mat4);
           tdesc.usage = wgpu::BufferUsage::Uniform;
@@ -535,19 +548,28 @@ ImpostorBakeResult BakeImpostorAtlas(wgpu::Device device, wgpu::Queue queue,
           thick_uniforms.push_back(std::move(tb));
         }
 
-        for (const auto& [u, tex] :
-             {std::pair{bark_u, bark_tex}, std::pair{leaf_u, bark_tex}}) {
+        for (const Drawable& d : drawables) {
+          BakeUniforms u;
+          u.mvp = mvp;
+          u.tint = glm::vec4(d.spec->tint, 1.0f);
+          // x = translucency, y = alpha cutoff, z = AO, w = voxel-brightness
+          // mix. Cutoff stays 0 for every case this bakes: bark, a solid voxel
+          // crown and a prop's mesh are all opaque, so mip 0's alpha is a hard
+          // silhouette mask and there is nothing to cut.
+          u.params = glm::vec4(model.impostor.transmission_strength, 0.0f, 1.0f,
+                               d.spec->voxel_brightness);
+          u.view_dir = glm::vec4(view_dir, 0.0f);
+
           wgpu::Buffer ub = MakeUniform(device, u);
           std::vector<wgpu::BindGroupEntry> entries(3);
           entries[0].binding = 0;
           entries[0].buffer = ub;
           entries[0].size = sizeof(BakeUniforms);
           entries[1].binding = 1;
-          entries[1].textureView = tex.CreateView();
+          entries[1].textureView = d.spec->albedo ? d.spec->albedo : white_view;
           entries[2].binding = 2;
           entries[2].sampler = sampler;
-          bind_groups.push_back(
-              CreateBindGroup(device, *pipeline, 0, entries));
+          bind_groups.push_back(CreateBindGroup(device, *pipeline, 0, entries));
           uniforms.push_back(std::move(ub));
         }
       }
@@ -595,57 +617,56 @@ ImpostorBakeResult BakeImpostorAtlas(wgpu::Device device, wgpu::Queue queue,
                          static_cast<float>(tile.size),
                          static_cast<float>(tile.size), 0.0f, 1.0f);
 
-        pass.SetBindGroup(0, bind_groups[bg++]);
-        pass.SetVertexBuffer(0, bark_vb);
-        pass.SetIndexBuffer(bark_ib, wgpu::IndexFormat::Uint32);
-        pass.DrawIndexed(
-            static_cast<uint32_t>(model.bark_lod0.mesh.indices.size()));
-
-        if (has_leaves) {
-          pass.SetBindGroup(0, bind_groups[bg]);
-          pass.SetVertexBuffer(0, leaf_vb);
-          pass.SetIndexBuffer(leaf_ib, wgpu::IndexFormat::Uint32);
-          pass.DrawIndexed(static_cast<uint32_t>(crown.mesh.indices.size()));
+        for (const Drawable& d : drawables) {
+          pass.SetBindGroup(0, bind_groups[bg++]);
+          pass.SetVertexBuffer(0, d.vertex_buffer);
+          pass.SetIndexBuffer(d.index_buffer, wgpu::IndexFormat::Uint32);
+          pass.DrawIndexed(d.index_count);
+          ++total_draws;
         }
-        ++bg;
       }
     }
     pass.End();
 
     // --- Thickness pass: same views, same viewports, additive, no depth. ---
-    wgpu::RenderPassColorAttachment thick_color = {};
-    thick_color.view = thickness.CreateView();
-    thick_color.loadOp = wgpu::LoadOp::Clear;
-    thick_color.storeOp = wgpu::StoreOp::Store;
-    thick_color.clearValue = {0.0, 0.0, 0.0, 0.0};
+    //
+    // Skipped entirely for an opaque model. It costs a full render per view
+    // plus an R16Float readback to produce a channel the runtime then
+    // multiplies by transmission_strength -- zero, for anything opaque. The
+    // surface map's alpha stays at its clear value, which is what "no
+    // transmitted term" means.
+    if (!model.impostor.opaque) {
+      wgpu::RenderPassColorAttachment thick_color = {};
+      thick_color.view = thickness.CreateView();
+      thick_color.loadOp = wgpu::LoadOp::Clear;
+      thick_color.storeOp = wgpu::StoreOp::Store;
+      thick_color.clearValue = {0.0, 0.0, 0.0, 0.0};
 
-    wgpu::RenderPassDescriptor thick_pass_desc;
-    thick_pass_desc.colorAttachmentCount = 1;
-    thick_pass_desc.colorAttachments = &thick_color;
+      wgpu::RenderPassDescriptor thick_pass_desc;
+      thick_pass_desc.colorAttachmentCount = 1;
+      thick_pass_desc.colorAttachments = &thick_color;
 
-    wgpu::RenderPassEncoder tpass = encoder.BeginRenderPass(&thick_pass_desc);
-    tpass.SetPipeline(thick_pipeline->pipeline);
-    size_t tbg = 0;
-    for (int j = 0; j < kImpostorViewsPerAxis; ++j) {
-      for (int i = 0; i < kImpostorViewsPerAxis; ++i) {
-        const ImpostorTileRect tile = ImpostorTilePixels(i, j, 0);
-        tpass.SetViewport(static_cast<float>(tile.x), static_cast<float>(tile.y),
-                          static_cast<float>(tile.size),
-                          static_cast<float>(tile.size), 0.0f, 1.0f);
-        tpass.SetBindGroup(0, thick_bind_groups[tbg++]);
-        // Bark AND crown both occlude, so both contribute optical path.
-        tpass.SetVertexBuffer(0, bark_vb);
-        tpass.SetIndexBuffer(bark_ib, wgpu::IndexFormat::Uint32);
-        tpass.DrawIndexed(
-            static_cast<uint32_t>(model.bark_lod0.mesh.indices.size()));
-        if (has_leaves) {
-          tpass.SetVertexBuffer(0, leaf_vb);
-          tpass.SetIndexBuffer(leaf_ib, wgpu::IndexFormat::Uint32);
-          tpass.DrawIndexed(static_cast<uint32_t>(crown.mesh.indices.size()));
+      wgpu::RenderPassEncoder tpass = encoder.BeginRenderPass(&thick_pass_desc);
+      tpass.SetPipeline(thick_pipeline->pipeline);
+      size_t tbg = 0;
+      for (int j = 0; j < kImpostorViewsPerAxis; ++j) {
+        for (int i = 0; i < kImpostorViewsPerAxis; ++i) {
+          const ImpostorTileRect tile = ImpostorTilePixels(i, j, 0);
+          tpass.SetViewport(
+              static_cast<float>(tile.x), static_cast<float>(tile.y),
+              static_cast<float>(tile.size), static_cast<float>(tile.size),
+              0.0f, 1.0f);
+          tpass.SetBindGroup(0, thick_bind_groups[tbg++]);
+          // Every baked submesh occludes, so every one contributes optical path.
+          for (const Drawable& d : drawables) {
+            tpass.SetVertexBuffer(0, d.vertex_buffer);
+            tpass.SetIndexBuffer(d.index_buffer, wgpu::IndexFormat::Uint32);
+            tpass.DrawIndexed(d.index_count);
+          }
         }
       }
+      tpass.End();
     }
-    tpass.End();
 
     wgpu::CommandBuffer cmd = encoder.Finish();
     queue.Submit(1, &cmd);
@@ -674,7 +695,7 @@ ImpostorBakeResult BakeImpostorAtlas(wgpu::Device device, wgpu::Queue queue,
     // The sum is already in normalized depth units -- the ortho spans exactly
     // 2 * radius -- so it needs no scaling, only a clamp for the pathological
     // case of a mesh that is not closed.
-    {
+    if (!model.impostor.opaque) {
       const std::vector<float> tvals = ReadR16FloatSync(
           instance, device, queue, thickness, kImpostorLayerPx);
       if (tvals.size() != static_cast<size_t>(kImpostorLayerPx) *
@@ -705,10 +726,11 @@ ImpostorBakeResult BakeImpostorAtlas(wgpu::Device device, wgpu::Queue queue,
                     surface0);
     }
 
-    // Both the bark and the voxel crown are opaque, so mip 0's alpha is a hard
-    // 0/1 SILHOUETTE mask rather than a leaf cutout. Half-coverage is therefore
-    // the right threshold to preserve down the chain -- the model's own
-    // alpha_cutoff described its leaf CARDS, which no longer take part.
+    // Every submesh this bakes is opaque -- bark, a solid voxel crown, a prop's
+    // mesh -- so mip 0's alpha is a hard 0/1 SILHOUETTE mask rather than a leaf
+    // cutout. Half-coverage is therefore the right threshold to preserve down
+    // the chain; a tree's own leaves.alpha_cutoff described its CARDS, which
+    // take no part in the bake.
     constexpr uint8_t cutoff_byte = kImpostorAlphaCutoffByte;
 
     // Each tile's own mip-0 coverage is the target every coarser level of that
@@ -741,9 +763,8 @@ ImpostorBakeResult BakeImpostorAtlas(wgpu::Device device, wgpu::Queue queue,
   }
 
   result.ok = true;
-  spdlog::info("impostor bake: {} models x {} views, {} draws",
-               models.size(), kImpostorViewCount,
-               models.size() * kImpostorViewCount * 2);
+  spdlog::info("impostor bake: {} models x {} views, {} draws", models.size(),
+               kImpostorViewCount, total_draws);
   return result;
 }
 

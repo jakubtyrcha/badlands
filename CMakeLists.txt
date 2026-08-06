@@ -557,7 +557,12 @@ set(badlands_app_sources_viewer
     src/game/geometry/leaf_voxelizer.cpp
     # Multi-mode instanced tree grid (Task 4): builds an InstancedMeshField
     # from a catalog TreeOptions -- see game/visual/tree_field.hpp.
-    src/game/visual/tree_field.cpp
+    src/game/visual/instanced_lod_model.cpp
+    src/game/visual/instanced_lod_field.cpp
+    src/game/visual/tree_lod_model.cpp
+    # Triangle LODs for imported props -- the viewer is its only consumer, so
+    # it is not in the mapview list beside the tree producer.
+    src/game/visual/prop_lod_model.cpp
     src/game/visual/impostor_atlas.cpp
     src/game/visual/impostor_baker.cpp)
 # Task S2.F: GameView (sim buildings via deferred + GameCameraController) +
@@ -730,7 +735,9 @@ add_library(badlands_mapview_view STATIC
     src/game/geometry/branch_junction.cpp
     src/game/geometry/leaf_texture.cpp
     src/game/geometry/leaf_voxelizer.cpp
-    src/game/visual/tree_field.cpp
+    src/game/visual/instanced_lod_model.cpp
+    src/game/visual/instanced_lod_field.cpp
+    src/game/visual/tree_lod_model.cpp
     src/game/visual/impostor_atlas.cpp
     src/game/visual/forest_catalog.cpp
     src/game/visual/forest_renderer.cpp
@@ -958,12 +965,25 @@ add_executable(badlands_geometry_tests
     # keeping badlands_usd_tests free of those is the whole point of that
     # target. Inputs are hand-built, so no .usdc is opened here.
     src/engine/tests/usd_mesh_adapter_tests.cpp
+    # Hidden [.report] characterization of how far the shipped props decimate.
+    # Unlike the adapter tests above it DOES open the real .usdc files, which is
+    # why this target links badlands_usd_lib -- the question it answers (does
+    # edge collapse floor out on unwelded prop geometry?) cannot be asked of
+    # hand-built input.
+    game/tests/prop_lod_report_tests.cpp
+    # The prop triangle-LOD producer. CPU only -- its fixture is a hand-built
+    # flat-shaded grid, which reproduces the shipped props' pathology without
+    # opening one. Its sources are compiled in directly because they belong to
+    # the viewer app's list, not badlands_game_lib.
+    game/tests/prop_lod_model_tests.cpp
+    src/game/visual/prop_lod_model.cpp
+    src/game/visual/instanced_lod_model.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_geometry_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
 )
-target_link_libraries(badlands_geometry_tests PRIVATE badlands_engine badlands_game_lib)
+target_link_libraries(badlands_geometry_tests PRIVATE badlands_engine badlands_game_lib badlands_usd_lib)
 if(APPLE)
     target_link_options(badlands_geometry_tests PRIVATE "-Wl,-ld_new")
 endif()
@@ -984,6 +1004,10 @@ add_executable(badlands_tree_tests
     game/tests/foliage_cell_cull_tests.cpp
     # Bounding box -> spacing circle, likewise header-only and GPU-free.
     game/tests/crown_bounds_tests.cpp
+    # The screen-space LOD ladder: pure math over a model's size and triangle
+    # count, so its structural guarantees (ascending cutoffs, falling budgets,
+    # room for the impostor) are pinned with no device.
+    game/tests/lod_screen_space_tests.cpp
     # The impostor's hemi-octahedral view parameterization: shared by the baker
     # and the material, so it is pinned where neither needs a device.
     game/tests/octahedral_tests.cpp
@@ -1022,7 +1046,7 @@ add_test(NAME badlands_tree_tests COMMAND badlands_tree_tests WORKING_DIRECTORY 
 # badlands_game_lib (neither is a member of that library -- see
 # badlands_app_sources_viewer). Phase 5 extends this suite to exercise
 # TreeField/BuildTreeField (voxel-crown instanced field + field shadows), so
-# also compiles src/game/visual/tree_field.cpp directly for the same reason
+# also compiles the instanced-LOD sources directly for the same reason
 # (also only a member of badlands_app_sources_viewer, not badlands_game_lib).
 add_executable(badlands_tree_field_gpu_tests
     game/tests/tree_field_gpu_tests.cpp
@@ -1039,7 +1063,9 @@ add_executable(badlands_tree_field_gpu_tests
     src/game/geometry/branch_junction.cpp
     src/game/geometry/leaf_texture.cpp
     src/game/geometry/leaf_voxelizer.cpp
-    src/game/visual/tree_field.cpp
+    src/game/visual/instanced_lod_model.cpp
+    src/game/visual/instanced_lod_field.cpp
+    src/game/visual/tree_lod_model.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_tree_field_gpu_tests PRIVATE
@@ -1100,6 +1126,25 @@ if(APPLE)
     target_link_options(badlands_usd_tests PRIVATE "-Wl,-ld_new")
 endif()
 add_test(NAME badlands_usd_tests COMMAND badlands_usd_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_material_requirements_tests: Catch2 suite for the material
+# texture-slot registry (engine/rendering/material/material_requirements.cpp).
+# Pure CPU — the registry's ctor only fills a map. Exists because a slot-name
+# mismatch between the registry and a caller's InstanceParams override is
+# SILENT (StandardMaterialFactory matches by exact string, then falls through
+# to the slot default), so the registered names have to be pinned.
+add_executable(badlands_material_requirements_tests
+    src/engine/tests/material_requirements_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_material_requirements_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_link_libraries(badlands_material_requirements_tests PRIVATE badlands_engine)
+if(APPLE)
+    target_link_options(badlands_material_requirements_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_material_requirements_tests COMMAND badlands_material_requirements_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_decal_math_tests: Catch2 suite for the projected-decal math
 # (engine/rendering/decal_math.hpp) — the CPU mirror of

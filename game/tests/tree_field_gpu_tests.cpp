@@ -69,7 +69,8 @@
 #include "game/geometry/tree_generator.hpp"
 #include "game/geometry/tree_options.hpp"
 #include "game/visual/foliage_voxel_config.hpp"
-#include "game/visual/tree_field.hpp"  // Phase 5 field tests
+#include "game/visual/instanced_lod_field.hpp"  // Phase 5 field tests
+#include "game/visual/tree_lod_model.hpp"
 
 using namespace badlands;
 
@@ -358,7 +359,7 @@ constexpr std::array<float, kFieldVoxelWorldSizes.size() - 1>
 // callers to place an instance / compute its world-space bounds the same way
 // RebuildScene does.
 struct OakField {
-  std::unique_ptr<TreeField> tf;
+  std::unique_ptr<InstancedLodField> tf;
   float s = 1.0f;
 };
 
@@ -384,21 +385,29 @@ OakField BuildOakField(
   // Assembled by hand rather than via BuildTreeFieldModel: these tests pick
   // their own voxel cell sizes and thresholds (kFieldVoxelWorldSizes) so they
   // can pin specific LOD behaviour, including the deliberately-empty crown in
-  // the test further down.
-  TreeFieldModel model;
-  model.options = oak;
-  model.bark_lod0 = std::move(bark);
-  model.leaf_lod_meshes.assign(
-      std::make_move_iterator(leaf_lod_meshes.begin()),
-      std::make_move_iterator(leaf_lod_meshes.end()));
-  model.lod_thresholds.assign(lod_thresholds.begin(), lod_thresholds.end());
+  // the test further down. The MATERIALS still come from the shipping producer
+  // (TreeSubmeshMaterials), so only the LOD chain is bespoke.
+  //
+  // SimplifyBarkForVoxelLod is applied here because the producer, not the field
+  // builder, now owns that policy -- BuildInstancedLodField uploads levels
+  // verbatim. Skipping it would silently give the coarse levels full-detail
+  // bark and change what these tests measure.
+  InstancedLodModel model;
+  model.submesh_materials = TreeSubmeshMaterials(oak);
   model.native_to_world_scale = s;
+  for (size_t lod = 0; lod < leaf_lod_meshes.size(); ++lod) {
+    TexturedMeshResult lod_bark = bark;
+    SimplifyBarkForVoxelLod(lod_bark.mesh, lod);
+    model.levels.push_back(
+        {std::move(lod_bark), std::move(leaf_lod_meshes[lod])});
+  }
+  model.thresholds.assign(lod_thresholds.begin(), lod_thresholds.end());
 
-  const std::array<TreeFieldModel, 1> models{std::move(model)};
+  const std::array<InstancedLodModel, 1> models{std::move(model)};
 
   OakField result;
   result.s = s;
-  result.tf = BuildTreeField(g.device, g.queue, *g.gen, models, capacity);
+  result.tf = BuildInstancedLodField(g.device, g.queue, *g.gen, models, capacity);
   REQUIRE(result.tf != nullptr);
   return result;
 }
@@ -411,7 +420,9 @@ glm::mat4 OakInstanceTransform(const OakField& of) {
              glm::mat4(1.0f),
              glm::vec3(
                  0.0f,
-                 -of.tf->model_bounds[0].bark_local_bounds.min.y * of.s, 0.0f)) *
+                 -of.tf->model_bounds[0].submesh_bounds[kTreeBarkSubmesh].min.y *
+                     of.s,
+                 0.0f)) *
         glm::scale(glm::mat4(1.0f), glm::vec3(of.s));
 }
 
@@ -499,13 +510,13 @@ TEST_CASE("TreeField (voxel leaves): HasPass(kDeferred) && HasPass(kShadow), "
   REQUIRE(of.tf->field->IsValid());
   CHECK(of.tf->field->HasPass(InstancedMeshField::PassKind::kDeferred));
   CHECK(of.tf->field->HasPass(InstancedMeshField::PassKind::kShadow));
-  // lod_buffers is indexed [model][lod]: one model here, whose RUNTIME LOD
-  // count is however many crown meshes it was built with -- the foliage
-  // default, kFoliageVoxelWorldSizes' whole L0..L3 chain -- NOT the engine's
-  // kMaxLods cap.
-  REQUIRE(of.tf->lod_buffers.size() == 1);
+  // buffers is indexed [model][lod][submesh]: one model here, whose RUNTIME
+  // LOD count is however many levels it was built with -- the foliage default,
+  // kFoliageVoxelWorldSizes' whole L0..L3 chain -- NOT the engine's kMaxLods
+  // cap.
+  REQUIRE(of.tf->buffers.size() == 1);
   CHECK(of.tf->model_count() == 1);
-  CHECK(of.tf->lod_buffers[0].size() == kFoliageVoxelWorldSizes.size());
+  CHECK(of.tf->buffers[0].size() == kFoliageVoxelWorldSizes.size());
   CHECK(kFoliageVoxelWorldSizes.size() < GpuInstanceRenderer::kMaxLods);
 
   const glm::mat4 xf = OakInstanceTransform(of);
@@ -725,24 +736,24 @@ TEST_CASE("TreeField with N models: each instance draws ITS model's mesh",
 
   constexpr float kBushHeight = 1.5f;
   constexpr float kPineHeight = 25.0f;
-  const std::array<TreeFieldModel, 2> models{
+  const std::array<InstancedLodModel, 2> models{
       BuildTreeFieldModel(*bush, kBushHeight),
       BuildTreeFieldModel(*pine, kPineHeight)};
 
-  std::unique_ptr<TreeField> tf =
-      BuildTreeField(g.device, g.queue, *g.gen, models, /*capacity=*/2);
+  std::unique_ptr<InstancedLodField> tf =
+      BuildInstancedLodField(g.device, g.queue, *g.gen, models, /*capacity=*/2);
   REQUIRE(tf != nullptr);
   REQUIRE(tf->field->IsValid());
   REQUIRE(tf->model_count() == 2);
-  CHECK(tf->lod_buffers.size() == 2);
-  CHECK(tf->lod_buffers[0].size() == kFoliageVoxelWorldSizes.size());
-  CHECK(tf->lod_buffers[1].size() == kFoliageVoxelWorldSizes.size());
+  CHECK(tf->buffers.size() == 2);
+  CHECK(tf->buffers[0].size() == kFoliageVoxelWorldSizes.size());
+  CHECK(tf->buffers[1].size() == kFoliageVoxelWorldSizes.size());
 
   // Per-model LOD retargeting: the taller model must switch LOD further out,
   // because LOD is a screen-space budget (see FoliageLodThresholdsForHeight).
-  REQUIRE(models[0].lod_thresholds.size() == models[1].lod_thresholds.size());
-  for (size_t i = 0; i < models[0].lod_thresholds.size(); ++i) {
-    CHECK(models[1].lod_thresholds[i] > models[0].lod_thresholds[i]);
+  REQUIRE(models[0].thresholds.size() == models[1].thresholds.size());
+  for (size_t i = 0; i < models[0].thresholds.size(); ++i) {
+    CHECK(models[1].thresholds[i] > models[0].thresholds[i]);
   }
 
   // One instance of each, side by side: model 0 on the left (-X), model 1 on
@@ -751,11 +762,12 @@ TEST_CASE("TreeField with N models: each instance draws ITS model's mesh",
   std::array<GpuInstanceRenderer::InstanceInput, 2> instances{};
   for (uint32_t m = 0; m < 2; ++m) {
     const float s = tf->native_to_world_scale[m];
-    const TreeModelBounds& b = tf->model_bounds[m];
+    const LodModelBounds& b = tf->model_bounds[m];
     const float x = (m == 0) ? -kOffsetX : kOffsetX;
     const glm::mat4 xf =
         glm::translate(glm::mat4(1.0f),
-                       glm::vec3(x, -b.bark_local_bounds.min.y * s, 0.0f)) *
+                       glm::vec3(x, -b.submesh_bounds[kTreeBarkSubmesh].min.y * s,
+                                 0.0f)) *
         glm::scale(glm::mat4(1.0f), glm::vec3(s));
     const Aabb world = b.Combined().TransformedBy(xf);
     const glm::vec3 center = world.Center();
@@ -819,8 +831,8 @@ TEST_CASE("TreeField with N models: each instance draws ITS model's mesh",
   CHECK(right_span > left_span * 3);
 }
 
-TEST_CASE("TreeField (voxel leaves): an empty leaf-LOD mesh logs a warning "
-          "naming the LOD, and the field still builds",
+TEST_CASE("InstancedLodField: an empty submesh at one LOD logs a warning "
+          "naming it, and the field still builds",
           "[tree_field][gpu]") {
   TestGpu& g = GetTestGpu();
 
@@ -848,18 +860,20 @@ TEST_CASE("TreeField (voxel leaves): an empty leaf-LOD mesh logs a warning "
   const std::vector<spdlog::sink_ptr> saved_sinks = logger->sinks();
   logger->sinks() = {ring_sink};
 
-  TreeFieldModel model;
-  model.options = oak;
-  model.bark_lod0 = std::move(bark);
-  model.leaf_lod_meshes.assign(
-      std::make_move_iterator(leaf_lod_meshes.begin()),
-      std::make_move_iterator(leaf_lod_meshes.end()));
-  model.lod_thresholds.assign(kFieldLodThresholds.begin(),
-                              kFieldLodThresholds.end());
-  const std::array<TreeFieldModel, 1> models{std::move(model)};
+  InstancedLodModel model;
+  model.submesh_materials = TreeSubmeshMaterials(oak);
+  for (size_t lod = 0; lod < leaf_lod_meshes.size(); ++lod) {
+    TexturedMeshResult lod_bark = bark;
+    SimplifyBarkForVoxelLod(lod_bark.mesh, lod);
+    model.levels.push_back(
+        {std::move(lod_bark), std::move(leaf_lod_meshes[lod])});
+  }
+  model.thresholds.assign(kFieldLodThresholds.begin(),
+                          kFieldLodThresholds.end());
+  const std::array<InstancedLodModel, 1> models{std::move(model)};
 
-  std::unique_ptr<TreeField> field =
-      BuildTreeField(g.device, g.queue, *g.gen, models, /*capacity=*/1);
+  std::unique_ptr<InstancedLodField> field =
+      BuildInstancedLodField(g.device, g.queue, *g.gen, models, /*capacity=*/1);
 
   const std::vector<std::string> messages = ring_sink->last_formatted();
   logger->sinks() = saved_sinks;  // restore before any assertion below
@@ -870,10 +884,27 @@ TEST_CASE("TreeField (voxel leaves): an empty leaf-LOD mesh logs a warning "
   std::string joined;
   for (const std::string& m : messages) joined += m + "\n";
   INFO("captured log lines:\n" << joined);
+  // Matches "lod 1" and "submesh 1" rather than a bare "1": every log line
+  // carries a timestamp, so the looser match this replaces would have passed
+  // on a warning that named the wrong level -- or on an unrelated warning.
+  //
+  // The wording no longer says "leaf". It cannot: BuildInstancedLodField has
+  // no idea what a leaf is, which is the point of the type it now builds from.
+  // What this test pins is unchanged -- an empty submesh at ONE level, while
+  // its neighbours have geometry, is warned about and names the level.
   const bool found =
       std::any_of(messages.begin(), messages.end(), [](const std::string& m) {
-        return m.find("empty leaf") != std::string::npos &&
-               m.find("1") != std::string::npos;
+        return m.find("is empty") != std::string::npos &&
+               m.find("lod 1") != std::string::npos &&
+               m.find("submesh 1") != std::string::npos;
       });
   CHECK(found);
+
+  // ...and does NOT warn about the levels that are fine.
+  const bool spurious =
+      std::any_of(messages.begin(), messages.end(), [](const std::string& m) {
+        return m.find("is empty") != std::string::npos &&
+               m.find("lod 1") == std::string::npos;
+      });
+  CHECK_FALSE(spurious);
 }

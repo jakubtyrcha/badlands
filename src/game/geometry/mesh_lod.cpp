@@ -76,6 +76,46 @@ SimplifiedMesh CompactVertices(std::vector<float> vertices,
 
 }  // namespace
 
+SimplifiedMesh WeldMeshByPrefix(const std::vector<float>& vertices,
+                                 size_t floats_per_vertex,
+                                 const std::vector<uint32_t>& indices,
+                                 size_t compare_floats) {
+  const size_t vertex_count = vertices.size() / floats_per_vertex;
+  const size_t prefix = std::min(compare_floats, floats_per_vertex);
+  if (vertex_count == 0 || prefix == 0 || indices.empty()) {
+    return SimplifiedMesh{vertices, indices,
+                           static_cast<uint32_t>(vertex_count)};
+  }
+
+  // Remap over a temporary PREFIX-ONLY stream rather than the full vertex.
+  // meshopt_generateVertexRemap compares a contiguous byte range from each
+  // vertex's start, so a packed prefix buffer is exactly the comparison we
+  // want and needs no separate API.
+  std::vector<float> prefix_stream(vertex_count * prefix);
+  for (size_t v = 0; v < vertex_count; ++v) {
+    std::copy_n(vertices.begin() + static_cast<long>(v * floats_per_vertex),
+                prefix,
+                prefix_stream.begin() + static_cast<long>(v * prefix));
+  }
+
+  std::vector<uint32_t> remap(vertex_count);
+  const size_t welded = meshopt_generateVertexRemap(
+      remap.data(), indices.data(), indices.size(), prefix_stream.data(),
+      vertex_count, prefix * sizeof(float));
+
+  SimplifiedMesh out;
+  // Remap the FULL vertices (not the prefix stream): the survivor keeps its
+  // whole vertex, and the caller regenerates whatever lay past the prefix.
+  out.vertices.resize(welded * floats_per_vertex);
+  meshopt_remapVertexBuffer(out.vertices.data(), vertices.data(), vertex_count,
+                             floats_per_vertex * sizeof(float), remap.data());
+  out.indices.resize(indices.size());
+  meshopt_remapIndexBuffer(out.indices.data(), indices.data(), indices.size(),
+                            remap.data());
+  out.vertex_count = static_cast<uint32_t>(welded);
+  return out;
+}
+
 SimplifiedMesh SimplifyMesh(const std::vector<float>& vertices,
                              size_t floats_per_vertex,
                              const std::vector<uint32_t>& indices,

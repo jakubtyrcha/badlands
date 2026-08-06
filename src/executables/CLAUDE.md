@@ -32,7 +32,10 @@ Run from the repo root — `shaders/` and `assets/` resolve relative to cwd.
 ./build/badlands_game --record frames/       # headless: render a frame sequence
 scripts/screenshot.sh badlands_viewer /tmp/t.png --generator 1 --lod 5
 ```
-- `badlands_viewer --lod`: 0 = original cards (now deferred alpha-cutout, not forward), 1–3 = voxel LODs L0..L2, **4 = Impostor** (the baked octahedral billboard, which took over the slot voxel L3 used to hold), 5 = Multi (instanced field). Multi drives the same chain the game does, impostor included: LOD count is per-model and runtime (`GpuInstanceRenderer::ModelLod`), capped by the compile-time `kMaxLods` (8). Voxel L3 is still BUILT (the field selects it between 70 and 130 preview metres) but is no longer reachable from the viewer's manual switch.
+- **`--lod` means different things for a tree and for a prop, and a prop's chain length is not a constant.**
+  - **Trees:** 0 = original cards (deferred alpha-cutout, not forward), 1–3 = voxel LODs L0..L2, **4 = Impostor** (the baked octahedral billboard, which took over the slot voxel L3 used to hold), 5 = Multi (instanced field). Voxel L3 is still BUILT (the field selects it between 70 and 130 preview metres) but is no longer reachable from the manual switch.
+  - **Props:** 0 = source mesh, 1..N-1 = triangle LODs, N = Impostor, N+1 = Multi — where **N is derived per model** from its size and triangle count (`src/game/visual/lod_screen_space.hpp`), so boulder_01 gets 4 mesh levels and the war hammer 2. The UI builds its radio list from the model; `RebuildScene` clamps `lod_level_` against that model's own maximum, and a generator change re-clamps.
+  - Multi drives the same chain the game would, impostor included: LOD count is per-model and runtime (`GpuInstanceRenderer::ModelLod`), capped by the compile-time `kMaxLods` (8).
 - `badlands_game` reads `USE_BLOCKOUT_MODE` (any non-empty value) to render greybox proxies instead of detailed PBR materials.
 
 ## Debug overlays are shared, and the buffer belongs to the host
@@ -48,6 +51,7 @@ scripts/screenshot.sh badlands_viewer /tmp/c.png --character --clip walk --anim-
 ```
 - **`ModelViewerView`'s generator list is: sphere, then `TreeCatalog()`, then one entry per prop** discovered under `assets/models/*/*.usdc` and **sorted by name** — `--generator <n>` indexes it, so an unsorted order would change which model a headless screenshot captures. The `.usdc` parses lazily inside `generate` (7 MB / 100k tris each); materials resolve eagerly via the `MaterialLibrary` cache.
 - **A prop's prims are merged into ONE mesh** (treasure_chest is 5, rock_moss_set_01 is 6, all sharing one pack). That merge is a viewer presentation choice — `BuildImportedModels` still returns the list.
+- **The prop's LOD chain is cached per generator (`prop_preview_`), not rebuilt per LOD click.** Parsing a `.usdc` and welding + decimating it is ~a second, and `RebuildScene` runs on every radio change.
 - **The character viewer needs no `Sim`.** It drives `src/engine/animation/` directly, which is the separation that layer exists to keep — the runtime knows nothing about EnTT, characters or badlands.
 - The shipped Quaternius rig is 53 joints and is **grounded at y=0** (joint origins span y=[0.000, 1.513]), so a character placed at a terrain height needs no vertical offset.
 

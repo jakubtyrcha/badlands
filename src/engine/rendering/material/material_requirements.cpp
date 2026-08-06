@@ -96,6 +96,42 @@ MaterialRequirementsRegistry::MaterialRequirementsRegistry() {
   RegisterMaterial("standard_forward", standard_forward_reqs,
                    standard_forward_reqs);
 
+  // instanced_gbuffer.wesl - the instanced fork of normalmapped (see that
+  // shader's header comment), with a byte-identical group-0 texture layout:
+  // albedo@1 / sampler@2 / normal@3 / arm@4.
+  //
+  // Registered rather than left to DeriveRequirementsFromReflection for two
+  // reasons. The names: reflection derives "tex_1"/"tex_3"/"tex_4", so every
+  // caller wanting to bind a PBR pack had to know binding indices instead of
+  // slot names -- a trap that cost tree_field.cpp a 16-line comment explaining
+  // why the obvious "albedo"/"normal"/"arm" silently no-op'd. And the
+  // DEFAULTS: reflection defaults every slot to "white", but a white normal
+  // map decodes to normalize(1,1,1) after *2-1, a ~54 degree tilt rather than
+  // a flat normal, so an instanced material that binds no normal map was
+  // silently shading wrong. flat_normal below is what that slot has always
+  // needed.
+  //
+  // Same reqs for both geometry modes: kInstancedMesh maps to the _flat
+  // variant (see MakeKey), and its slots are all texture_2d.
+  MaterialRequirements instanced_gbuffer_reqs{
+      .shader_name = "instanced_gbuffer",
+      .textures = {
+          {.slot_name = "albedo",
+           .texture_binding = 1,
+           .sampler_binding = 2,
+           .default_texture = "white"},
+          {.slot_name = "normal",
+           .texture_binding = 3,
+           .sampler_binding = 2,
+           .default_texture = "flat_normal"},
+          {.slot_name = "arm",
+           .texture_binding = 4,
+           .sampler_binding = 2,
+           .default_texture = "white"},
+      }};
+  RegisterMaterial("instanced_gbuffer", instanced_gbuffer_reqs,
+                   instanced_gbuffer_reqs);
+
   // terrain_blend.wesl - three texture_2d_arrays (albedo / normal / ARM) whose
   // layers are blended per-vertex. All three share one sampler binding (2), the
   // same way normalmapped's three 2D slots do.
