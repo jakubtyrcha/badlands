@@ -72,6 +72,7 @@ struct GizmoFrame {
 //   0.00 .. 0.60   Placement: move axes
 //   0.24 .. 0.50   Placement: move plane patches (off-axis, so no conflict)
 //   0.70 .. 1.00   Shape: scale axes
+//   1.15           Placement: rotation rings (a radius, not a range)
 //
 // The gap between the move and scale axis bands is deliberate: they lie on the
 // SAME three lines when coalesced, so without it a sloppy grab near 0.6 he
@@ -81,8 +82,11 @@ inline constexpr float kMoveAxisShaftFrac  = 0.55f;  // drawn shaft end, and whe
 inline constexpr float kScaleAxisInnerFrac = 0.70f;
 inline constexpr float kScaleAxisShaftFrac = 0.94f;  // drawn shaft end, and where its box tip sits
 inline constexpr float kScaleAxisOuterFrac = 1.00f;  // pick clamp
+inline constexpr float kRotateRingFrac     = 1.15f;  // ring radius, drawn and picked
 static_assert(kMoveAxisOuterFrac < kScaleAxisInnerFrac,
               "the move and scale axis bands share three lines and must not overlap");
+static_assert(kScaleAxisOuterFrac < kRotateRingFrac,
+              "the rings must sit outboard of every axis, or a ring grab could land on a shaft");
 static_assert(kMoveAxisShaftFrac <= kMoveAxisOuterFrac &&
                   kScaleAxisShaftFrac <= kScaleAxisOuterFrac,
               "a drawn shaft must stay inside its own pickable band (drawn = hit)");
@@ -231,6 +235,54 @@ GizmoHit pick_gizmos(const GizmoFrame& placement, const GizmoFrame& shape, const
 inline constexpr float kPivotHoldSeconds = 0.25f;
 inline constexpr float kPivotFadeSeconds = 0.35f;
 float pivot_marker_alpha(float seconds_since_activity);
+
+// --- rotation rings --------------------------------------------------------
+//
+// One ring per frame axis, at kRotateRingFrac * he, in the plane perpendicular
+// to that axis. Placement only.
+
+// Grab tolerance for a ring, in view points. Between Move's 8 and Scale's 14:
+// a ring is a long target (you can grab it anywhere around its circumference)
+// but a thin one, and it is the outermost thing on the gizmo, so a generous
+// tolerance here starts eating into empty space that should drive the camera.
+inline constexpr float kRotateRingPickTolerancePts = 10.0f;
+
+// A ring seen nearly EDGE-ON is unusable and so is made ungrabbable, the same
+// bargain kAxisViewAlignLimit strikes for an end-on axis -- but the geometry is
+// inverted, hence a minimum rather than a maximum. Edge-on means the ray lies
+// in the ring's plane, i.e. |dot(ray_dir, axis)| near zero, where ray_plane's
+// intersection runs away to infinity and the angle the drag reads from it is
+// dominated by cursor noise. ray_plane's own 1e-6 guard is far too permissive
+// to catch that.
+inline constexpr float kRotateRingViewAlignMin = 0.08f; // ~4.6 degrees off edge-on
+
+// The axis a ring turns the node about: RingU -> u, RingV -> v, RingN -> n.
+// The ring itself is drawn and picked in the plane perpendicular to it.
+bool gizmo_handle_is_ring(GizmoHandle handle);
+simd_float3 gizmo_ring_axis(const GizmoFrame& frame, GizmoHandle handle);
+
+// Where a ray meets a ring's circle, as a unit direction from the frame origin
+// in the ring's plane -- the quantity the rotation drag reads its angle from,
+// captured at the press and recomputed on every update.
+//
+// nullopt when the ring is too close to edge-on (kRotateRingViewAlignMin), when
+// ray_plane finds nothing, or when the intersection lands on the origin itself
+// (where the direction is undefined). Callers keep the last rotation, mirroring
+// how the move and scale drags treat their own singular cases.
+std::optional<simd_float3> ring_drag_dir(const Ray& ray, const GizmoFrame& frame,
+                                          GizmoHandle handle);
+
+// Signed angle from `from` to `to` about `axis`, in (-pi, pi]. Both are unit
+// vectors in the plane perpendicular to `axis` (ring_drag_dir's output), so
+// cross(from, to) is parallel to axis and its signed length gives the sine.
+//
+// Taken about a KNOWN axis rather than as a shortest-arc quaternion between the
+// two vectors: the general [dot, cross] form degenerates at exactly
+// antiparallel, where the cross product vanishes and the axis of rotation
+// becomes undefined. Here the axis is known a priori, so this stays
+// well-conditioned right through +-pi and the rotation can never drift off the
+// ring the user grabbed.
+float signed_angle_about(simd_float3 from, simd_float3 to, simd_float3 axis);
 
 // Handle -> frame-vector mapping shared by the drag solver and rendering.
 // axis_dir: the pull direction of an axis handle. plane_normal: the drag

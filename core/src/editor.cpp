@@ -56,8 +56,10 @@ struct Editor::Impl {
         GizmoFrame frame;               // frozen at beginDrag for the whole gesture
         float start_axis_s = 0.0f;      // axis handles: the axis parameter at mouse-down
         float start_y = 0.0f;           // uniform scale: press position, in view points
-        simd_float3 start_pos, start_hit, start_snap_point;
+        simd_float3 start_pos, start_hit;
         simd_float3 start_scale;        // scale drags: the node's scale at mouse-down
+        simd_float3 start_ring_dir{};   // ring handles: the grabbed direction, in the ring's plane
+        simd_quatf start_rotation = simd_quaternion(0.f, 0.f, 0.f, 1.f);
     } drag;
 
     // Camera gesture. `start_controller` is the controller as it stood once the
@@ -494,6 +496,13 @@ bool Editor::beginDrag(float x, float y) {
         // The uniform handle needs no ray state: it is a screen-space vertical
         // drag, captured via start_y below.
         impl_->drag.start_scale = node->scale;
+    } else if (gizmo_handle_is_ring(handle)) {
+        const std::optional<simd_float3> dir = ring_drag_dir(ray, frame, handle);
+        if (!dir) {
+            return false; // edge-on or degenerate: the solver has no angle to offer
+        }
+        impl_->drag.start_ring_dir = *dir;
+        impl_->drag.start_rotation = node->rotation;
     } else if (gizmo_handle_is_axis(handle)) {
         const std::optional<float> s = ray_axis_param(ray, frame.origin, gizmo_axis_dir(frame, handle));
         if (!s) {
@@ -513,7 +522,6 @@ bool Editor::beginDrag(float x, float y) {
     impl_->drag.handle = handle;
     impl_->drag.start_y = y;
     impl_->drag.start_pos = node->position;
-    impl_->drag.start_snap_point = node->snap_point;
     impl_->drag.node_id = node->id;
     impl_->drag.active = true;
     return true;
@@ -568,6 +576,38 @@ void Editor::updateDrag(float x, float y) {
         return;
     }
 
+    if (gizmo_handle_is_ring(impl_->drag.handle)) {
+        const std::optional<simd_float3> dir =
+            ring_drag_dir(ray, impl_->drag.frame, impl_->drag.handle);
+        if (!dir) {
+            return; // edge-on or degenerate: keep the last rotation
+        }
+        const simd_float3 axis = gizmo_ring_axis(impl_->drag.frame, impl_->drag.handle);
+        // Cumulative from the press, like every other gesture here: the angle
+        // is measured from the direction grabbed at mouse-down, so the result
+        // depends only on where the cursor is NOW. No winding state, which
+        // caps one gesture at half a turn -- past +-pi the shortest-path
+        // reading reverses, and a second drag continues the spin. That is the
+        // price of an angle that cannot mis-count a winding on a fast flick.
+        const float theta = signed_angle_about(impl_->drag.start_ring_dir, *dir, axis);
+        const simd_quatf q = simd_quaternion(theta, axis);
+        // Renormalised because pack_scene conjugates rather than inverts, which
+        // is only the same thing for a unit quaternion (see sdf.cpp). This is
+        // the one place rotation is produced, so it is the one place that has
+        // to hold up the precondition.
+        node->rotation = simd_normalize(simd_mul(q, impl_->drag.start_rotation));
+        // Swing the node AROUND the anchor rather than spinning it in place:
+        // for an attached detail the anchor is its contact point, so this is
+        // what keeps it touching the surface. A free node's anchor is its own
+        // centre, making the second term zero -- one formula, both cases.
+        node->position = impl_->drag.frame.origin +
+                         simd_act(q, impl_->drag.start_pos - impl_->drag.frame.origin);
+        // snap_point and snap_normal are deliberately untouched: the surface
+        // did not move, and the contact point is what we just rotated about.
+        impl_->renderer.set_scene_lines_dirty();
+        return;
+    }
+
     simd_float3 delta;
     if (gizmo_handle_is_axis(impl_->drag.handle)) {
         const simd_float3 axis = gizmo_axis_dir(impl_->drag.frame, impl_->drag.handle);
@@ -594,12 +634,16 @@ void Editor::updateDrag(float x, float y) {
     }
 
     node->position = impl_->drag.start_pos + delta;
-    if (node->snapped) {
-        // Full delta, not just the in-plane part: the remembered snap frame
-        // rides rigidly with the node, so an axis-n pull lifts it off its
-        // surface without re-basing the frame mid-gesture (move-gizmo spec).
-        node->snap_point = impl_->drag.start_snap_point + delta;
-    }
+    // snap_point deliberately does NOT follow. The attachment point is a fact
+    // about the surface the detail was placed on, not about where the detail
+    // has since been dragged to -- so pulling a node along its normal leaves
+    // the attachment on the skin and opens a visible offset between the two
+    // gizmos, which is exactly what the tether reports.
+    //
+    // This reverses the move-gizmo spec's rigid-ride ruling, and it has to:
+    // with the node spawning centred ON its snap point, a snap frame that rode
+    // along would keep the two anchors equal forever and the Placement/Shape
+    // split could never be observed at all.
     impl_->renderer.set_scene_lines_dirty();
 }
 
@@ -662,6 +706,15 @@ Vec3f Editor::nodeScale(int32_t nodeId) const {
         return Vec3f{0.0f, 0.0f, 0.0f};
     }
     return Vec3f{node->scale.x, node->scale.y, node->scale.z};
+}
+
+Vec4f Editor::nodeRotation(int32_t nodeId) const {
+    const Node* node = impl_->scene.find(nodeId);
+    if (node == nullptr) {
+        return Vec4f{0.0f, 0.0f, 0.0f, 1.0f}; // identity, not zero: a zero quaternion is not a rotation
+    }
+    const simd_float4 q = node->rotation.vector;
+    return Vec4f{q.x, q.y, q.z, q.w};
 }
 
 } // namespace sq

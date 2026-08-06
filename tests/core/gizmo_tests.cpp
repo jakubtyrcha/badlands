@@ -377,15 +377,26 @@ TEST_CASE("pick_gizmo_handle: plane patches hit at their centers, bounds respect
     CHECK(pick(f, simd_float3{0.8f, 0.3f, 6.0f}, f.origin + c * he * (f.u + f.v)) == GizmoHandle::PlaneUV);
     CHECK(pick(f, simd_float3{0.3f, 5.0f, 4.0f}, f.origin + c * he * (f.u + f.n)) == GizmoHandle::PlaneUN);
     CHECK(pick(f, simd_float3{5.0f, 0.3f, 4.0f}, f.origin + c * he * (f.v + f.n)) == GizmoHandle::PlaneVN);
-    const simd_float3 eye = {0.8f, 0.3f, 6.0f}; // uv-patch / bounds cases below
+    // Bounds cases below: eye on the SAME side of both the x=0 and y=0 planes
+    // as the uv patch (which sits at negative u and v). Those two planes are
+    // where RingU and RingV live, and a ray that crosses one of them can pass
+    // within tolerance of that ring's circle BEFORE reaching the patch -- in
+    // which case the ring is genuinely the nearer handle and correctly wins.
+    // Staying on one side keeps the probe about patch bounds, which is what
+    // this case is for.
+    const simd_float3 eye = {-0.6f, -0.5f, 6.0f};
 
     // Patch bounds, just inside and just outside each edge.
     const float inside = kGizmoPatchInner + 0.02f;
     const float below  = kGizmoPatchInner - 0.02f;
     const float above  = kGizmoPatchOuter + 0.02f;
     CHECK(pick(f, eye, f.origin + inside * he * f.u + inside * he * f.v) == GizmoHandle::PlaneUV);
-    CHECK(pick(f, eye, f.origin + below * he * f.u + c * he * f.v) == GizmoHandle::None);
-    CHECK(pick(f, eye, f.origin + above * he * f.u + c * he * f.v) == GizmoHandle::None);
+    // Outside the patch means NOT the patch -- not necessarily nothing at all.
+    // A ray aimed just inboard of the patch still travels on and can cross a
+    // rotation ring's plane at ring radius, which is a real hit on a real
+    // handle. The claim here is bounds enforcement, so that is what it asserts.
+    CHECK(pick(f, eye, f.origin + below * he * f.u + c * he * f.v) != GizmoHandle::PlaneUV);
+    CHECK(pick(f, eye, f.origin + above * he * f.u + c * he * f.v) != GizmoHandle::PlaneUV);
 
     // Off everything.
     CHECK(pick(f, eye, f.origin + 3.0f * he * f.u + 3.0f * he * f.v) == GizmoHandle::None);

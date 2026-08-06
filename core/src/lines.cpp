@@ -335,6 +335,50 @@ void append_scale_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& 
                               color_for(GizmoHandle::Uniform, kColorGizmoUniform));
 }
 
+void append_rotate_gizmo_rings(std::vector<LineVertex>& out, const GizmoFrame& frame,
+                               GizmoHandle highlighted, simd_float3 eye, float rest_alpha) {
+    const simd_float3 origin = frame.origin;
+    const float radius = kRotateRingFrac * frame.half_extent;
+    const float hw = kGizmoHandleHalfWidthFrac * frame.half_extent;
+
+    auto color_for = [&](GizmoHandle handle, simd_float4 base) {
+        if (handle == highlighted) {
+            return kColorGizmoHot;
+        }
+        base.w = rest_alpha;
+        return base;
+    };
+
+    // Each ring is spanned by the OTHER two frame vectors, taken in an order
+    // that keeps the traversal right-handed about its own axis. Using the frame
+    // directly rather than tangent_basis(axis) matters: these have to be the
+    // same vectors the drag reads its angle in, or the drawn ring and the angle
+    // it produces would disagree about which way is positive.
+    //
+    // Full circles, not just the camera-facing halves. Half-rings are the
+    // denser-looking convention, but they need a near-side test that goes
+    // unstable exactly when a ring is viewed face-on -- every point is then
+    // equidistant from the eye and the visible half flickers around the
+    // circumference. The whole circle costs more lines and no correctness.
+    const struct { simd_float3 e1, e2, axis; simd_float4 color; GizmoHandle handle; } rings[] = {
+        {frame.v, frame.n, frame.u, kColorAxisU, GizmoHandle::RingU},
+        {frame.n, frame.u, frame.v, kColorAxisV, GizmoHandle::RingV},
+        {frame.u, frame.v, frame.n, kColorAxisN, GizmoHandle::RingN},
+    };
+    for (const auto& ring : rings) {
+        const simd_float4 c = color_for(ring.handle, ring.color);
+        simd_float3 prev = origin + radius * ring.e1;
+        for (int i = 1; i <= kRotateRingSegments; ++i) {
+            const float t = 2.0f * static_cast<float>(M_PI) * static_cast<float>(i) /
+                            static_cast<float>(kRotateRingSegments);
+            const simd_float3 p =
+                origin + radius * (std::cos(t) * ring.e1 + std::sin(t) * ring.e2);
+            append_thick_segment(out, prev, p, eye, hw, c);
+            prev = p;
+        }
+    }
+}
+
 void append_anchor_tether(std::vector<LineVertex>& out, simd_float3 anchor, simd_float3 centre,
                           float half_width, simd_float3 eye) {
     append_thick_segment(out, anchor, centre, eye, half_width, kColorAnchorTether);

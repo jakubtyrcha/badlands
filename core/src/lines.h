@@ -182,6 +182,20 @@ void append_move_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& f
 void append_scale_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& frame,
                                 GizmoHandle highlighted, simd_float3 eye, float rest_alpha);
 
+// The Placement gizmo's three rotation rings (TRIANGLE primitives), at
+// kRotateRingFrac * he in the plane perpendicular to each frame axis, coloured
+// like the axis they turn about. Same camera-facing thick-quad expansion and
+// the same rest/hot/dim treatment as the handle sets above.
+//
+// Full circles rather than camera-facing half-rings: a half-ring needs a
+// near-side test that goes unstable exactly when the ring is viewed face-on,
+// where every point is equidistant from the eye and the visible half flickers
+// around the circumference. It also keeps drawn == hit trivially true.
+// 3 rings * kRotateRingSegments segments * 6 verts.
+inline constexpr int kRotateRingSegments = 32;
+void append_rotate_gizmo_rings(std::vector<LineVertex>& out, const GizmoFrame& frame,
+                               GizmoHandle highlighted, simd_float3 eye, float rest_alpha);
+
 // Joins the two gizmos' anchors when they are apart: one thin segment from the
 // node's attachment point to its centre. It says the two handle clusters belong
 // to one node, and shows how far the detail has been lifted off the surface it

@@ -10,6 +10,9 @@
 namespace sq {
 
 struct Vec3f { float x, y, z; };
+// A unit quaternion, xyz imaginary and w real — the same component order
+// simd_quatf::vector uses, so crossing the boundary is a field copy.
+struct Vec4f { float x, y, z, w; };
 
 // Shape/Op cross the interop boundary (spawn() below, and Node::shape/op in
 // core/src/scene.h), so their canonical definitions live here rather than in
@@ -27,7 +30,11 @@ enum class Op    : int32_t { Add = 0, Subtract = 1 };
 // GizmoSlot, which is why picking returns the pair (see GizmoHit).
 enum class GizmoHandle : int32_t {
     None = 0, AxisU = 1, AxisV = 2, AxisN = 3, PlaneUV = 4, PlaneUN = 5, PlaneVN = 6,
-    Uniform = 7
+    Uniform = 7,
+    // Rotation rings, one about each of the frame's axes. Placement only: a
+    // detail swivels against the surface it sits on, which is a fact about
+    // where it is, not about how big it is.
+    RingU = 8, RingV = 9, RingN = 10
 };
 
 // Which of the two manipulators a handle belongs to. A selected node shows
@@ -176,6 +183,7 @@ public:
 
     // node info (tests)
     Vec3f nodeScale(int32_t nodeId) const;          // {0,0,0} for unknown id
+    Vec4f nodeRotation(int32_t nodeId) const;       // identity {0,0,0,1} for unknown id
 
 private:
     Editor();

@@ -324,6 +324,9 @@ void Renderer::set_gizmos(const GizmoFrame& placement, const GizmoFrame& shape, 
     append_move_gizmo_handles(gizmo_handle_verts_, placement,
                               on_placement ? hover.handle : GizmoHandle::None, eye,
                               rest_for(on_placement));
+    append_rotate_gizmo_rings(gizmo_handle_verts_, placement,
+                              on_placement ? hover.handle : GizmoHandle::None, eye,
+                              rest_for(on_placement));
     append_scale_gizmo_handles(gizmo_handle_verts_, shape,
                                on_shape ? hover.handle : GizmoHandle::None, eye,
                                rest_for(on_shape));

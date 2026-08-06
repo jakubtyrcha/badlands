@@ -164,6 +164,65 @@ GizmoHandle pick_gizmo_handle(const GizmoFrame& frame, const Ray& ray,
         return axis->handle;
     }
 
+    // Rings and plane patches both sit off-axis, and a single ray can pass near
+    // one and then the other -- the bands are disjoint in RADIUS from the
+    // origin, which says nothing about what a ray meets on its way through. So
+    // they are gathered as candidates and the NEAREST ALONG THE RAY wins, which
+    // is what "I clicked the thing in front" means. (Axes still beat both
+    // outright, unchanged: they are the thinnest targets on the gizmo.)
+    struct OuterPick { GizmoHandle handle; float t; };
+    std::optional<OuterPick> ring_hit;
+
+    // Rings resolved among THEMSELVES by true 3D distance from the ray to the
+    // ring's CIRCLE, not by where the ray crosses each ring's plane.
+    // The difference is not academic: a ray aimed squarely at one ring crosses
+    // the other two rings' planes as it travels, and can cross one of them at
+    // very nearly ring radius -- so a plane-based test picks a ring the cursor
+    // was nowhere near, and the drag then reads its angle in the wrong plane.
+    // Measuring to the nearest point ON each circle is the same technique
+    // pick_axis_handle uses against a segment, and it makes the grazing ring
+    // lose by the margin it deserves.
+    {
+        struct RingPick { GizmoHandle handle; float dist; float t; };
+        std::optional<RingPick> best_ring;
+        const float radius = kRotateRingFrac * he;
+        const struct { simd_float3 axis; GizmoHandle handle; } rings[] = {
+            {frame.u, GizmoHandle::RingU},
+            {frame.v, GizmoHandle::RingV},
+            {frame.n, GizmoHandle::RingN},
+        };
+        for (const auto& ring : rings) {
+            if (std::fabs(simd_dot(ray.dir, ring.axis)) < kRotateRingViewAlignMin) {
+                continue; // edge-on: undraggable, so ungrabbable
+            }
+            const std::optional<simd_float3> hit = ray_plane(ray, frame.origin, ring.axis);
+            if (!hit) {
+                continue;
+            }
+            const simd_float3 radial = *hit - frame.origin;
+            if (simd_length_squared(radial) < 1e-12f) {
+                continue; // dead centre: no direction to project onto the circle
+            }
+            // Nearest point on the circle to where the ray met the plane, then
+            // that point's distance to the ray -- forward-clamped, exactly as
+            // the axis test does.
+            const simd_float3 on_ring = frame.origin + radius * simd_normalize(radial);
+            const float t = std::fmax(simd_dot(on_ring - ray.origin, ray.dir), 0.0f);
+            const float dist = simd_length(on_ring - (ray.origin + t * ray.dir));
+            const float tol = kRotateRingPickTolerancePts * simd_length(on_ring - ray.origin) *
+                              pts_to_world_at_unit_depth;
+            if (dist > tol) {
+                continue;
+            }
+            if (!best_ring || dist < best_ring->dist) {
+                best_ring = RingPick{ring.handle, dist, t};
+            }
+        }
+        if (best_ring) {
+            ring_hit = OuterPick{best_ring->handle, best_ring->t};
+        }
+    }
+
     struct PlanePick { GizmoHandle handle; float t; };
     std::optional<PlanePick> best_plane;
     const struct { simd_float3 e1, e2, normal; GizmoHandle handle; } planes[] = {
@@ -188,6 +247,14 @@ GizmoHandle pick_gizmo_handle(const GizmoFrame& frame, const Ray& ray,
         if (!best_plane || t < best_plane->t) {
             best_plane = PlanePick{plane.handle, t};
         }
+    }
+
+    // Nearest of the two families along the ray.
+    if (ring_hit && best_plane) {
+        return (ring_hit->t <= best_plane->t) ? ring_hit->handle : best_plane->handle;
+    }
+    if (ring_hit) {
+        return ring_hit->handle;
     }
     return best_plane ? best_plane->handle : GizmoHandle::None;
 }
@@ -228,6 +295,43 @@ float pivot_marker_alpha(float seconds_since_activity) {
         return 0.0f;
     }
     return 1.0f - t * t * (3.0f - 2.0f * t);
+}
+
+bool gizmo_handle_is_ring(GizmoHandle handle) {
+    return handle == GizmoHandle::RingU || handle == GizmoHandle::RingV ||
+           handle == GizmoHandle::RingN;
+}
+
+simd_float3 gizmo_ring_axis(const GizmoFrame& frame, GizmoHandle handle) {
+    switch (handle) {
+        case GizmoHandle::RingU: return frame.u;
+        case GizmoHandle::RingV: return frame.v;
+        default:                 return frame.n;
+    }
+}
+
+std::optional<simd_float3> ring_drag_dir(const Ray& ray, const GizmoFrame& frame,
+                                          GizmoHandle handle) {
+    const simd_float3 axis = gizmo_ring_axis(frame, handle);
+    if (std::fabs(simd_dot(ray.dir, axis)) < kRotateRingViewAlignMin) {
+        return std::nullopt; // edge-on: the intersection runs away and the angle is noise
+    }
+    const std::optional<simd_float3> hit = ray_plane(ray, frame.origin, axis);
+    if (!hit) {
+        return std::nullopt;
+    }
+    const simd_float3 radial = *hit - frame.origin;
+    // Only the DIRECTION matters, not the radius: the drag is an angle, so a
+    // cursor that wanders off the ring's circumference still turns it. The
+    // guard is against the one place direction is undefined -- the centre.
+    if (simd_length_squared(radial) < 1e-12f) {
+        return std::nullopt;
+    }
+    return simd_normalize(radial);
+}
+
+float signed_angle_about(simd_float3 from, simd_float3 to, simd_float3 axis) {
+    return std::atan2(simd_dot(simd_cross(from, to), axis), simd_dot(from, to));
 }
 
 bool gizmo_handle_is_axis(GizmoHandle handle) {
