@@ -35,6 +35,13 @@ static_assert(sizeof(Params) == 16);
 struct BackendTexture {
   TexturePtr texture;
   BindingTablePtr table;
+  // The buffers `table` was built against. A binding table is IMMUTABLE, so
+  // when the ring grows past its block the allocation comes back on a
+  // different buffer and the table has to be rebuilt to name it -- otherwise
+  // the draw reads the primary at offset 0 and renders scrambled geometry with
+  // only a one-shot "ring is undersized" warning to explain it.
+  IBuffer* params_buffer = nullptr;
+  IBuffer* vertex_buffer = nullptr;
 };
 
 struct Backend {
@@ -48,8 +55,9 @@ struct Backend {
   uint32_t fb_height = 0;
 
   // Per-frame, set by AddPass and read inside the pass callback.
-  BufferPtr index_buffer;
-  uint64_t index_capacity = 0;
+  IBuffer* index_buffer = nullptr;   // a slice of the ring, this frame's
+  uint64_t index_offset = 0;
+  IBuffer* vertex_buffer_used = nullptr;
   uint32_t vertex_offset = 0;
   uint32_t params_offset = 0;
   ImDrawData* draw_data = nullptr;
@@ -70,6 +78,40 @@ void DestroyTexture(ImTextureData* tex) {
   tex->SetStatus(ImTextureStatus_Destroyed);
 }
 
+// Builds (or rebuilds) a texture's binding table against specific buffers.
+//
+// The uniform and the vertices ride the ring with DYNAMIC offsets, so a table
+// normally survives every frame even though the bytes it points at move -- that
+// is what the partitioned primary buffer is for. It stops being true the moment
+// the ring GROWS: the allocation lands on a different buffer, and an immutable
+// table cannot follow it. So the buffers are explicit here and the table is
+// rebuilt when they change.
+bool BuildTable(BackendTexture& bt, IBuffer* params_buffer,
+                IBuffer* vertex_buffer) {
+  auto table = g->device->CreateBindingTable(
+      {.render_pipeline = g->pipeline.get(),
+       .entries = {{.slot = kParamsSlot,
+                    .kind = BindingKind::UniformBuffer,
+                    .buffer = params_buffer,
+                    .dynamic_offset = true},
+                   {.slot = kVerticesSlot,
+                    .kind = BindingKind::ReadOnlyStorageBuffer,
+                    .buffer = vertex_buffer,
+                    .dynamic_offset = true},
+                   {.slot = kTextureSlot,
+                    .kind = BindingKind::SampledTexture,
+                    .texture_view = bt.texture->GetDefaultView()},
+                   {.slot = kSamplerSlot,
+                    .kind = BindingKind::Sampler,
+                    .sampler = g->sampler.get()}},
+       .label = "imgui"});
+  if (!table) return false;
+  bt.table = std::move(table);
+  bt.params_buffer = params_buffer;
+  bt.vertex_buffer = vertex_buffer;
+  return true;
+}
+
 // Services one ImGui 1.92 texture request. In practice this runs once, for the
 // font atlas, on the first frame.
 void UpdateTexture(ImTextureData* tex) {
@@ -88,28 +130,7 @@ void UpdateTexture(ImTextureData* tex) {
       IM_DELETE(bt);
       return;
     }
-    // The uniform rides the ring with a DYNAMIC offset, so this table survives
-    // every frame even though the bytes it points at move. That is the whole
-    // reason the allocator partitions one buffer rather than handing out one
-    // per slot.
-    bt->table = g->device->CreateBindingTable(
-        {.render_pipeline = g->pipeline.get(),
-         .entries = {{.slot = kParamsSlot,
-                      .kind = BindingKind::UniformBuffer,
-                      .buffer = g->ring->PrimaryBuffer(),
-                      .dynamic_offset = true},
-                     {.slot = kVerticesSlot,
-                      .kind = BindingKind::ReadOnlyStorageBuffer,
-                      .buffer = g->ring->PrimaryBuffer(),
-                      .dynamic_offset = true},
-                     {.slot = kTextureSlot,
-                      .kind = BindingKind::SampledTexture,
-                      .texture_view = bt->texture->GetDefaultView()},
-                     {.slot = kSamplerSlot,
-                      .kind = BindingKind::Sampler,
-                      .sampler = g->sampler.get()}},
-         .label = "imgui"});
-    if (!bt->table) {
+    if (!BuildTable(*bt, g->ring->PrimaryBuffer(), g->ring->PrimaryBuffer())) {
       IM_DELETE(bt);
       return;
     }
@@ -168,10 +189,17 @@ bool CreateDeviceObjects(const ImGui_ImplRHI_InitInfo& info) {
                                            .label = "imgui"});
   if (!g->sampler) return false;
 
+  // Index too, so the indices get the SAME per-frame slotting the vertices and
+  // the params block already had. A single index buffer rewritten at offset 0
+  // every frame is overwritten while the 2 other in-flight frames are still
+  // reading it -- the exact hazard the ring exists to remove, left in place
+  // because SetIndexBuffer takes a buffer rather than a binding table and the
+  // shape looked different.
   g->ring = FrameAllocator::Create(
-      *info.device, {.block_size = 1024 * 1024,
-                     .usage = BufferUsage::Uniform | BufferUsage::Storage,
-                     .label = "imgui"});
+      *info.device,
+      {.block_size = 1024 * 1024,
+       .usage = BufferUsage::Uniform | BufferUsage::Storage | BufferUsage::Index,
+       .label = "imgui"});
   return g->ring != nullptr;
 }
 
@@ -228,6 +256,12 @@ void ImGui_ImplRHI_Shutdown() {
 
 void ImGui_ImplRHI_NewFrame(uint64_t frame_index) {
   if (g && g->ring) g->ring->BeginFrame(frame_index);
+}
+
+uint64_t ImGui_ImplRHI_LastIndexOffset() { return g ? g->index_offset : 0; }
+IBuffer* ImGui_ImplRHI_LastIndexBuffer() { return g ? g->index_buffer : nullptr; }
+IBuffer* ImGui_ImplRHI_LastVertexBuffer() {
+  return g ? g->vertex_buffer_used : nullptr;
 }
 
 void ImGui_ImplRHI_SetFramebufferSize(uint32_t width, uint32_t height) {
@@ -293,37 +327,49 @@ bool ImGui_ImplRHI_AddPass(ImDrawData* draw_data, graph::RenderGraph& graph,
     return false;
   }
 
-  // The index buffer is NOT ring-allocated: SetIndexBuffer takes a buffer and
-  // an offset, but the ring's usage would have to include Index, and an index
-  // buffer wants its own growth curve anyway. Grown-and-kept, so a steady UI
-  // allocates once.
-  if (g->index_capacity < index_bytes) {
-    const uint64_t want = (index_bytes * 2 + 255) & ~uint64_t(255);
-    g->index_buffer = g->device->CreateBuffer(
-        {.size = want,
-         .usage = BufferUsage::Index | BufferUsage::CopyDst,
-         .label = "imgui_indices"});
-    if (!g->index_buffer) {
-      spdlog::error("imgui/rhi: could not create a {}-byte index buffer", want);
-      g->index_capacity = 0;
-      return false;
-    }
-    g->index_capacity = want;
+  // From the ring, so the indices are per-frame like everything else.
+  auto idx_alloc = g->ring->Write(indices);
+  if (!idx_alloc) {
+    spdlog::error("imgui/rhi: could not allocate {} bytes for {} indices",
+                  index_bytes, draw_data->TotalIdxCount);
+    return false;
   }
-  g->index_buffer->Write(0, indices);
 
   g->vertex_offset = uint32_t(verts->offset);
   g->params_offset = uint32_t(p->offset);
+  g->index_buffer = idx_alloc->buffer;
+  g->index_offset = idx_alloc->offset;
+  g->vertex_buffer_used = verts->buffer;
   g->draw_data = draw_data;
 
-  auto ring = graph.ImportBuffer(g->ring->PrimaryBuffer(),
-                                 ResourceState::Undefined, "imgui_ring");
-  auto idx = graph.ImportBuffer(g->index_buffer.get(),
-                                ResourceState::Undefined, "imgui_indices");
-  if (!ring.IsValid() || !idx.IsValid()) return false;
+  // The buffers the ALLOCATIONS actually landed on, which is the primary until
+  // the ring grows. Every table naming the old pair is rebuilt, and the graph
+  // imports these rather than PrimaryBuffer() -- otherwise a growth block is
+  // never transitioned and the validation layer reports it Undefined.
+  for (ImTextureData* tex : *draw_data->Textures) {
+    auto* bt = static_cast<BackendTexture*>(tex->BackendUserData);
+    if (!bt || !bt->table) continue;
+    if (bt->params_buffer == p->buffer && bt->vertex_buffer == verts->buffer) {
+      continue;
+    }
+    if (!BuildTable(*bt, p->buffer, verts->buffer)) return false;
+  }
 
   auto pass = graph.AddRasterPass("imgui");
-  pass.ColorTarget(target, LoadOp::Load, StoreOp::Store).Reads(ring).Reads(idx);
+  pass.ColorTarget(target, LoadOp::Load, StoreOp::Store);
+  // Deduplicated: all three allocations usually share the primary, and
+  // importing one buffer three times would emit three transitions for it.
+  IBuffer* declared[3] = {nullptr, nullptr, nullptr};
+  size_t declared_n = 0;
+  for (IBuffer* b : {p->buffer, verts->buffer, idx_alloc->buffer}) {
+    if (std::find(declared, declared + declared_n, b) != declared + declared_n) {
+      continue;
+    }
+    declared[declared_n++] = b;
+    auto h = graph.ImportBuffer(b, ResourceState::Undefined, "imgui_ring");
+    if (!h.IsValid()) return false;
+    pass.Reads(h);
+  }
 
   // EVERY TEXTURE THE FRAME SAMPLES, declared. Missing these is not a
   // theoretical gap: the first run of the pixel tests failed on exactly this,
@@ -344,9 +390,10 @@ bool ImGui_ImplRHI_AddPass(ImDrawData* draw_data, graph::RenderGraph& graph,
         ImDrawData* dd = g->draw_data;
         const uint32_t offsets[2] = {g->params_offset, g->vertex_offset};
         ctx.pass->SetPipeline(g->pipeline.get());
-        ctx.pass->SetIndexBuffer(g->index_buffer.get(),
+        ctx.pass->SetIndexBuffer(g->index_buffer,
                                  sizeof(ImDrawIdx) == 2 ? IndexFormat::Uint16
-                                                        : IndexFormat::Uint32);
+                                                        : IndexFormat::Uint32,
+                                 g->index_offset);
 
         const ImVec2 clip_off = dd->DisplayPos;
         const ImVec2 clip_scale = dd->FramebufferScale;

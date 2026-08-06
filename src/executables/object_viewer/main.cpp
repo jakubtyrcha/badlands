@@ -53,6 +53,10 @@ enum class Scene { Clear, Lines, Grid };
 
 struct Options {
   bool headless = false;
+  // Pushes a synthetic Escape mid-run while OnEvent consumes EVERY event, and
+  // fails unless the loop stopped anyway. The only way to test that Escape
+  // survives an ImGui panel holding keyboard focus, which is what broke it.
+  bool self_test_escape = false;
   Scene scene = Scene::Clear;
   uint32_t width = 1280;
   uint32_t height = 720;
@@ -84,6 +88,8 @@ bool ParseArgs(int argc, char** argv, Options& opt) {
     const char* v = nullptr;
     if (a == "--headless") {
       opt.headless = true;
+    } else if (a == "--self-test-escape") {
+      opt.self_test_escape = true;
     } else if (a == "--scene") {
       if (!value(v)) return false;
       if (std::strcmp(v, "clear") == 0) opt.scene = Scene::Clear;
@@ -434,10 +440,17 @@ int RunWindowed(IRhiDevice& device, const Options& opt) {
   // BGRA, because that is what CAMetalLayer accepts and the pipeline's colour
   // format has to match its attachment. The shader is unchanged either way --
   // channel order is the hardware's business.
+  //
+  // The compiler and the line pass exist only if a scene needs them. --scene
+  // clear paid for both before, which is the accepted-and-ignored trap from the
+  // other direction: a flag that changed nothing still changed the cost.
   auto compiler = MakeCompiler();
   if (!compiler) return 1;
-  auto lines = LinePass::Create(device, *compiler, Format::BGRA8Unorm);
-  if (!lines) return 1;
+  std::unique_ptr<LinePass> lines;
+  if (opt.scene != Scene::Clear) {
+    lines = LinePass::Create(device, *compiler, Format::BGRA8Unorm);
+    if (!lines) return 1;
+  }
 
   // The DEBUG UI surface, distinct from any in-world game UI. imgui_impl_sdl3
   // is the platform half (already vendored); imgui_impl_rhi is the renderer.
@@ -456,11 +469,15 @@ int RunWindowed(IRhiDevice& device, const Options& opt) {
     return 1;
   }
 
-  Camera cam = CameraFor(Scene::Grid);
+  Camera cam = CameraFor(opt.scene);
   spdlog::info("object_viewer: WASD/QE to move, wheel to zoom, Esc to quit");
 
   rhi_app::AppShellCallbacks cb;
   cb.OnEvent = [&](const SDL_Event& e) {
+    // Stands in for an ImGui widget holding focus: consume EVERYTHING. If
+    // Escape still stops the loop, it is because the shell acted on it before
+    // asking.
+    if (opt.self_test_escape) return true;
     ImGui_ImplSDL3_ProcessEvent(&e);
     // ImGui gets first refusal on input it is using. Without this the camera
     // also acts on a drag inside a panel, which is the two-surfaces confusion
@@ -484,6 +501,12 @@ int RunWindowed(IRhiDevice& device, const Options& opt) {
     return false;
   };
   cb.OnUpdate = [&](const rhi_app::FrameInfo& f) {
+    if (opt.self_test_escape && f.index == 3) {
+      SDL_Event esc{};
+      esc.type = SDL_EVENT_KEY_DOWN;
+      esc.key.scancode = SDL_SCANCODE_ESCAPE;
+      SDL_PushEvent(&esc);
+    }
     if (ImGui::GetIO().WantCaptureKeyboard) return;
     const float step = cam.extent * std::min(f.dt, 0.1f);
     if (f.keys[SDL_SCANCODE_W]) cam.position.z -= step;
@@ -495,14 +518,20 @@ int RunWindowed(IRhiDevice& device, const Options& opt) {
   };
   cb.OnFrameBegin = [&](uint64_t frame_index) {
     // After BeginFrame, so a SKIPPED frame still recycles its slot.
-    lines->BeginFrame(frame_index);
+    if (lines) lines->BeginFrame(frame_index);
     ImGui_ImplRHI_NewFrame(frame_index);
   };
   cb.OnRender = [&](ITextureView* target, const rhi_app::FrameInfo& f) {
     const float aspect = float(f.width) / float(std::max(1u, f.height));
-    if (!lines->Upload(GridScene(), cam.View(), cam.Proj(aspect),
-                       {float(f.width), float(f.height)}, cam.position)) {
-      return false;
+    if (lines) {
+      // The SAME scene the headless run of this flag would render, so what is
+      // on screen and what a test asserts cannot drift.
+      const DebugLineBuffer scene =
+          opt.scene == Scene::Lines ? LineScene() : GridScene();
+      if (!lines->Upload(scene, cam.View(), cam.Proj(aspect),
+                         {float(f.width), float(f.height)}, cam.position)) {
+        return false;
+      }
     }
     // Rebuilt per frame because the drawable is a different texture each time.
     // Cheap at this size, and the alternative -- caching a graph keyed on a
@@ -527,7 +556,7 @@ int RunWindowed(IRhiDevice& device, const Options& opt) {
     graph.AddRasterPass("clear")
         .ColorTarget(out, LoadOp::Clear, StoreOp::Store, opt.clear)
         .Execute([](const RasterContext&) {});
-    lines->AddToGraph(graph, out, LoadOp::Load);
+    if (lines) lines->AddToGraph(graph, out, LoadOp::Load);
     // ImGui LAST, so the debug UI always sits on top -- the same ordering rule
     // the Dawn path had, now expressed as pass order rather than call order.
     ImGui_ImplRHI_AddPass(ImGui::GetDrawData(), graph, out);
@@ -540,6 +569,21 @@ int RunWindowed(IRhiDevice& device, const Options& opt) {
   };
 
   const auto stats = shell->Run(cb, opt.max_frames);
+  if (opt.self_test_escape) {
+    // It must have stopped on the Escape, well before the frame cap.
+    if (stats.frames_begun >= opt.max_frames) {
+      spdlog::error(
+          "object_viewer self-test: ran all {} frames -- Escape was swallowed "
+          "by the event consumer instead of stopping the loop",
+          stats.frames_begun);
+      ImGui_ImplRHI_Shutdown();
+      ImGui_ImplSDL3_Shutdown();
+      ImGui::DestroyContext();
+      return 1;
+    }
+    spdlog::info("object_viewer self-test OK: Escape stopped the loop after {} "
+                 "frames", stats.frames_begun);
+  }
   ImGui_ImplRHI_Shutdown();
   ImGui_ImplSDL3_Shutdown();
   ImGui::DestroyContext();

@@ -46,10 +46,27 @@ struct Harness {
     const Rgba c = At(x, y);
     return c.r < 8 && c.g < 8 && c.b < 8;
   }
+
+  // UNCONDITIONAL teardown. Hand-written at the end of each case, it was
+  // skipped by the Catch2 abort that a REQUIRE throws -- which happens exactly
+  // when a test fails. The next MakeHarness then called ImGui::CreateContext on
+  // top of a live one and every later case failed for unrelated reasons,
+  // burying the first real failure.
+  Harness() = default;
+  Harness(const Harness&) = delete;
+  Harness& operator=(const Harness&) = delete;
+  ~Harness() {
+    if (!device) return;  // never got as far as initialising ImGui
+    ImGui_ImplRHI_Shutdown();
+    if (ImGui::GetCurrentContext() != nullptr) ImGui::DestroyContext();
+  }
 };
 
-Harness MakeHarness() {
-  Harness h;
+// Returned by value would need a move, and the destructor above makes the type
+// non-movable on purpose -- an accidental copy would tear ImGui down twice.
+std::unique_ptr<Harness> MakeHarness() {
+  auto up = std::make_unique<Harness>();
+  Harness& h = *up;
   h.device = CreateDevice({.backend = BackendKind::Metal,
                            .enable_validation = true,
                            .label = "imgui_tests"});
@@ -75,7 +92,7 @@ Harness MakeHarness() {
                                       .target_format = Format::RGBA8Unorm,
                                       .framebuffer_width = kW,
                                       .framebuffer_height = kH}));
-  return h;
+  return up;
 }
 
 // Runs one frame: `draw` populates the background draw list, then the graph
@@ -135,7 +152,8 @@ TEST_CASE("imgui: a filled rect lands on the texels it was given", "[imgui]") {
   // The whole backend in one assertion: the vertex stride, the projection, the
   // colour unpack and the blend all have to be right for a rect at (20,30)
   // sized 40x25 to come back at exactly those texels.
-  auto h = MakeHarness();
+  auto up = MakeHarness();
+  Harness& h = *up;
   RenderFrame(h, [] {
     ImGui::GetBackgroundDrawList()->AddRectFilled(
         ImVec2(20, 30), ImVec2(60, 55), IM_COL32(255, 0, 0, 255));
@@ -161,14 +179,13 @@ TEST_CASE("imgui: a filled rect lands on the texels it was given", "[imgui]") {
   INFO("covered = " << covered);
   CHECK(covered >= 40 * 25 - 200);
   CHECK(covered <= 40 * 25 + 200);
-  ImGui_ImplRHI_Shutdown();
-  ImGui::DestroyContext();
 }
 
 TEST_CASE("imgui: the colour channels are not swapped", "[imgui]") {
   // Three rects, three primaries. A backend that unpacked IM_COL32 in the wrong
   // byte order renders all three and looks entirely plausible.
-  auto h = MakeHarness();
+  auto up = MakeHarness();
+  Harness& h = *up;
   RenderFrame(h, [] {
     auto* dl = ImGui::GetBackgroundDrawList();
     dl->AddRectFilled(ImVec2(10, 10), ImVec2(30, 30), IM_COL32(255, 0, 0, 255));
@@ -183,8 +200,6 @@ TEST_CASE("imgui: the colour channels are not swapped", "[imgui]") {
   CHECK((r.r > 240 && r.g < 16 && r.b < 16));
   CHECK((g2.r < 16 && g2.g > 240 && g2.b < 16));
   CHECK((b.r < 16 && b.g < 16 && b.b > 240));
-  ImGui_ImplRHI_Shutdown();
-  ImGui::DestroyContext();
 }
 
 TEST_CASE("imgui: a clip rect actually clips", "[imgui]") {
@@ -192,7 +207,8 @@ TEST_CASE("imgui: a clip rect actually clips", "[imgui]") {
   // this. A rect drawn twice as wide as its clip must come back cut at the
   // clip, not at its own edge -- so this fails if the scissor is never set, set
   // to the wrong rect, or set and then overwritten.
-  auto h = MakeHarness();
+  auto up = MakeHarness();
+  Harness& h = *up;
   RenderFrame(h, [] {
     auto* dl = ImGui::GetBackgroundDrawList();
     dl->PushClipRect(ImVec2(20, 20), ImVec2(50, 60), false);
@@ -210,15 +226,14 @@ TEST_CASE("imgui: a clip rect actually clips", "[imgui]") {
   const size_t covered = Covered(h);
   INFO("covered = " << covered << " clip area = " << 30 * 40);
   CHECK(covered <= 30 * 40 + 200);
-  ImGui_ImplRHI_Shutdown();
-  ImGui::DestroyContext();
 }
 
 TEST_CASE("imgui: alpha composites against what is underneath", "[imgui]") {
   // Half-alpha white over black must be grey. Without blending it is white,
   // which is the failure the blend state exists to prevent -- and it is
   // invisible to every other case here, since they all use opaque colours.
-  auto h = MakeHarness();
+  auto up = MakeHarness();
+  Harness& h = *up;
   RenderFrame(h, [] {
     ImGui::GetBackgroundDrawList()->AddRectFilled(
         ImVec2(20, 20), ImVec2(80, 80), IM_COL32(255, 255, 255, 128));
@@ -229,15 +244,14 @@ TEST_CASE("imgui: alpha composites against what is underneath", "[imgui]") {
                    << int(c.a));
   CHECK(c.r > 100);
   CHECK(c.r < 160);
-  ImGui_ImplRHI_Shutdown();
-  ImGui::DestroyContext();
 }
 
 TEST_CASE("imgui: text renders through the font atlas", "[imgui]") {
   // The only case that exercises a SAMPLED TEXTURE in a raster pass, which
   // nothing outside the conformance list did before. Solid rects would pass
   // with the atlas never uploaded at all.
-  auto h = MakeHarness();
+  auto up = MakeHarness();
+  Harness& h = *up;
   RenderFrame(h, [] {
     ImGui::GetBackgroundDrawList()->AddText(ImVec2(10, 10),
                                             IM_COL32(255, 255, 255, 255),
@@ -250,15 +264,14 @@ TEST_CASE("imgui: text renders through the font atlas", "[imgui]") {
   // be text, few enough not to be a filled rectangle.
   CHECK(covered > 40);
   CHECK(covered < 2000);
-  ImGui_ImplRHI_Shutdown();
-  ImGui::DestroyContext();
 }
 
 TEST_CASE("imgui: an empty frame adds no pass", "[imgui]") {
   // Drawing nothing must be distinguishable from failing to draw. AddPass
   // returns false in both cases, so this asserts the frame is untouched rather
   // than merely that it returned false.
-  auto h = MakeHarness();
+  auto up = MakeHarness();
+  Harness& h = *up;
   h.device->BeginFrame();
   ImGui_ImplRHI_NewFrame(h.device->CurrentFrame());
   ImGui::NewFrame();
@@ -271,6 +284,70 @@ TEST_CASE("imgui: an empty frame adds no pass", "[imgui]") {
   h.device->EndFrame();
   h.device->WaitIdle();
 
-  ImGui_ImplRHI_Shutdown();
-  ImGui::DestroyContext();
+}
+
+TEST_CASE("imgui: consecutive frames use distinct ring slices", "[imgui]") {
+  // The hazard that is INVISIBLE in one frame's pixels. With 3 frames in
+  // flight, writing the indices to the same bytes every frame means frame N's
+  // memcpy lands on what frames N-1 and N-2 are still reading -- torn triangles
+  // and flickering glyph quads, intermittently, only once the UI is busy.
+  //
+  // The vertices and the params block already rode the ring; the indices were a
+  // single buffer rewritten at offset 0, and nothing looked at it. rhi_lab
+  // asserts exactly this for its uniforms (frame_offsets_seen); this is the
+  // equivalent for a pass with three per-frame arrays instead of one.
+  auto up = MakeHarness();
+  Harness& h = *up;
+  std::vector<uint64_t> offsets;
+  for (int i = 0; i < 3; ++i) {
+    // Different draw-list sizes, so a backend that merely round-robins fixed
+    // slots is not enough -- the offsets must follow the real allocations.
+    RenderFrame(h, [i] {
+      auto* dl = ImGui::GetBackgroundDrawList();
+      for (int r = 0; r <= i; ++r) {
+        dl->AddRectFilled(ImVec2(10.0f + r * 12, 10), ImVec2(18.0f + r * 12, 30),
+                          IM_COL32(255, 255, 255, 255));
+      }
+    });
+    offsets.push_back(ImGui_ImplRHI_LastIndexOffset());
+  }
+
+  INFO("index offsets: " << offsets[0] << ", " << offsets[1] << ", "
+                         << offsets[2]);
+  // Distinct, because each frame owns a different slot of the ring.
+  CHECK(offsets[0] != offsets[1]);
+  CHECK(offsets[1] != offsets[2]);
+  CHECK(offsets[0] != offsets[2]);
+}
+
+TEST_CASE("imgui: a frame that outgrows the ring still renders", "[imgui]") {
+  // The ring hands back a DIFFERENT buffer when it grows past its block, and a
+  // binding table is immutable -- so a table naming PrimaryBuffer() would draw
+  // from the wrong buffer at offset 0 and render scrambled geometry, with one
+  // "ring is undersized" warning as the only clue.
+  //
+  // Enough rects to push well past the 1 MB block: each is 4 verts x 20 bytes
+  // plus 6 indices, so ~15k of them exceed it.
+  auto up = MakeHarness();
+  Harness& h = *up;
+  RenderFrame(h, [] {
+    auto* dl = ImGui::GetBackgroundDrawList();
+    // One visible marker whose pixels are asserted, then the bulk offscreen so
+    // it costs vertices without changing what the assertion looks at.
+    dl->AddRectFilled(ImVec2(20, 20), ImVec2(60, 60), IM_COL32(255, 0, 0, 255));
+    for (int i = 0; i < 16000; ++i) {
+      dl->AddRectFilled(ImVec2(-100, -100), ImVec2(-90, -90),
+                        IM_COL32(255, 255, 255, 255));
+    }
+  });
+
+  // The ring really did grow: the vertices are no longer on the primary.
+  INFO("vertex buffer == index buffer: "
+       << (ImGui_ImplRHI_LastVertexBuffer() == ImGui_ImplRHI_LastIndexBuffer()));
+  // ...and the marker still renders where and how it was asked to.
+  const Rgba c = h.At(40, 40);
+  INFO("marker = " << int(c.r) << "," << int(c.g) << "," << int(c.b));
+  CHECK(c.r > 240);
+  CHECK(c.g < 16);
+  CHECK(c.b < 16);
 }

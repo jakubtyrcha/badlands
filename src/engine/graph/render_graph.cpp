@@ -90,9 +90,10 @@ ResourceHandle RenderGraph::ImportTexture(ITexture* texture,
   r.name = name.empty() ? texture->GetLabel() : std::string(name);
   r.texture = texture;
   r.state = state;
+  r.entry_state = state;
   // Imported means "somebody else produced this", so a pass may read it
   // without any pass in THIS graph having written it.
-  r.written = true;
+  r.imported = true;
   resources_.push_back(std::move(r));
   return {uint32_t(resources_.size() - 1)};
 }
@@ -107,7 +108,8 @@ ResourceHandle RenderGraph::ImportBuffer(IBuffer* buffer, ResourceState state,
   r.name = name.empty() ? buffer->GetLabel() : std::string(name);
   r.buffer = buffer;
   r.state = state;
-  r.written = true;
+  r.entry_state = state;
+  r.imported = true;
   resources_.push_back(std::move(r));
   return {uint32_t(resources_.size() - 1)};
 }
@@ -118,6 +120,7 @@ ResourceHandle RenderGraph::CreateTexture(const TextureDesc& desc) {
   r.desc = desc;
   r.transient = true;
   r.state = ResourceState::Undefined;
+  r.entry_state = ResourceState::Undefined;
   resources_.push_back(std::move(r));
   return {uint32_t(resources_.size() - 1)};
 }
@@ -133,10 +136,12 @@ ComputePassBuilder RenderGraph::AddComputePass(std::string_view name) {
 }
 
 void RenderGraph::Declare(uint32_t pass, ResourceHandle h, Access access) {
+  // Records the access and NOTHING else. Marking the resource "written" here
+  // made the read-before-write check in Compile order-BLIND: every Declare runs
+  // before Compile, so a pass reading a transient that only a LATER pass writes
+  // passed the one guard that exists for it. Producedness is now decided in
+  // Compile, walking the passes in execution order.
   passes_[pass].accesses.emplace_back(h, access);
-  if (h.IsValid() && h.id < resources_.size() && access != Access::Read) {
-    resources_[h.id].written = true;
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -152,6 +157,14 @@ bool RenderGraph::Compile() {
   // reorder, and a topological sort whose ordering nothing exercises is a
   // sorting bug waiting to happen. What Compile() DOES do is validate the
   // declarations, which is the part that has teeth today.
+  // Which resources are readable at each point in the ORDER. Imported ones
+  // arrive readable; a transient becomes readable only after a pass that writes
+  // it has run.
+  std::vector<bool> produced(resources_.size(), false);
+  for (size_t i = 0; i < resources_.size(); ++i) {
+    produced[i] = resources_[i].imported;
+  }
+
   for (size_t p = 0; p < passes_.size(); ++p) {
     const Pass& pass = passes_[p];
     if (pass.raster && !pass.raster_fn) {
@@ -179,16 +192,23 @@ bool RenderGraph::Compile() {
             pass.name, ToString(access));
         return false;
       }
-      // A read of something nothing produces is the classic graph bug: it
+      // A read of something not yet produced is the classic graph bug: it
       // renders whatever the memory happened to hold, which is usually the
-      // previous frame and occasionally garbage.
-      if (access == Access::Read && !resources_[h.id].written) {
+      // previous frame and occasionally garbage. "Not yet" is the load-bearing
+      // word -- a pass that writes it LATER does not help this pass.
+      if (access == Access::Read && !produced[h.id]) {
         spdlog::error(
-            "graph: pass '{}' reads '{}', which no pass writes and which was "
-            "not imported -- it would read undefined contents",
+            "graph: pass '{}' reads '{}', which nothing has written by this "
+            "point in the order and which was not imported -- it would read "
+            "undefined contents",
             pass.name, resources_[h.id].name);
         return false;
       }
+    }
+    // Marked only AFTER this pass's own reads are checked, so a pass that both
+    // reads and writes one resource still has to have it produced beforehand.
+    for (const auto& [h, access] : pass.accesses) {
+      if (access != Access::Read) produced[h.id] = true;
     }
     order_.push_back(uint32_t(p));
   }
@@ -219,6 +239,13 @@ void RenderGraph::Execute(ICommandEncoder& encoder) {
         "record passes whose declarations were never checked");
     return;
   }
+
+  // Back to the states the graph was handed, so a compiled graph can be
+  // executed more than once. Without this the second Execute sees every
+  // resource already in the state its first pass wants and emits no transitions
+  // at all -- correct on Metal, which tracks hazards itself, and a
+  // use-before-barrier on DX12.
+  for (Resource& r : resources_) r.state = r.entry_state;
 
   for (uint32_t index : order_) {
     Pass& pass = passes_[index];

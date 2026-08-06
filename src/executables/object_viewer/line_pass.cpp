@@ -64,19 +64,30 @@ std::unique_ptr<LinePass> LinePass::Create(IRhiDevice& device,
                .label = "lines"});
   if (!pass->alloc_) return nullptr;
 
-  pass->table_ = device.CreateBindingTable(
-      {.render_pipeline = pass->pipeline_.get(),
+  if (!pass->BuildTable(pass->alloc_->PrimaryBuffer(),
+                        pass->alloc_->PrimaryBuffer())) {
+    return nullptr;
+  }
+  return pass;
+}
+
+bool LinePass::BuildTable(IBuffer* frame_buffer, IBuffer* vertex_buffer) {
+  auto table = device_->CreateBindingTable(
+      {.render_pipeline = pipeline_.get(),
        .entries = {{.slot = kFrameSlot,
                     .kind = BindingKind::UniformBuffer,
-                    .buffer = pass->alloc_->PrimaryBuffer(),
+                    .buffer = frame_buffer,
                     .dynamic_offset = true},
                    {.slot = kVerticesSlot,
                     .kind = BindingKind::ReadOnlyStorageBuffer,
-                    .buffer = pass->alloc_->PrimaryBuffer(),
+                    .buffer = vertex_buffer,
                     .dynamic_offset = true}},
        .label = "lines"});
-  if (!pass->table_) return nullptr;
-  return pass;
+  if (!table) return false;
+  table_ = std::move(table);
+  table_frame_buffer_ = frame_buffer;
+  table_vertex_buffer_ = vertex_buffer;
+  return true;
 }
 
 void LinePass::BeginFrame(uint64_t frame_index) {
@@ -115,7 +126,16 @@ bool LinePass::Upload(const DebugLineBuffer& lines, const glm::mat4& view,
 
   vertex_offset_ = uint32_t(verts->offset);
   frame_offset_ = uint32_t(uniform->offset);
+  vertex_buffer_ = verts->buffer;
+  frame_buffer_ = uniform->buffer;
   vertex_count_ = uint32_t(expanded_.size() / 8);
+
+  // The ring GREW, so the allocations are on a different buffer and the
+  // immutable table cannot follow them.
+  if (table_frame_buffer_ != frame_buffer_ ||
+      table_vertex_buffer_ != vertex_buffer_) {
+    if (!BuildTable(frame_buffer_, vertex_buffer_)) return false;
+  }
   return true;
 }
 
@@ -123,17 +143,24 @@ bool LinePass::AddToGraph(graph::RenderGraph& graph,
                           graph::ResourceHandle target, LoadOp load) {
   if (vertex_count_ == 0) return false;
 
-  // The ring is imported so the graph derives its transition, exactly as it
-  // would for any other resource a pass reads. Undefined on entry because the
-  // CPU wrote it outside any pass.
-  auto ring = graph.ImportBuffer(alloc_->PrimaryBuffer(),
-                                 ResourceState::Undefined, "line_ring");
+  // The buffers the allocations ACTUALLY landed on, not PrimaryBuffer(): a
+  // growth block that is never imported is never transitioned, and the
+  // validation layer reports it Undefined. Undefined on entry because the CPU
+  // wrote it outside any pass.
+  auto pass = graph.AddRasterPass("debug_lines");
+  pass.ColorTarget(target, load, StoreOp::Store);
+  auto ring = graph.ImportBuffer(vertex_buffer_, ResourceState::Undefined,
+                                 "line_ring");
   if (!ring.IsValid()) return false;
+  pass.Reads(ring);
+  if (frame_buffer_ != vertex_buffer_) {
+    auto uni = graph.ImportBuffer(frame_buffer_, ResourceState::Undefined,
+                                  "line_uniforms");
+    if (!uni.IsValid()) return false;
+    pass.Reads(uni);
+  }
 
-  graph.AddRasterPass("debug_lines")
-      .ColorTarget(target, load, StoreOp::Store)
-      .Reads(ring)
-      .Execute([this](const graph::RasterContext& ctx) {
+  pass.Execute([this](const graph::RasterContext& ctx) {
         // In INCREASING SLOT ORDER, which is the contract SetBindingTable's
         // span documents. Reversing them applies each offset to the wrong
         // binding and produces geometry from uniform bytes.

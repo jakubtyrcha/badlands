@@ -92,14 +92,25 @@ RunStats AppShell::Run(const AppShellCallbacks& cb, uint64_t max_frames) {
 
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
-      // The caller sees every event FIRST and may consume it, which is how an
-      // ImGui pass takes a click the camera must not also act on.
+      // QUIT and Escape are handled BEFORE the caller sees them, because they
+      // are app lifecycle rather than input. An ImGui pass sets
+      // WantCaptureKeyboard the moment a widget takes focus and then consumes
+      // every key-down, which swallowed Escape and left the documented "Esc to
+      // quit" doing nothing -- a window that can only be closed by its title
+      // bar. Everything else still goes to the caller first.
+      if (e.type == SDL_EVENT_QUIT ||
+          (e.type == SDL_EVENT_KEY_DOWN &&
+           e.key.scancode == SDL_SCANCODE_ESCAPE)) {
+        running_ = false;
+        continue;
+      }
+
+      // The caller sees every other event FIRST and may consume it, which is
+      // how an ImGui pass takes a click the camera must not also act on.
       if (cb.OnEvent && cb.OnEvent(e)) continue;
 
-      if (e.type == SDL_EVENT_QUIT) {
-        running_ = false;
-      } else if (e.type == SDL_EVENT_WINDOW_SHOWN ||
-                 e.type == SDL_EVENT_WINDOW_EXPOSED) {
+      if (e.type == SDL_EVENT_WINDOW_SHOWN ||
+          e.type == SDL_EVENT_WINDOW_EXPOSED) {
         // Raised only once the OS reports the window visible. A pre-loop raise
         // is too early on macOS -- Cocoa only activates a visible window -- and
         // without this the app starts without keyboard focus, so WASD does
@@ -113,9 +124,6 @@ RunStats AppShell::Run(const AppShellCallbacks& cb, uint64_t max_frames) {
         SDL_GetWindowSizeInPixels(window_, &nw, &nh);
         pending_w = uint32_t(std::max(0, nw));
         pending_h = uint32_t(std::max(0, nh));
-      } else if (e.type == SDL_EVENT_KEY_DOWN &&
-                 e.key.scancode == SDL_SCANCODE_ESCAPE) {
-        running_ = false;
       }
     }
 

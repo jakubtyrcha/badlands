@@ -187,6 +187,10 @@ TEST_CASE("Null: a draw with no pipeline is refused", "[rhi]") {
   auto d = MakeNull();
   rhitest::CheckDrawWithoutPipelineIsRefused(*d);
 }
+TEST_CASE("Null: out-of-range indirect args are refused", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckOutOfRangeIndirectArgsAreRefused(*d);
+}
 TEST_CASE("Null: the feature query answers", "[rhi]") {
   auto d = MakeNull();
   rhitest::CheckFeatureQueryAnswers(*d);

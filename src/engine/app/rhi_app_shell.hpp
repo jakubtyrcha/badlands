@@ -65,6 +65,10 @@ struct FrameInfo {
 struct AppShellCallbacks {
   // One SDL event, before the shell looks at it. Return true to CONSUME it, so
   // ImGui can take a click the camera should not also act on.
+  //
+  // NOT called for SDL_EVENT_QUIT or for Escape: those are app lifecycle, and
+  // the shell acts on them first. An ImGui pass that consumed every key-down
+  // while a widget had focus otherwise made "Esc to quit" stop working.
   std::function<bool(const SDL_Event&)> OnEvent;
 
   // The surface changed size and the swapchain has already been resized.

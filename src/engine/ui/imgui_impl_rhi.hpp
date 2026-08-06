@@ -59,3 +59,13 @@ void ImGui_ImplRHI_SetFramebufferSize(uint32_t width, uint32_t height);
 bool ImGui_ImplRHI_AddPass(ImDrawData* draw_data,
                            badlands::graph::RenderGraph& graph,
                            badlands::graph::ResourceHandle target);
+
+// TEST HOOKS. Where this frame's data actually landed in the ring.
+//
+// They exist because the per-frame hazard they describe is INVISIBLE in a
+// rendered image until frames start overlapping, and by then it shows as
+// intermittent tearing rather than as a failure. rhi_lab asserts the same
+// property for its uniforms via frame_offsets_seen; this is the equivalent.
+uint64_t ImGui_ImplRHI_LastIndexOffset();
+badlands::rhi::IBuffer* ImGui_ImplRHI_LastIndexBuffer();
+badlands::rhi::IBuffer* ImGui_ImplRHI_LastVertexBuffer();

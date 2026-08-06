@@ -168,9 +168,18 @@ class RenderGraph {
     rhi::IBuffer* buffer = nullptr;
     rhi::TexturePtr owned;             // non-null for transient textures
     rhi::TextureDesc desc;             // transient only
+    // What the resource is in on ENTRY to the graph, and the value `state` is
+    // reset to at the top of every Execute. Without the reset, a graph compiled
+    // once and executed per frame emits its transitions on the first execution
+    // and NONE afterwards -- every later frame then uses an imported backbuffer
+    // that was never declared a render target.
+    rhi::ResourceState entry_state = rhi::ResourceState::Undefined;
     rhi::ResourceState state = rhi::ResourceState::Undefined;
     bool transient = false;
-    bool written = false;  // any pass writes it, or it was imported ready
+    // True for anything a caller supplied from outside. A transient becomes
+    // readable only once a pass EARLIER IN THE ORDER has written it, which is
+    // tracked during Compile rather than stored here -- see Compile().
+    bool imported = false;
   };
 
   struct Attachment {

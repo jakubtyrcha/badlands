@@ -1029,6 +1029,13 @@ class MetalRenderPass final : public IRenderPass {
       spdlog::error("rhi/metal: DrawIndexedIndirect with no argument buffer");
       return;
     }
+    // Metal does not bounds-check this and the GPU reads the bytes itself, so
+    // an offset past the end is silent memory corruption. Null has to check
+    // (it resolves the counts on the CPU); this is what keeps the two agreeing.
+    if (!IndirectArgsInBounds(mb, offset, sizeof(DrawIndexedIndirectArgs),
+                              "rhi/metal: DrawIndexedIndirect")) {
+      return;
+    }
     [enc_ drawIndexedPrimitives:pipeline_->Topology()
                       indexType:index_type_
                     indexBuffer:index_buffer_->Handle()
@@ -1094,6 +1101,10 @@ class MetalComputePass final : public IComputePass {
     auto* mb = dynamic_cast<MetalBuffer*>(args);
     if (!mb || !mb->Handle()) {
       spdlog::error("rhi/metal: DispatchIndirect with no argument buffer");
+      return;
+    }
+    if (!IndirectArgsInBounds(mb, offset, sizeof(DispatchIndirectArgs),
+                              "rhi/metal: DispatchIndirect")) {
       return;
     }
     [enc_ dispatchThreadgroupsWithIndirectBuffer:mb->Handle()

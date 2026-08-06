@@ -1471,6 +1471,52 @@ inline void CheckOpaquePipelineNeedsNoBlendState(IRhiDevice& device) {
   CHECK(log.empty());
 }
 
+// Indirect arguments that do not fit their buffer.
+//
+// Unvalidated, because this is a BACKEND precondition rather than validation:
+// the GPU reads these bytes itself, so an offset past the end is a read of
+// whatever follows the buffer, and the decorator that would catch it compiles
+// out of a shipping build.
+//
+// Both backends, because this is precisely where they came apart: Null has to
+// resolve the counts on the CPU so it was forced to check, while Metal encoded
+// the call unchecked. The Null suite stayed green while Metal faulted.
+inline void CheckOutOfRangeIndirectArgsAreRefused(IRhiDevice& device) {
+  REQUIRE_FALSE(device.IsValidationEnabled());
+  ResetLog(device);
+  auto pipe = MakeTestPipeline(device);
+  REQUIRE(pipe);
+
+  // 20-byte draw args and 12-byte dispatch args; neither fits at offset 56 of a
+  // 64-byte buffer.
+  auto args = device.CreateBuffer(
+      {.size = 64,
+       .usage = BufferUsage::Indirect | BufferUsage::Storage |
+                BufferUsage::CopyDst | BufferUsage::MapRead,
+       .label = "short_args"});
+  REQUIRE(args);
+
+  const std::string log = CaptureLog([&] {
+    auto encoder = device.CreateCommandEncoder("oob");
+    auto* pass = encoder->BeginComputePass("cs");
+    pass->SetPipeline(pipe.get());
+    pass->DispatchIndirect(args.get(), 56);
+    pass->End();
+    encoder->Finish();
+    device.Submit(*encoder);
+    device.WaitIdle();
+  });
+  INFO(log);
+  CHECK(log.find("short_args") != std::string::npos);
+  CHECK(log.find("past the end") != std::string::npos);
+
+  // Rule 3: refused means it did not happen.
+  if (auto* l = badlands::rhi::null::GetCommandLog(device)) {
+    CHECK(l->Count(badlands::rhi::null::RecordedCommand::Kind::
+                       DispatchIndirect) == 0);
+  }
+}
+
 // The optional capability query.
 //
 // Untested on both Null and the decorator until now, which is worse than the

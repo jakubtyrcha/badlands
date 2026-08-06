@@ -88,6 +88,26 @@ const char* ToString(BlendOp op) {
   return "?";
 }
 
+bool IndirectArgsInBounds(const IBuffer* args, uint64_t offset,
+                          uint64_t struct_size, const char* what) {
+  if (!args) {
+    spdlog::error("rhi: {} has no argument buffer", what);
+    return false;
+  }
+  const uint64_t size = args->GetSize();
+  // By SUBTRACTION, having first established that the struct fits at all:
+  // `offset + struct_size` wraps, and a huge offset then sums to something
+  // small and passes the very check it exists to fail (rule 8).
+  if (size < struct_size || offset > size - struct_size) {
+    spdlog::error(
+        "rhi: {} reads {}-byte args at offset {} of buffer '{}', which is only "
+        "{} bytes -- the GPU would read past the end",
+        what, struct_size, offset, args->GetLabel(), size);
+    return false;
+  }
+  return true;
+}
+
 bool ValidateBlendStates(const RenderPipelineDesc& d) {
   // Empty is the opaque default and always legal. Anything else must line up
   // one-to-one with the attachments, because the alternative -- padding with

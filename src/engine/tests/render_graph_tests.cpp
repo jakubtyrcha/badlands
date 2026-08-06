@@ -74,6 +74,56 @@ TEST_CASE("graph: a pass reading what nothing writes is refused", "[graph]") {
   CHECK_FALSE(g.Compile());
 }
 
+TEST_CASE("graph: a pass reading what a LATER pass writes is refused",
+          "[graph]") {
+  // Ordering is the whole point. Declaring the producer second means it runs
+  // second, so the consumer samples a texture nothing has written yet -- and
+  // the guard above cannot see that if producedness is decided at declaration
+  // time rather than walked in order.
+  auto d = MakeDevice();
+  RenderGraph g(*d);
+  auto backbuffer = MakeTarget(*d, "backbuffer");
+  auto out = g.ImportTexture(backbuffer.get(), ResourceState::Undefined, "out");
+  auto mid = g.CreateTexture({.width = 16, .height = 16,
+                              .format = Format::RGBA8Unorm,
+                              .usage = TextureUsage::RenderTarget |
+                                       TextureUsage::Sampled,
+                              .label = "mid"});
+
+  // Consumer FIRST.
+  g.AddRasterPass("consume").ColorTarget(out).Reads(mid).Execute(
+      [](const RasterContext&) {});
+  g.AddRasterPass("produce").ColorTarget(mid).Execute(
+      [](const RasterContext&) {});
+
+  CHECK_FALSE(g.Compile());
+}
+
+TEST_CASE("graph: a pass may read what it also writes, once produced",
+          "[graph]") {
+  // The ping-pong case, so the order-aware check does not overcorrect into
+  // refusing a legitimate read-modify-write.
+  auto d = MakeDevice();
+  RenderGraph g(*d);
+  auto backbuffer = MakeTarget(*d, "backbuffer");
+  auto out = g.ImportTexture(backbuffer.get(), ResourceState::Undefined, "out");
+  auto mid = g.CreateTexture({.width = 16, .height = 16,
+                              .format = Format::RGBA8Unorm,
+                              .usage = TextureUsage::RenderTarget |
+                                       TextureUsage::Sampled,
+                              .label = "mid"});
+
+  g.AddRasterPass("produce").ColorTarget(mid).Execute(
+      [](const RasterContext&) {});
+  // Reads mid and writes it again, in that order.
+  g.AddRasterPass("refine").ColorTarget(mid, LoadOp::Load).Reads(mid).Execute(
+      [](const RasterContext&) {});
+  g.AddRasterPass("present").ColorTarget(out).Reads(mid).Execute(
+      [](const RasterContext&) {});
+
+  CHECK(g.Compile());
+}
+
 TEST_CASE("graph: an unknown resource handle is refused", "[graph]") {
   auto d = MakeDevice();
   RenderGraph g(*d);
@@ -278,4 +328,48 @@ TEST_CASE("graph: transient textures are created at Compile", "[graph]") {
   // rendering into a half-res target must get the half-res viewport.
   CHECK(seen_w == 32);
   CHECK(seen_h == 24);
+}
+
+TEST_CASE("graph: a compiled graph can be executed more than once", "[graph]") {
+  // Compile() is the expensive step and Execute() advertises no once-per-compile
+  // restriction, so caching a compiled graph across frames is the obvious
+  // optimisation. It has to actually work: the first Execute left every resource
+  // in its FINAL state, so the second emitted no transitions at all -- correct on
+  // Metal, which tracks hazards itself, and a use-before-barrier on DX12.
+  auto d = MakeDevice();
+  RenderGraph g(*d);
+  auto backbuffer = MakeTarget(*d, "backbuffer");
+  auto out = g.ImportTexture(backbuffer.get(), ResourceState::Undefined, "out");
+  auto mid = g.CreateTexture({.width = 16, .height = 16,
+                              .format = Format::RGBA8Unorm,
+                              .usage = TextureUsage::RenderTarget |
+                                       TextureUsage::Sampled,
+                              .label = "mid"});
+
+  g.AddRasterPass("produce").ColorTarget(mid).Execute(
+      [](const RasterContext&) {});
+  g.AddRasterPass("consume").ColorTarget(out).Reads(mid).Execute(
+      [](const RasterContext&) {});
+  REQUIRE(g.Compile());
+
+  auto* log = null::GetCommandLog(*d);
+  REQUIRE(log != nullptr);
+
+  size_t first_transitions = 0;
+  for (int run = 0; run < 3; ++run) {
+    log->Clear();
+    const std::string violations = RunUnderValidation(*d, g);
+    INFO("run " << run << ": " << violations);
+    CHECK(violations.empty());
+    const size_t n = log->Count(null::RecordedCommand::Kind::Transition);
+    INFO("run " << run << " emitted " << n << " transitions");
+    if (run == 0) {
+      first_transitions = n;
+      CHECK(n > 0);
+    } else {
+      // The SAME barriers every time. Fewer means a later frame is running
+      // unbarriered; more means state is accumulating.
+      CHECK(n == first_transitions);
+    }
+  }
 }

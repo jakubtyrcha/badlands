@@ -69,18 +69,35 @@ class LinePass {
                   rhi::LoadOp load);
 
   uint32_t VertexCount() const { return vertex_count_; }
+  // Where the last Upload actually landed. Exposed because a growth block is
+  // indistinguishable from the primary in a rendered image until it is bound,
+  // at which point the geometry is already wrong.
+  rhi::IBuffer* LastVertexBuffer() const { return vertex_buffer_; }
+  uint32_t LastVertexOffset() const { return vertex_offset_; }
 
  private:
+  // Builds or rebuilds the binding table against specific buffers.
+  bool BuildTable(rhi::IBuffer* frame_buffer, rhi::IBuffer* vertex_buffer);
+
   rhi::IRhiDevice* device_ = nullptr;
   rhi::ShaderModulePtr vs_, fs_;
   rhi::RenderPipelinePtr pipeline_;
   std::unique_ptr<rhi::FrameAllocator> alloc_;
   rhi::BindingTablePtr table_;
 
+  // The buffers `table_` names. A binding table is IMMUTABLE, so when the ring
+  // grows past its block an allocation lands on a different buffer and the
+  // table has to be rebuilt -- otherwise the draw reads the primary at offset 0
+  // and renders garbage, with one "ring is undersized" warning to explain it.
+  rhi::IBuffer* table_frame_buffer_ = nullptr;
+  rhi::IBuffer* table_vertex_buffer_ = nullptr;
+
   std::vector<float> expanded_;
   uint32_t vertex_count_ = 0;
   uint32_t frame_offset_ = 0;
   uint32_t vertex_offset_ = 0;
+  rhi::IBuffer* frame_buffer_ = nullptr;
+  rhi::IBuffer* vertex_buffer_ = nullptr;
 };
 
 }  // namespace badlands::object_viewer

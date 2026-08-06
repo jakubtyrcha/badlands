@@ -937,6 +937,16 @@ int main(int argc, char** argv) {
 
     const auto stats = shell->Run(cb, opt.self_test_frames);
 
+    // Checked BEFORE anything else, and outside the self-test: the shell sets
+    // this when a target rebuild failed, and the self-test's own size checks
+    // cannot see it -- MakeTargets assigns the requested width before it tries
+    // to create anything, so after a failure targets.width still equals the
+    // size that was asked for and the comparison passes against itself.
+    if (stats.aborted) {
+      spdlog::error("rhi_lab: the render loop aborted");
+      return 1;
+    }
+
     if (opt.self_test_frames > 0) {
       // Exit status IS the assertion: this runs as a ctest with no test
       // framework around it.

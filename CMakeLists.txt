@@ -1477,7 +1477,13 @@ endif()
 # badlands_object_viewer: the next iteration of badlands_viewer, on the RHI and
 # the render graph. Windowed and headless run the SAME graph — only the imported
 # output texture differs — so the headless test exercises the real path.
-if(APPLE)
+#
+# BOTH halves of the guard: it links badlands_slang and badlands_imgui_rhi, and
+# neither target EXISTS when the Slang SDK is absent. CMake does not refuse the
+# link at generate time — an unknown plain name becomes a raw -l flag — so the
+# target gets created anyway and fails to COMPILE on a missing <imgui.h>, taking
+# the whole default build down with it on a fresh clone.
+if(BADLANDS_HAVE_SLANG AND APPLE)
     add_executable(badlands_object_viewer
         src/executables/object_viewer/main.cpp
         src/executables/object_viewer/line_pass.cpp
@@ -1533,6 +1539,24 @@ if(APPLE)
              COMMAND badlands_object_viewer --frames 20 --width 640 --height 480
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     set_tests_properties(object_viewer_windowed PROPERTIES
+                         LABELS display TIMEOUT 120)
+    # --scene really reaches the windowed path. It used to be parsed and then
+    # ignored there, which is rule 4's accepted-and-ignored trap; a run that
+    # renders is the cheapest thing that can tell the difference.
+    # Escape must survive an event consumer that takes everything -- an ImGui
+    # widget with keyboard focus is exactly that, and it used to swallow the
+    # documented quit key.
+    add_test(NAME object_viewer_escape_survives_capture
+             COMMAND badlands_object_viewer --self-test-escape --frames 60
+                     --width 320 --height 240
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    set_tests_properties(object_viewer_escape_survives_capture PROPERTIES
+                         LABELS display TIMEOUT 120)
+    add_test(NAME object_viewer_windowed_scene
+             COMMAND badlands_object_viewer --scene clear --frames 10
+                     --width 320 --height 240
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    set_tests_properties(object_viewer_windowed_scene PROPERTIES
                          LABELS display TIMEOUT 120)
 endif()
 

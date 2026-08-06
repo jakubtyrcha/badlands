@@ -531,6 +531,10 @@ TEST_CASE("metal: a draw with no pipeline is refused", "[rhi]") {
   auto d = MakeMetal(/*validation=*/false);
   rhitest::CheckDrawWithoutPipelineIsRefused(*d);
 }
+TEST_CASE("metal: out-of-range indirect args are refused", "[rhi]") {
+  auto d = MakeMetal(/*validation=*/false);
+  rhitest::CheckOutOfRangeIndirectArgsAreRefused(*d);
+}
 TEST_CASE("metal: the feature query answers", "[rhi]") {
   auto d = MakeMetal();
   rhitest::CheckFeatureQueryAnswers(*d);
