@@ -517,6 +517,80 @@ TEST_CASE("metal: a zero indirect dispatch is allowed", "[rhi]") {
   auto d = MakeMetal();
   rhitest::CheckZeroIndirectDispatchIsAllowed(*d);
 }
+TEST_CASE("metal: an indirect dispatch with no args is refused", "[rhi]") {
+  // Unvalidated: the decorator refuses this first, so with validation on the
+  // backend never sees it.
+  auto d = MakeMetal(/*validation=*/false);
+  rhitest::CheckIndirectDispatchWithoutArgsIsRefused(*d);
+}
+TEST_CASE("metal: a draw with no pipeline is refused", "[rhi]") {
+  auto d = MakeMetal(/*validation=*/false);
+  rhitest::CheckDrawWithoutPipelineIsRefused(*d);
+}
+TEST_CASE("metal: the feature query answers", "[rhi]") {
+  auto d = MakeMetal();
+  rhitest::CheckFeatureQueryAnswers(*d);
+}
+
+TEST_CASE("metal: an indirect dispatch really runs the count in the buffer",
+          "[rhi][metal]") {
+  // The shared case can only assert through the Null command log, so on Metal
+  // it executes NO assertion at all -- an implementation that passed the wrong
+  // offset, used the wrong threadgroup size, or did nothing would still pass
+  // it. The only real Metal proof lived in badlands_splat_tests, which is
+  // skipped entirely without a Slang SDK.
+  auto d = MakeMetal();
+  REQUIRE(d);
+
+  auto module = d->CreateShaderModule(kBumpKernel, BumpReflection(), "bump");
+  REQUIRE(module);
+  auto pipe = d->CreateComputePipeline(
+      {.shader = module.get(), .entry = "bump", .label = "bump"});
+  REQUIRE(pipe);
+
+  auto counter = d->CreateBuffer(
+      {.size = sizeof(uint32_t),
+       .usage = BufferUsage::Storage | BufferUsage::CopyDst |
+                BufferUsage::MapRead, .label = "counter"});
+  auto args = d->CreateBuffer(
+      {.size = sizeof(DispatchIndirectArgs),
+       .usage = BufferUsage::Indirect | BufferUsage::CopyDst, .label = "args"});
+  REQUIRE(counter);
+  REQUIRE(args);
+
+  const uint32_t zero = 0;
+  counter->Write(0, {reinterpret_cast<const uint8_t*>(&zero), sizeof(zero)});
+  // Three groups of the kernel's declared 64 threads.
+  const DispatchIndirectArgs seeded{.x = 3, .y = 1, .z = 1};
+  args->Write(0, {reinterpret_cast<const uint8_t*>(&seeded), sizeof(seeded)});
+
+  auto table = d->CreateBindingTable(
+      {.compute_pipeline = pipe.get(),
+       .entries = {{.slot = 0, .kind = BindingKind::StorageBuffer,
+                    .buffer = counter.get()}},
+       .label = "bump_table"});
+  REQUIRE(table);
+
+  auto encoder = d->CreateCommandEncoder("indirect_bump");
+  encoder->Transition(counter.get(), ResourceState::ShaderWrite);
+  encoder->Transition(args.get(), ResourceState::IndirectArg);
+  auto* pass = encoder->BeginComputePass("cs");
+  REQUIRE(pass != nullptr);
+  pass->SetPipeline(pipe.get());
+  pass->SetBindingTable(0, table.get());
+  pass->DispatchIndirect(args.get(), 0);
+  pass->End();
+  encoder->Finish();
+  d->Submit(*encoder);
+  d->WaitIdle();
+
+  uint32_t got = 0;
+  REQUIRE(counter->Read(0, {reinterpret_cast<uint8_t*>(&got), sizeof(got)}));
+  uint32_t threads[3] = {1, 1, 1};
+  pipe->GetWorkgroupSize(threads);
+  INFO("got=" << got << " threads/group=" << threads[0]);
+  CHECK(got == seeded.x * threads[0]);
+}
 
 TEST_CASE("metal: swapchain acquire/present cycle", "[rhi]") {
   auto d = MakeMetal();

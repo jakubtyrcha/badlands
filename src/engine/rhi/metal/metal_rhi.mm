@@ -948,7 +948,10 @@ class MetalRenderPass final : public IRenderPass {
 
   void Draw(uint32_t vertex_count, uint32_t instance_count,
             uint32_t first_vertex, uint32_t first_instance) override {
-    if (!pipeline_) return;
+    if (!pipeline_) {
+      spdlog::error("rhi/metal: Draw with no pipeline bound");
+      return;
+    }
     [enc_ drawPrimitives:pipeline_->Topology()
              vertexStart:first_vertex
              vertexCount:vertex_count
@@ -959,7 +962,14 @@ class MetalRenderPass final : public IRenderPass {
   void DrawIndexed(uint32_t index_count, uint32_t instance_count,
                    uint32_t first_index, int32_t base_vertex,
                    uint32_t first_instance) override {
-    if (!pipeline_ || !index_buffer_) return;
+    if (!pipeline_) {
+      spdlog::error("rhi/metal: DrawIndexed with no pipeline bound");
+      return;
+    }
+    if (!index_buffer_) {
+      spdlog::error("rhi/metal: DrawIndexed with no index buffer bound");
+      return;
+    }
     [enc_ drawIndexedPrimitives:pipeline_->Topology()
                      indexCount:index_count
                       indexType:index_type_
@@ -971,8 +981,22 @@ class MetalRenderPass final : public IRenderPass {
   }
 
   void DrawIndexedIndirect(IBuffer* args, uint64_t offset) override {
-    auto* mb = static_cast<MetalBuffer*>(args);
-    if (!pipeline_ || !index_buffer_ || !mb) return;
+    if (!pipeline_) {
+      spdlog::error("rhi/metal: DrawIndexedIndirect with no pipeline bound");
+      return;
+    }
+    if (!index_buffer_) {
+      spdlog::error("rhi/metal: DrawIndexedIndirect with no index buffer bound");
+      return;
+    }
+    // dynamic_cast, not static_cast: a buffer from another backend is a real
+    // caller mistake, and a static_cast reinterprets it into a plausible-
+    // looking pointer that passes a null check and then hands Metal garbage.
+    auto* mb = dynamic_cast<MetalBuffer*>(args);
+    if (!mb || !mb->Handle()) {
+      spdlog::error("rhi/metal: DrawIndexedIndirect with no argument buffer");
+      return;
+    }
     [enc_ drawIndexedPrimitives:pipeline_->Topology()
                       indexType:index_type_
                     indexBuffer:index_buffer_->Handle()
@@ -1034,7 +1058,8 @@ class MetalComputePass final : public IComputePass {
       spdlog::error("rhi/metal: DispatchIndirect with no pipeline bound");
       return;
     }
-    auto* mb = static_cast<MetalBuffer*>(args);
+    // dynamic_cast, not static_cast -- see DrawIndexedIndirect.
+    auto* mb = dynamic_cast<MetalBuffer*>(args);
     if (!mb || !mb->Handle()) {
       spdlog::error("rhi/metal: DispatchIndirect with no argument buffer");
       return;

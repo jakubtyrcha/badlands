@@ -61,8 +61,15 @@ struct SplatParams {
   glm::vec4 grid{0.0f};
   glm::vec4 config{0.0f};
 };
+// Purely host-side, so they belong at compile time rather than in a test case:
+// a CHECK here would only prove the compiler agrees with itself. The
+// host-versus-DEVICE comparison is a separate case, against Slang's reflection.
 static_assert(sizeof(SplatParams) == 64 + 16 * 4,
               "SplatParams must stay float4-aligned throughout");
+static_assert(offsetof(SplatParams, sphere_a) == 64);
+static_assert(offsetof(SplatParams, sphere_b) == 80);
+static_assert(offsetof(SplatParams, grid) == 96);
+static_assert(offsetof(SplatParams, config) == 112);
 
 struct Splat {
   glm::vec4 pos_source{0.0f};
@@ -108,8 +115,14 @@ kernel void cs_splat(device atomic_ulong* visbuffer [[buffer(0)]],
   // and commits the payload indivisibly. A 32-bit depth atomic plus a separate
   // payload store leaves a window where another thread's payload lands against
   // this thread's depth.
+  //
+  // The payload is tid + 1, ONE-BASED, so that no legitimate splat can pack to
+  // zero. The buffer is cleared to zero and the resolve reads zero as "nothing
+  // here"; with a zero-based payload, splat 0 at a saturated-to-zero depth --
+  // any point at or behind the far plane -- packs to exactly 0 and is
+  // indistinguishable from empty, so the pixel it won renders as background.
   uint depth_bits = uint(saturate(ndc.z) * 4294967040.0);
-  ulong packed = (ulong(depth_bits) << 32) | ulong(tid);
+  ulong packed = (ulong(depth_bits) << 32) | ulong(tid + 1u);
   atomic_max_explicit(&visbuffer[py * w + px], packed, memory_order_relaxed);
 }
 )";
@@ -353,6 +366,13 @@ Frame RunChain(Chain& c, const SplatParams& params) {
   REQUIRE(splat_table);
   REQUIRE(res_table);
 
+  // Every Transition below exists ONLY to satisfy the validation decorator --
+  // Metal auto-tracks hazards and ignores them, so the pixels come out right
+  // whether or not a single one is declared. Without a scope around the
+  // recording, deleting any of them leaves this suite fully green and the
+  // declarations the DX12 backend will emit barriers from rot silently.
+  c.device->BeginValidationScope();
+
   c.device->BeginFrame();
   auto encoder = c.device->CreateCommandEncoder("splat_chain");
 
@@ -407,6 +427,13 @@ Frame RunChain(Chain& c, const SplatParams& params) {
   c.device->EndFrame();
   c.device->WaitIdle();
 
+  // The optional distinguishes "no check ran" from "a check ran": a device
+  // with validation compiled out must not read as verified.
+  auto report = c.device->EndValidationScope();
+  REQUIRE(report.has_value());
+  INFO(report->violations);
+  CHECK(report->IsClean());
+
   Frame f;
   uint32_t counts[2] = {0, 0};
   REQUIRE(c.counter_buf->Read(0, {reinterpret_cast<uint8_t*>(counts),
@@ -448,16 +475,47 @@ TEST_CASE("splat: the host and device agree on the parameter layout",
   // The cheapest failure to diagnose, so it runs first. Slang and MSL both pad
   // float3 to 16 bytes; a struct that drifts here corrupts every later
   // assertion in a way that looks like bad geometry rather than bad layout.
-  auto c = MakeChain();
-  REQUIRE(c);
+  //
+  // Compared against SLANG'S OWN LAYOUT for the Metal target, not against
+  // hardcoded numbers. Asserting `offsetof(SplatParams, grid) == 96` proves
+  // only that the host compiler agrees with itself -- the drift this exists to
+  // catch is between host and device, and only one side of it was ever being
+  // read. The constants that ARE purely host-side live in static_asserts at
+  // the top of this file, where they cost nothing to check.
+  //
+  // No device and no pipelines: reflection comes from the compiler, so this
+  // case needs neither.
+  const std::vector<std::string> paths = {"shaders/slang/splat"};
+  auto compiler = slang::CreateSlangCompiler(paths);
+  REQUIRE(compiler);
+  auto compiled = compiler->Get({.module = "evaluate", .entry = "cs_evaluate"},
+                                slang::ShaderTarget::Metal);
+  REQUIRE(compiled);
 
-  // Every offset the shaders index by hand.
-  CHECK(offsetof(SplatParams, sphere_a) == 64);
-  CHECK(offsetof(SplatParams, sphere_b) == 80);
-  CHECK(offsetof(SplatParams, grid) == 96);
-  CHECK(offsetof(SplatParams, config) == 112);
-  CHECK(sizeof(SplatParams) == 128);
-  CHECK(sizeof(Splat) == 16);
+  const ReflectedUniformBlock* block =
+      compiled->reflection.FindUniformBlock("params");
+  REQUIRE(block != nullptr);
+  CHECK(block->total_size == sizeof(SplatParams));
+
+  // Every member the host writes, by name -- so a reordering that keeps the
+  // sizes right is still caught.
+  const struct { const char* name; size_t host_offset; size_t host_size; } kMembers[] = {
+      {"view_proj", offsetof(SplatParams, view_proj), sizeof(glm::mat4)},
+      {"sphere_a", offsetof(SplatParams, sphere_a), sizeof(glm::vec4)},
+      {"sphere_b", offsetof(SplatParams, sphere_b), sizeof(glm::vec4)},
+      {"grid", offsetof(SplatParams, grid), sizeof(glm::vec4)},
+      {"config", offsetof(SplatParams, config), sizeof(glm::vec4)},
+  };
+  for (const auto& want : kMembers) {
+    const auto it = std::find_if(
+        block->members.begin(), block->members.end(),
+        [&](const ReflectedUniformMember& m) { return m.name == want.name; });
+    INFO("member '" << want.name << "'");
+    REQUIRE(it != block->members.end());
+    CHECK(size_t(it->offset) == want.host_offset);
+    CHECK(size_t(it->size) == want.host_size);
+  }
+  CHECK(block->members.size() == std::size(kMembers));
 }
 
 // --- 2. The count, against a CPU oracle -------------------------------------
@@ -596,7 +654,7 @@ TEST_CASE("splat: maximum contention still resolves to the nearest", "[splat]") 
   // the maximum is unique and comparing world z is exact.
   const uint64_t packed = f.visbuffer[size_t(kScreen / 2) * kScreen + kScreen / 2];
   REQUIRE(packed != 0);
-  const uint32_t winner = uint32_t(packed & 0xFFFFFFFFu);
+  const uint32_t winner = uint32_t(packed & 0xFFFFFFFFu) - 1u;  // one-based
   REQUIRE(winner < f.splats.size());
 
   float best_z = -std::numeric_limits<float>::infinity();
@@ -604,6 +662,42 @@ TEST_CASE("splat: maximum contention still resolves to the nearest", "[splat]") 
   INFO("winner z=" << f.splats[winner].pos_source.z << " best z=" << best_z
                    << " over " << f.splats.size() << " splats");
   CHECK(f.splats[winner].pos_source.z == best_z);
+}
+
+// --- 5b. The sentinel, where covered and empty could collide ----------------
+
+TEST_CASE("splat: splat zero at the far plane is not read as background",
+          "[splat]") {
+  // The one input where "packed == 0 means nothing here" could be wrong: the
+  // FIRST splat, at a depth that saturates to zero. With a zero-based payload
+  // it packs to exactly the cleared value, atomic_max against 0 is a no-op,
+  // and the pixel it legitimately won renders as background -- a hole in the
+  // image that no other case here can produce.
+  //
+  // Made deterministic rather than hoped for. A radius-0.3 sphere centred
+  // exactly on a cell centre puts its six face neighbours 1.25 away, outside
+  // the 0.625 half-cell band, so EXACTLY one cell qualifies and its index is
+  // necessarily 0. A view_proj whose only non-zero column is the translation
+  // maps it to ndc (0, 0, 0), so its depth saturates to zero by construction.
+  auto c = MakeChain();
+  REQUIRE(c);
+
+  auto params = MakeParams();
+  params.sphere_a = glm::vec4(0.625f, 0.625f, 0.625f, 0.3f);  // one cell centre
+  params.view_proj = glm::mat4(0.0f);
+  params.view_proj[3] = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+
+  const auto f = RunChain(c, params);
+  REQUIRE(CpuSplatCount(params) == 1);
+  REQUIRE(f.splat_count == 1);
+
+  const size_t centre = size_t(kScreen / 2) * kScreen + kScreen / 2;
+  INFO("packed = " << f.visbuffer[centre]);
+  CHECK(f.visbuffer[centre] != 0);
+  const Rgba px = At(f, kScreen / 2, kScreen / 2);
+  INFO("centre = " << int(px.r) << "," << int(px.g) << "," << int(px.b));
+  CHECK_FALSE(IsBackground(px));
+  CHECK(px.r > 200);  // sphere A
 }
 
 // --- 6. The empty case ------------------------------------------------------

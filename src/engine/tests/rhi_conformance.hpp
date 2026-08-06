@@ -1302,15 +1302,24 @@ inline void CheckZeroIndirectDispatchIsAllowed(IRhiDevice& device) {
 
   auto args = device.CreateBuffer(
       {.size = sizeof(DispatchIndirectArgs),
+       // MapRead so this takes the SAME resolve path as its sibling case. With
+       // a different usage set, a resolve that broke only for this one would
+       // still record a command and still pass, because the counts were never
+       // checked either.
        .usage = BufferUsage::Indirect | BufferUsage::Storage |
-                BufferUsage::CopyDst,
+                BufferUsage::CopyDst | BufferUsage::MapRead,
        .label = "zero_args"});
-  const DispatchIndirectArgs zero{};
+  REQUIRE(args);
+  // Seeded explicitly rather than default-constructed: y and z default to 0
+  // because this struct mirrors what the GPU writes, so a `{}` here would be
+  // asserting the defaults rather than zero GROUPS.
+  const DispatchIndirectArgs zero{.x = 0, .y = 1, .z = 1};
   args->Write(0, {reinterpret_cast<const uint8_t*>(&zero), sizeof(zero)});
 
   auto encoder = device.CreateCommandEncoder("zero_dispatch");
   encoder->Transition(args.get(), ResourceState::IndirectArg);
   auto* pass = encoder->BeginComputePass("cs");
+  REQUIRE(pass != nullptr);
   pass->SetPipeline(pipe.get());
   pass->DispatchIndirect(args.get(), 0);  // must NOT be refused
   pass->End();
@@ -1319,9 +1328,121 @@ inline void CheckZeroIndirectDispatchIsAllowed(IRhiDevice& device) {
   device.WaitIdle();
 
   if (auto* log = badlands::rhi::null::GetCommandLog(device)) {
+    const auto* rec = log->Find(
+        badlands::rhi::null::RecordedCommand::Kind::DispatchIndirect);
+    REQUIRE(rec != nullptr);
     CHECK(log->Count(badlands::rhi::null::RecordedCommand::Kind::
                          DispatchIndirect) == 1);
+    // The COUNTS, not just the command. Null leaves these at their {0,0,0}
+    // default whenever the resolve fails, so "one command was recorded" cannot
+    // tell a successful zero-resolve from a failed one -- and the two mean
+    // opposite things about whether the backend read the buffer at all.
+    CHECK(rec->dispatch[0] == 0);
+    CHECK(rec->dispatch[1] == 1);
+    CHECK(rec->dispatch[2] == 1);
   }
+}
+
+// A backend refusing an indirect call with no argument buffer.
+//
+// Exercised on an UNVALIDATED device deliberately. The decorator refuses this
+// first, so with validation on the call never reaches the backend and the case
+// would be measuring the decorator instead of the thing it names -- and the
+// decorator is not there in release builds, which is where a backend that
+// silently records a (0,0,0) dispatch does its damage.
+inline void CheckIndirectDispatchWithoutArgsIsRefused(IRhiDevice& device) {
+  REQUIRE_FALSE(device.IsValidationEnabled());
+  ResetLog(device);
+  auto pipe = MakeTestPipeline(device);
+  REQUIRE(pipe);
+
+  const std::string log = CaptureLog([&] {
+    auto encoder = device.CreateCommandEncoder("no_args");
+    auto* pass = encoder->BeginComputePass("cs");
+    pass->SetPipeline(pipe.get());
+    pass->DispatchIndirect(nullptr, 0);
+    pass->End();
+    encoder->Finish();
+    device.Submit(*encoder);
+    device.WaitIdle();
+  });
+  INFO(log);
+  CHECK(log.find("DispatchIndirect") != std::string::npos);
+  CHECK(log.find("no argument buffer") != std::string::npos);
+
+  // Rule 3: refused means it did not happen. Recording the command anyway is
+  // what made Null the silent one of the two backends.
+  if (auto* l = badlands::rhi::null::GetCommandLog(device)) {
+    CHECK(l->Count(badlands::rhi::null::RecordedCommand::Kind::
+                       DispatchIndirect) == 0);
+  }
+}
+
+// Recording work with no pipeline bound.
+//
+// Unvalidated, for the same reason as the case above: the decorator catches
+// this first, and it is not there in release. Both backends must refuse and
+// say so -- Metal used to drop the call with no diagnostic at all, and Null
+// used to record it as though it had happened, which is the same defect from
+// opposite ends.
+inline void CheckDrawWithoutPipelineIsRefused(IRhiDevice& device) {
+  REQUIRE_FALSE(device.IsValidationEnabled());
+  ResetLog(device);
+  auto target = device.CreateTexture(
+      {.width = 8, .height = 8, .format = Format::RGBA8Unorm,
+       .usage = TextureUsage::RenderTarget, .label = "nopipe"});
+  REQUIRE(target);
+
+  const std::string log = CaptureLog([&] {
+    auto encoder = device.CreateCommandEncoder("nopipe");
+    encoder->Transition(target.get(), ResourceState::RenderTarget);
+    RenderPassDesc rp;
+    rp.label = "rp";
+    rp.color_attachments.push_back({.view = target->GetDefaultView()});
+    auto* pass = encoder->BeginRenderPass(rp);
+    if (pass) {
+      pass->Draw(3);                            // no SetPipeline
+      pass->DrawIndexed(3);                     // nor an index buffer
+      pass->End();
+    }
+    encoder->Finish();
+    device.Submit(*encoder);
+    device.WaitIdle();
+  });
+  INFO(log);
+  CHECK(log.find("Draw with no pipeline bound") != std::string::npos);
+  CHECK(log.find("DrawIndexed with no pipeline bound") != std::string::npos);
+
+  if (auto* l = badlands::rhi::null::GetCommandLog(device)) {
+    CHECK(l->Count(badlands::rhi::null::RecordedCommand::Kind::Draw) == 0);
+    CHECK(l->Count(badlands::rhi::null::RecordedCommand::Kind::DrawIndexed) == 0);
+  }
+}
+
+// The optional capability query.
+//
+// Untested on both Null and the decorator until now, which is worse than the
+// "tested on Null only" rule 9 already calls insufficient: a decorator that
+// answered instead of forwarding would let a caller run a 64-bit-atomic shader
+// against a backend that executes nothing, and nothing would say so.
+inline void CheckFeatureQueryAnswers(IRhiDevice& device) {
+  const bool answer = device.Supports(DeviceFeature::Atomic64MinMax);
+  // Stable: a query that answers differently per call cannot be branched on.
+  CHECK(device.Supports(DeviceFeature::Atomic64MinMax) == answer);
+
+  // The decorator must FORWARD, not answer.
+  if (IRhiDevice* inner = device.Inner()) {
+    CHECK(answer == inner->Supports(DeviceFeature::Atomic64MinMax));
+  }
+
+  // Null runs no shaders, so it supports no shader-level feature. Asserted
+  // rather than assumed -- a Null that started claiming otherwise would make
+  // every capability-gated test pass against a backend that ran nothing.
+  if (device.GetBackend() == BackendKind::Null) CHECK_FALSE(answer);
+
+  // Every enumerator names itself, or a refusal cannot say which feature.
+  CHECK(std::string(ToString(DeviceFeature::Atomic64MinMax)) ==
+        "Atomic64MinMax");
 }
 
 // Submitted work must retire rather than accumulate.
@@ -2025,6 +2146,7 @@ inline void RunAllConformanceChecks(IRhiDevice& device) {
   CheckDynamicOffsetsReachTheBackend(device);
   CheckDispatchIndirectReadsItsCount(device);
   CheckZeroIndirectDispatchIsAllowed(device);
+  CheckFeatureQueryAnswers(device);
   CheckSwapchainAcquirePresentCycle(device);
   CheckSwapchainSkipsWhenZeroSized(device);
   CheckSwapchainResize(device);

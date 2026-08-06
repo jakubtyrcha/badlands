@@ -28,9 +28,10 @@ float4 fs_resolve(VOut i) : SV_Target {
     if (packed == 0) {
         return float4(0.0, 0.0, 0.0, 1.0);   // nothing splatted here
     }
-    // Low 32 bits are the splat index; its source picks the colour, so the
-    // occlusion test can tell WHICH sphere won a pixel.
-    uint index = uint(packed & 0xFFFFFFFF);
+    // Low 32 bits are the splat index PLUS ONE. The bias is what makes the
+    // test above sound: without it, splat 0 at a saturated-to-zero depth packs
+    // to exactly the cleared value and its pixel reads as background.
+    uint index = uint(packed & 0xFFFFFFFF) - 1;
     float source = splats[index].pos_source.w;
     return source < 0.5 ? float4(1.0, 0.0, 0.0, 1.0)
                         : float4(0.0, 1.0, 0.0, 1.0);
