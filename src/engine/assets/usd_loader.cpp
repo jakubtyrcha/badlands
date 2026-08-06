@@ -2,6 +2,7 @@
 
 #include <cstring>
 #include <filesystem>
+#include <functional>
 
 #include <spdlog/spdlog.h>
 
@@ -136,6 +137,34 @@ UsdSceneData LoadUsdScene(const std::string& path) {
     return result;
   }
 
+  // Mesh points come back in each prim's OWN local space, with placement left
+  // in the node hierarchy -- so a model's parts must be gathered from there or
+  // they all collapse onto the origin (which is what stacked a treasure
+  // chest's lid inside its body). Walk the tree once and record each mesh's
+  // world matrix.
+  std::vector<std::array<float, 16>> mesh_transforms(
+      scene.meshes.size(), std::array<float, 16>{1, 0, 0, 0, 0, 1, 0, 0,
+                                                 0, 0, 1, 0, 0, 0, 0, 1});
+  {
+    std::function<void(const tydra::Node&)> walk = [&](const tydra::Node& node) {
+      // `id` indexes whichever array matches the node's TYPE (lights index
+      // lights), so the type check is what keeps a light's index from being
+      // read as a mesh's.
+      if (node.nodeType == tydra::NodeType::Mesh && node.id >= 0 &&
+          static_cast<size_t>(node.id) < mesh_transforms.size()) {
+        auto& dst = mesh_transforms[static_cast<size_t>(node.id)];
+        for (int c = 0; c < 4; ++c) {
+          for (int r = 0; r < 4; ++r) {
+            dst[static_cast<size_t>(c * 4 + r)] =
+                static_cast<float>(node.global_matrix.m[c][r]);
+          }
+        }
+      }
+      for (const auto& child : node.children) walk(child);
+    };
+    for (const auto& node : scene.nodes) walk(node);
+  }
+
   result.meters_per_unit = static_cast<float>(scene.meta.metersPerUnit);
   result.z_up = (scene.meta.upAxis == "Z");
 
@@ -159,7 +188,8 @@ UsdSceneData LoadUsdScene(const std::string& path) {
   }
 
   result.meshes.reserve(scene.meshes.size());
-  for (const auto& src : scene.meshes) {
+  for (size_t mesh_index = 0; mesh_index < scene.meshes.size(); ++mesh_index) {
+    const auto& src = scene.meshes[mesh_index];
     const size_t vertex_count = src.points.size();
     if (vertex_count == 0 || src.faceVertexIndices().empty()) {
       spdlog::warn("LoadUsdScene: '{}' mesh '{}' has no geometry -- skipping",
@@ -177,6 +207,7 @@ UsdSceneData LoadUsdScene(const std::string& path) {
 
     UsdMeshData mesh;
     mesh.name = src.prim_name;
+    mesh.transform = mesh_transforms[mesh_index];
     if (src.material_id >= 0 &&
         static_cast<size_t>(src.material_id) < result.materials.size()) {
       mesh.material_name = result.materials[static_cast<size_t>(src.material_id)].name;

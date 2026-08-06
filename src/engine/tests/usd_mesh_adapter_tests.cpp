@@ -9,6 +9,8 @@
 
 #include <catch_amalgamated.hpp>
 
+#include <cmath>
+
 #include "engine/rendering/geometry/usd_mesh_adapter.hpp"
 
 using badlands::BuildImportedModels;
@@ -174,6 +176,48 @@ TEST_CASE("a mesh missing an attribute is skipped, not zero-filled",
   // Emitting it with zeroed tangents would render as a black surface with
   // nothing logged anywhere -- far harder to chase than an absent model.
   CHECK(models.empty());
+}
+
+TEST_CASE("the prim's world transform places the mesh", "[usd][adapter]") {
+  // Mesh points are in each prim's OWN local space; placement lives in the
+  // node hierarchy. Dropping it collapses every part of a model onto the
+  // origin -- which is what put a treasure chest's lid inside its body.
+  UsdMeshData mesh = MakeQuad();
+  // Column-major (glm): translation occupies elements 12..14.
+  mesh.transform = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 5.0f, 6.0f, 7.0f, 1};
+
+  const auto models = BuildImportedModels(
+      MakeScene(std::move(mesh), false, 1.0f), DefaultBinding());
+  REQUIRE(models.size() == 1);
+
+  const auto& v = models[0].mesh.mesh.vertices;
+  // Vertex 2 was (1, 1, 0) -> translated to (6, 7, 7).
+  CHECK(v[2 * kStride + 0] == Catch::Approx(6.0f));
+  CHECK(v[2 * kStride + 1] == Catch::Approx(7.0f));
+  CHECK(v[2 * kStride + 2] == Catch::Approx(7.0f));
+  // A pure translation must leave the normal alone.
+  CHECK(v[2 * kStride + 5] == Catch::Approx(0.0f));
+  CHECK(v[2 * kStride + 6] == Catch::Approx(0.0f));
+  CHECK(v[2 * kStride + 7] == Catch::Approx(1.0f));
+}
+
+TEST_CASE("the transform rotates normals, and scale does not shrink them",
+          "[usd][adapter]") {
+  UsdMeshData mesh = MakeQuad();
+  // Uniform scale of 2 with no rotation. Positions must scale; normals must
+  // stay unit length, or the surface darkens in proportion to the scale.
+  mesh.transform = {2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1};
+
+  const auto models = BuildImportedModels(
+      MakeScene(std::move(mesh), false, 1.0f), DefaultBinding());
+  const auto& v = models[0].mesh.mesh.vertices;
+
+  CHECK(v[2 * kStride + 0] == Catch::Approx(2.0f));
+  CHECK(v[2 * kStride + 1] == Catch::Approx(2.0f));
+
+  const float nx = v[2 * kStride + 5], ny = v[2 * kStride + 6],
+              nz = v[2 * kStride + 7];
+  CHECK(std::sqrt(nx * nx + ny * ny + nz * nz) == Catch::Approx(1.0f));
 }
 
 TEST_CASE("a failed load converts to nothing", "[usd][adapter]") {

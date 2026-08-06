@@ -11,6 +11,7 @@
 // The conversion into the engine's interleaved vertex layout lives one layer
 // up, in engine/rendering/geometry/usd_mesh_adapter.hpp.
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -30,6 +31,20 @@ namespace badlands {
 struct UsdMeshData {
   std::string name;           // source prim name (e.g. "Cube_001")
   std::string material_name;  // bound USD material's name; empty if unbound
+
+  // The prim's WORLD transform, and it is not optional decoration: a model's
+  // parts are authored around a shared origin and placed by these (a chest's
+  // lid sits above its body only because of this matrix). Points below are in
+  // the prim's own local space, so dropping it collapses every part onto the
+  // origin.
+  //
+  // 16 floats in COLUMN-MAJOR (glm) order, so a consumer can `glm::make_mat4`
+  // it directly. USD stores row-major with a row-vector convention, whose
+  // element-wise copy into a column-major column-vector matrix is exactly the
+  // same layout -- the loader relies on that rather than transposing.
+  // Identity by default.
+  std::array<float, 16> transform{1, 0, 0, 0, 0, 1, 0, 0,
+                                  0, 0, 1, 0, 0, 0, 0, 1};
 
   std::vector<float> positions;   // xyz triples, SOURCE units and SOURCE axis
   std::vector<float> normals;     // xyz triples

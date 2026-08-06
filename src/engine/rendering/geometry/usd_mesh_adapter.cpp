@@ -1,6 +1,10 @@
 #include "engine/rendering/geometry/usd_mesh_adapter.hpp"
 
+#include <algorithm>
+
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_inverse.hpp>  // glm::inverseTranspose
+#include <glm/gtc/type_ptr.hpp>        // glm::make_mat4
 #include <spdlog/spdlog.h>
 
 namespace badlands {
@@ -48,16 +52,42 @@ std::vector<ImportedModel> BuildImportedModels(
     model.name = src.name;
     model.pack_dir = ResolvePackDir(src.material_name, binding);
 
+    // The prim's world placement. Points are authored in the prim's own local
+    // space, so without this every part of a multi-prim model lands on the
+    // origin (a treasure chest's lid inside its body).
+    const glm::mat4 xform = glm::make_mat4(src.transform.data());
+    // Normals need the inverse-transpose, not the matrix: under non-uniform
+    // scale the plain matrix leaves them off the surface rather than
+    // perpendicular to it. Tangents are direction vectors ALONG the surface,
+    // so they take the matrix itself.
+    const glm::mat3 normal_xform = glm::inverseTranspose(glm::mat3(xform));
+    const glm::mat3 tangent_xform{xform};
+    // A mirroring transform (negative determinant) reverses triangle winding,
+    // which would backface-cull the part. Flip the indices back.
+    const bool mirrored = glm::determinant(glm::mat3(xform)) < 0.0f;
+
     StaticTexturedMeshComponent& mesh = model.mesh.mesh;
     mesh.vertices.resize(vertex_count * kTexturedMeshFloatsPerVertex);
     mesh.vertex_count = static_cast<uint32_t>(vertex_count);
     mesh.indices = src.indices;
     mesh.geometry_type = GeometryType::kTexturedMesh;
+    if (mirrored) {
+      for (size_t t = 0; t + 2 < mesh.indices.size(); t += 3) {
+        std::swap(mesh.indices[t + 1], mesh.indices[t + 2]);
+      }
+    }
 
     for (size_t i = 0; i < vertex_count; ++i) {
-      glm::vec3 position = Vec3At(src.positions, i) * scale;
-      glm::vec3 normal = Vec3At(src.normals, i);
-      glm::vec3 tangent = Vec3At(src.tangents, i);
+      // Place first, THEN convert units: metersPerUnit describes the stage, so
+      // it applies to the already-placed point rather than to local coordinates
+      // that the transform would then scale again.
+      glm::vec3 position =
+          glm::vec3(xform * glm::vec4(Vec3At(src.positions, i), 1.0f)) * scale;
+      // Re-normalized because the transform may carry scale, and a shortened
+      // normal darkens the surface.
+      glm::vec3 normal = glm::normalize(normal_xform * Vec3At(src.normals, i));
+      glm::vec3 tangent =
+          glm::normalize(tangent_xform * Vec3At(src.tangents, i));
 
       if (scene.z_up) {
         position = ZUpToYUp(position);
