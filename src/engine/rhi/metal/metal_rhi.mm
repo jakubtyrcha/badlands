@@ -948,7 +948,10 @@ class MetalRenderPass final : public IRenderPass {
 
   void Draw(uint32_t vertex_count, uint32_t instance_count,
             uint32_t first_vertex, uint32_t first_instance) override {
-    if (!pipeline_) return;
+    if (!pipeline_) {
+      spdlog::error("rhi/metal: Draw with no pipeline bound");
+      return;
+    }
     [enc_ drawPrimitives:pipeline_->Topology()
              vertexStart:first_vertex
              vertexCount:vertex_count
@@ -959,7 +962,14 @@ class MetalRenderPass final : public IRenderPass {
   void DrawIndexed(uint32_t index_count, uint32_t instance_count,
                    uint32_t first_index, int32_t base_vertex,
                    uint32_t first_instance) override {
-    if (!pipeline_ || !index_buffer_) return;
+    if (!pipeline_) {
+      spdlog::error("rhi/metal: DrawIndexed with no pipeline bound");
+      return;
+    }
+    if (!index_buffer_) {
+      spdlog::error("rhi/metal: DrawIndexed with no index buffer bound");
+      return;
+    }
     [enc_ drawIndexedPrimitives:pipeline_->Topology()
                      indexCount:index_count
                       indexType:index_type_
@@ -971,8 +981,22 @@ class MetalRenderPass final : public IRenderPass {
   }
 
   void DrawIndexedIndirect(IBuffer* args, uint64_t offset) override {
-    auto* mb = static_cast<MetalBuffer*>(args);
-    if (!pipeline_ || !index_buffer_ || !mb) return;
+    if (!pipeline_) {
+      spdlog::error("rhi/metal: DrawIndexedIndirect with no pipeline bound");
+      return;
+    }
+    if (!index_buffer_) {
+      spdlog::error("rhi/metal: DrawIndexedIndirect with no index buffer bound");
+      return;
+    }
+    // dynamic_cast, not static_cast: a buffer from another backend is a real
+    // caller mistake, and a static_cast reinterprets it into a plausible-
+    // looking pointer that passes a null check and then hands Metal garbage.
+    auto* mb = dynamic_cast<MetalBuffer*>(args);
+    if (!mb || !mb->Handle()) {
+      spdlog::error("rhi/metal: DrawIndexedIndirect with no argument buffer");
+      return;
+    }
     [enc_ drawIndexedPrimitives:pipeline_->Topology()
                       indexType:index_type_
                     indexBuffer:index_buffer_->Handle()
@@ -1021,9 +1045,30 @@ class MetalComputePass final : public IComputePass {
     ApplyTableCompute(enc_, *mt, dynamic_offsets);
   }
   void Dispatch(uint32_t x, uint32_t y, uint32_t z) override {
-    if (!pipeline_) return;
+    if (!pipeline_) {
+      spdlog::error("rhi/metal: Dispatch with no pipeline bound");
+      return;
+    }
     [enc_ dispatchThreadgroups:MTLSizeMake(x, y, z)
          threadsPerThreadgroup:MTLSizeMake(threads_[0], threads_[1], threads_[2])];
+  }
+
+  void DispatchIndirect(IBuffer* args, uint64_t offset) override {
+    if (!pipeline_) {
+      spdlog::error("rhi/metal: DispatchIndirect with no pipeline bound");
+      return;
+    }
+    // dynamic_cast, not static_cast -- see DrawIndexedIndirect.
+    auto* mb = dynamic_cast<MetalBuffer*>(args);
+    if (!mb || !mb->Handle()) {
+      spdlog::error("rhi/metal: DispatchIndirect with no argument buffer");
+      return;
+    }
+    [enc_ dispatchThreadgroupsWithIndirectBuffer:mb->Handle()
+                           indirectBufferOffset:offset
+                          threadsPerThreadgroup:MTLSizeMake(threads_[0],
+                                                            threads_[1],
+                                                            threads_[2])];
   }
   void End() override {
     if (ended_) return;
@@ -1442,6 +1487,18 @@ class MetalDevice final : public IRhiDevice {
   // Macs needed 256, and DX12 needs 256 for CBVs, so a DX12 backend will
   // report that instead.
   uint64_t MinBufferOffsetAlignment() const override { return 32; }
+
+  bool Supports(DeviceFeature f) const override {
+    switch (f) {
+      case DeviceFeature::Atomic64MinMax:
+        // Apple8 is where 64-bit atomic min/max on buffers arrives, and it is
+        // the project's recorded hardware floor. Asked of the device rather
+        // than assumed from the floor, because an older Mac would otherwise
+        // render garbage with no diagnostic.
+        return [device_ supportsFamily:MTLGPUFamilyApple8];
+    }
+    return false;
+  }
 
   size_t InFlightCount() override {
     PruneRetired();

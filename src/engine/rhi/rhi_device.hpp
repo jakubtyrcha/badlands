@@ -33,6 +33,24 @@ enum class BackendKind : uint8_t {
 
 const char* ToString(BackendKind k);
 
+// Hardware capabilities that are NOT universal across the supported floor and
+// that a caller may legitimately need to branch on.
+//
+// Deliberately a short list: a feature belongs here only when the RHI cannot
+// paper over its absence and a caller would otherwise get silently wrong
+// results.
+enum class DeviceFeature : uint8_t {
+  // 64-bit atomic min/max on a device buffer. The primitive a visibility
+  // buffer needs: pack depth above the payload and one atomic resolves the
+  // depth test and commits the payload indivisibly.
+  //
+  // Metal: Apple8 (M2) and later, which is the project's hardware floor.
+  // A device below it compiles the shader and produces garbage.
+  Atomic64MinMax,
+};
+
+const char* ToString(DeviceFeature f);
+
 // What a completed validation scope observed.
 //
 // A distinct type rather than an optional<string>, because "clean" and "never
@@ -178,6 +196,13 @@ class IRhiDevice {
   // on. Metal has no query for it -- the requirement is documented per GPU
   // family -- so the backend states what its family needs.
   virtual uint64_t MinBufferOffsetAlignment() const = 0;
+
+  // Optional hardware capabilities a caller may have to branch on.
+  //
+  // A query rather than an assumption, because the failure mode without one is
+  // silence: a shader using an unsupported feature compiles, runs, and
+  // produces wrong pixels with nothing logged anywhere.
+  virtual bool Supports(DeviceFeature feature) const = 0;
 
   // --- Validation ---
   // All 14 of the engine's existing Dawn validation sites assert "nothing went

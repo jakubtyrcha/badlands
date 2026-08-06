@@ -1499,6 +1499,30 @@ if(BADLANDS_HAVE_SLANG)
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endif()
 
+# badlands_splat_tests: the Dreams-style splat chain, proven by reading pixels.
+# Slang for three of the four passes and hand-written MSL for the atomic one --
+# Slang 2026.14.1 emits the 32-bit atomic intrinsic for Metal, which MSL rejects
+# on a 64-bit type. It needs BOTH a Slang SDK and a Metal device, so it cannot
+# live in badlands_slang_tests (no device) or badlands_rhi_metal_tests (no
+# compiler).
+if(BADLANDS_HAVE_SLANG AND APPLE)
+    add_executable(badlands_splat_tests
+        src/engine/tests/splat_tests.cpp
+        third_party/catch2/extras/catch_amalgamated.cpp
+    )
+    target_include_directories(badlands_splat_tests PRIVATE
+        ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+        ${CMAKE_SOURCE_DIR}/third_party/glm
+        ${CMAKE_SOURCE_DIR}/src/engine/tests
+    )
+    target_link_libraries(badlands_splat_tests PRIVATE badlands_slang)
+    target_link_options(badlands_splat_tests PRIVATE "-Wl,-ld_new")
+    add_test(NAME badlands_splat_tests COMMAND badlands_splat_tests
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    set_tests_properties(badlands_splat_tests PROPERTIES
+        ENVIRONMENT "MTL_DEBUG_LAYER=1;MTL_SHADER_VALIDATION=1")
+endif()
+
 add_executable(badlands_readback_tests
     src/engine/tests/readback_tests.cpp
     third_party/catch2/extras/catch_amalgamated.cpp

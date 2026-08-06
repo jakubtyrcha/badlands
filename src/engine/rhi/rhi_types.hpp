@@ -340,4 +340,26 @@ struct DrawIndexedIndirectArgs {
 static_assert(sizeof(DrawIndexedIndirectArgs) == 20,
               "indirect args must stay the standard 20-byte layout");
 
+// Mirrors the standard 12-byte dispatch indirect args. A compute shader writes
+// this to drive a later dispatch from a count only the GPU knows -- how many
+// points survived a cull, how many splats an SDF produced.
+//
+// y and z default to 0, NOT to the 1 that `Dispatch(x, y = 1, z = 1)` uses,
+// and the difference is a trap worth knowing about: `DispatchIndirectArgs a{};
+// a.x = n;` dispatches NOTHING, and nothing reports it -- the counts live in
+// GPU memory, so the validation layer deliberately does not check them.
+//
+// Kept at 0 anyway, because this struct mirrors what the GPU writes rather
+// than what a host would like to type. A convenience default here would be a
+// value no shader ever produces, and it would read as "the layout says y is 1"
+// to anyone matching this against a shader. A host seeding it sets all three;
+// a shader writing it sets all three (see shaders/slang/splat/finalize.slang).
+struct DispatchIndirectArgs {
+  uint32_t x = 0;
+  uint32_t y = 0;
+  uint32_t z = 0;
+};
+static_assert(sizeof(DispatchIndirectArgs) == 12,
+              "dispatch indirect args must stay the standard 12-byte layout");
+
 }  // namespace badlands::rhi

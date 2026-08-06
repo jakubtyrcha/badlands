@@ -423,7 +423,12 @@ class NullRenderPass final : public IRenderPass {
   NullRenderPass(CommandLog* log, std::string label)
       : log_(log), label_(std::move(label)) {}
 
+  // Tracked, not merely logged. Metal refuses a draw with no pipeline bound,
+  // so a Null that recorded one anyway would be the SILENT backend on the same
+  // input -- the divergence rule 6 exists to stop, and the one that makes Null
+  // a bad oracle for the shared conformance list.
   void SetPipeline(IRenderPipeline* p) override {
+    pipeline_ = p;
     log_->Record({.kind = RecordedCommand::Kind::SetRenderPipeline,
                   .label = label_, .object = p});
   }
@@ -450,6 +455,10 @@ class NullRenderPass final : public IRenderPass {
 
   void Draw(uint32_t vertex_count, uint32_t instance_count,
             uint32_t first_vertex, uint32_t first_instance) override {
+    if (!pipeline_) {
+      spdlog::error("rhi/null: Draw with no pipeline bound");
+      return;
+    }
     RecordedCommand c{.kind = RecordedCommand::Kind::Draw, .label = label_};
     c.draw_args.index_count = vertex_count;
     c.draw_args.instance_count = instance_count;
@@ -461,6 +470,14 @@ class NullRenderPass final : public IRenderPass {
   void DrawIndexed(uint32_t index_count, uint32_t instance_count,
                    uint32_t first_index, int32_t base_vertex,
                    uint32_t first_instance) override {
+    if (!pipeline_) {
+      spdlog::error("rhi/null: DrawIndexed with no pipeline bound");
+      return;
+    }
+    if (!index_buffer_) {
+      spdlog::error("rhi/null: DrawIndexed with no index buffer bound");
+      return;
+    }
     RecordedCommand c{.kind = RecordedCommand::Kind::DrawIndexed,
                       .label = label_, .object = index_buffer_};
     c.draw_args = {index_count, instance_count, first_index, base_vertex,
@@ -471,14 +488,33 @@ class NullRenderPass final : public IRenderPass {
   // Resolves the args from the indirect buffer's real bytes. This is what lets
   // a GPU-driven draw be asserted on without a GPU.
   void DrawIndexedIndirect(IBuffer* args, uint64_t offset) override {
+    if (!pipeline_) {
+      spdlog::error("rhi/null: DrawIndexedIndirect with no pipeline bound");
+      return;
+    }
+    if (!index_buffer_) {
+      spdlog::error("rhi/null: DrawIndexedIndirect with no index buffer bound");
+      return;
+    }
+    auto* nb = dynamic_cast<NullBuffer*>(args);
+    if (!nb) {
+      spdlog::error(
+          "rhi/null: DrawIndexedIndirect with no argument buffer (or one from "
+          "another backend), so there is nothing to read a count from");
+      return;
+    }
+    DrawIndexedIndirectArgs resolved{};
+    std::span<uint8_t> dst(reinterpret_cast<uint8_t*>(&resolved),
+                           sizeof(resolved));
+    if (!nb->Read(offset, dst)) {
+      spdlog::error(
+          "rhi/null: DrawIndexedIndirect cannot read {} bytes at offset {} of "
+          "buffer '{}'", sizeof(resolved), offset, nb->GetLabel());
+      return;
+    }
     RecordedCommand c{.kind = RecordedCommand::Kind::DrawIndexedIndirect,
                       .label = label_, .object = args};
-    if (auto* nb = dynamic_cast<NullBuffer*>(args)) {
-      DrawIndexedIndirectArgs resolved{};
-      std::span<uint8_t> dst(reinterpret_cast<uint8_t*>(&resolved),
-                             sizeof(resolved));
-      if (nb->Read(offset, dst)) c.draw_args = resolved;
-    }
+    c.draw_args = resolved;
     log_->Record(std::move(c));
   }
 
@@ -492,6 +528,7 @@ class NullRenderPass final : public IRenderPass {
  private:
   CommandLog* log_;
   std::string label_;
+  IRenderPipeline* pipeline_ = nullptr;
   IBuffer* index_buffer_ = nullptr;
   bool ended_ = false;
 };
@@ -501,7 +538,11 @@ class NullComputePass final : public IComputePass {
   NullComputePass(CommandLog* log, std::string label)
       : log_(log), label_(std::move(label)) {}
 
+  // Tracked for the same reason as the render pass's: Metal refuses a dispatch
+  // with no pipeline bound, and a Null that recorded one would be the silent
+  // half of a divergence.
   void SetPipeline(IComputePipeline* p) override {
+    pipeline_ = p;
     log_->Record({.kind = RecordedCommand::Kind::SetComputePipeline,
                   .label = label_, .object = p});
   }
@@ -515,8 +556,45 @@ class NullComputePass final : public IComputePass {
     log_->Record(std::move(c));
   }
   void Dispatch(uint32_t x, uint32_t y, uint32_t z) override {
+    if (!pipeline_) {
+      spdlog::error("rhi/null: Dispatch with no pipeline bound");
+      return;
+    }
     RecordedCommand c{.kind = RecordedCommand::Kind::Dispatch, .label = label_};
     c.dispatch[0] = x; c.dispatch[1] = y; c.dispatch[2] = z;
+    log_->Record(std::move(c));
+  }
+
+  // Resolves the counts from the buffer's REAL bytes, exactly as
+  // DrawIndexedIndirect does. That is what makes a GPU-driven dispatch count
+  // assertable with no GPU: a test seeds the args and reads back what would
+  // have been dispatched.
+  void DispatchIndirect(IBuffer* args, uint64_t offset) override {
+    if (!pipeline_) {
+      spdlog::error("rhi/null: DispatchIndirect with no pipeline bound");
+      return;
+    }
+    auto* nb = dynamic_cast<NullBuffer*>(args);
+    if (!nb) {
+      spdlog::error(
+          "rhi/null: DispatchIndirect with no argument buffer (or one from "
+          "another backend), so there is nothing to read a count from");
+      return;
+    }
+    DispatchIndirectArgs resolved{};
+    std::span<uint8_t> dst(reinterpret_cast<uint8_t*>(&resolved),
+                           sizeof(resolved));
+    if (!nb->Read(offset, dst)) {
+      spdlog::error(
+          "rhi/null: DispatchIndirect cannot read {} bytes at offset {} of "
+          "buffer '{}'", sizeof(resolved), offset, nb->GetLabel());
+      return;
+    }
+    RecordedCommand c{.kind = RecordedCommand::Kind::DispatchIndirect,
+                      .label = label_, .object = args};
+    c.dispatch[0] = resolved.x;
+    c.dispatch[1] = resolved.y;
+    c.dispatch[2] = resolved.z;
     log_->Record(std::move(c));
   }
   void End() override {
@@ -530,6 +608,7 @@ class NullComputePass final : public IComputePass {
  private:
   CommandLog* log_;
   std::string label_;
+  IComputePipeline* pipeline_ = nullptr;
   bool ended_ = false;
 };
 
@@ -690,6 +769,10 @@ class NullDevice final : public IRhiDevice {
   // satisfies every backend. Null is where portability problems should surface
   // first, not last.
   uint64_t MinBufferOffsetAlignment() const override { return 256; }
+
+  // Null executes no shaders, so it supports no shader-level feature. Claiming
+  // otherwise would let a test "pass" against a backend that ran nothing.
+  bool Supports(DeviceFeature) const override { return false; }
   // Null executes on Submit, so nothing is ever in flight. This is a real
   // answer, not a stub -- which is why the base declares it pure.
   size_t InFlightCount() override { return 0; }

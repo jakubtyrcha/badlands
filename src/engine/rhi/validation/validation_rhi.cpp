@@ -158,6 +158,45 @@ class ValidationBindingTable final : public IBindingTable {
   std::vector<uint32_t> dynamic_entries_;
 };
 
+// The CPU-side half of an indirect call: the args buffer must be usable, the
+// offset aligned, and the struct must fit. The COUNTS live on the GPU and
+// cannot be checked here at all -- which is why a zero count is legal.
+//
+// Metal requires an indirect buffer offset to be 4-byte aligned. Nothing
+// checked that before, for draws either.
+bool CheckIndirectArgs(Recorder& rec, StateTracker& states, IBuffer* args,
+                       uint64_t offset, uint64_t struct_size,
+                       const char* what) {
+  if (!args) {
+    rec.Report(fmt::format("{}: no argument buffer", what));
+    return false;
+  }
+  if (!Has(args->GetUsage(), BufferUsage::Indirect)) {
+    rec.Report(fmt::format("{}: buffer '{}' lacks BufferUsage::Indirect", what,
+                           args->GetLabel()));
+    return false;
+  }
+  if (offset % 4 != 0) {
+    rec.Report(fmt::format(
+        "{}: offset {} into '{}' is not 4-byte aligned, which every backend "
+        "requires of an indirect buffer",
+        what, offset, args->GetLabel()));
+    return false;
+  }
+  const uint64_t size = args->GetSize();
+  // Subtraction, as everywhere: offset + struct_size wraps.
+  if (size < struct_size || offset > size - struct_size) {
+    rec.Report(fmt::format(
+        "{}: {}-byte args at offset {} do not fit in buffer '{}' of {} bytes",
+        what, struct_size, offset, args->GetLabel(), size));
+    return false;
+  }
+  // The intent check Metal cannot make for us, and the one a DX12 barrier
+  // will be emitted from.
+  states.Expect(rec, args, ResourceState::IndirectArg, what);
+  return true;
+}
+
 // Every dynamic offset must be supplied, aligned, and inside its buffer.
 //
 // Refused rather than reported, because there is no safe way to proceed: too
@@ -334,30 +373,11 @@ class ValidationRenderPass final : public IRenderPass {
       ctx_->recorder.Report("DrawIndexedIndirect: no index buffer bound");
       return;
     }
-    if (!args) {
-      ctx_->recorder.Report("DrawIndexedIndirect: no argument buffer");
+    if (!CheckIndirectArgs(ctx_->recorder, *states_, args, offset,
+                           sizeof(DrawIndexedIndirectArgs),
+                           "DrawIndexedIndirect")) {
       return;
     }
-    if (!Has(args->GetUsage(), BufferUsage::Indirect)) {
-      ctx_->recorder.Report("DrawIndexedIndirect: buffer '" + args->GetLabel() +
-                            "' lacks BufferUsage::Indirect");
-      return;
-    }
-    // The args themselves live on the GPU and cannot be checked here, but the
-    // OFFSET is a CPU-side value crossing the API, so rule 8 applies to it.
-    // Subtraction, for the same wrap reason as everywhere else.
-    constexpr uint64_t kArgsSize = sizeof(DrawIndexedIndirectArgs);
-    const uint64_t size = args->GetSize();
-    if (size < kArgsSize || offset > size - kArgsSize) {
-      ctx_->recorder.Report(fmt::format(
-          "DrawIndexedIndirect: {}-byte args at offset {} do not fit in "
-          "buffer '{}' of {} bytes",
-          kArgsSize, offset, args->GetLabel(), size));
-      return;
-    }
-    // The intent check that Metal cannot make for us.
-    states_->Expect(ctx_->recorder, args, ResourceState::IndirectArg,
-                    "DrawIndexedIndirect");
     inner_->DrawIndexedIndirect(args, offset);
   }
 
@@ -464,6 +484,23 @@ class ValidationComputePass final : public IComputePass {
       return;
     }
     inner_->Dispatch(x, y, z);
+  }
+
+  void DispatchIndirect(IBuffer* args, uint64_t offset) override {
+    if (Ended("DispatchIndirect") || StaleBindings("DispatchIndirect")) return;
+    if (!pipeline_) {
+      ctx_->recorder.Report("DispatchIndirect: no pipeline bound");
+      return;
+    }
+    // NOTE: no zero-count check, deliberately. The counts are in GPU memory,
+    // and a zero-group indirect dispatch is a legal no-op -- unlike the direct
+    // Dispatch above, which refuses zero because Metal's debug layer aborts on
+    // it. The asymmetry is real, not an oversight.
+    if (!CheckIndirectArgs(ctx_->recorder, *states_, args, offset,
+                           sizeof(DispatchIndirectArgs), "DispatchIndirect")) {
+      return;
+    }
+    inner_->DispatchIndirect(args, offset);
   }
   void End() override {
     if (ended_) return;
@@ -1101,6 +1138,7 @@ class ValidationDevice final : public IRhiDevice {
   uint64_t MinBufferOffsetAlignment() const override {
     return inner_->MinBufferOffsetAlignment();
   }
+  bool Supports(DeviceFeature f) const override { return inner_->Supports(f); }
 
   void BeginValidationScope() override { ctx_.recorder.BeginScope(); }
   std::optional<ValidationReport> EndValidationScope() override {

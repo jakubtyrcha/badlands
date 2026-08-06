@@ -171,6 +171,27 @@ TEST_CASE("Null: dynamic offsets reach the backend", "[rhi]") {
   rhitest::CheckDynamicOffsetsReachTheBackend(*d);
 }
 
+TEST_CASE("Null: indirect dispatch reads its count", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckDispatchIndirectReadsItsCount(*d);
+}
+TEST_CASE("Null: a zero indirect dispatch is allowed", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckZeroIndirectDispatchIsAllowed(*d);
+}
+TEST_CASE("Null: an indirect dispatch with no args is refused", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckIndirectDispatchWithoutArgsIsRefused(*d);
+}
+TEST_CASE("Null: a draw with no pipeline is refused", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckDrawWithoutPipelineIsRefused(*d);
+}
+TEST_CASE("Null: the feature query answers", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckFeatureQueryAnswers(*d);
+}
+
 TEST_CASE("Null: swapchain acquire/present cycle", "[rhi]") {
   auto d = MakeNull();
   rhitest::CheckSwapchainAcquirePresentCycle(*d);
@@ -369,23 +390,31 @@ TEST_CASE("Null: command log preserves ordering across pass kinds", "[rhi]") {
   cp->Dispatch(4);
   cp->End();
 
+  // The pipeline is bound because a draw without one is now REFUSED on both
+  // backends, not merely recorded. This case is about command ORDER, so it
+  // states the precondition rather than leaning on Null having been lenient.
+  auto raster = device->CreateRenderPipeline(
+      {.vertex_shader = module.get(), .fragment_shader = module.get(),
+       .color_formats = {Format::RGBA8Unorm}});
   RenderPassDesc desc;
   desc.color_attachments.push_back({.view = color->GetDefaultView()});
   auto* rp = encoder->BeginRenderPass(desc);
+  rp->SetPipeline(raster.get());
   rp->Draw(3);
   rp->End();
   encoder->Finish();
 
   const auto& all = log->All();
-  REQUIRE(all.size() >= 8);
+  REQUIRE(all.size() >= 9);
   CHECK(all[0].kind == Kind::BeginComputePass);
   CHECK(all[1].kind == Kind::SetComputePipeline);
   CHECK(all[2].kind == Kind::Dispatch);
   CHECK(all[3].kind == Kind::EndComputePass);
   CHECK(all[4].kind == Kind::BeginRenderPass);
-  CHECK(all[5].kind == Kind::Draw);
-  CHECK(all[6].kind == Kind::EndRenderPass);
-  CHECK(all[7].kind == Kind::Finish);
+  CHECK(all[5].kind == Kind::SetRenderPipeline);
+  CHECK(all[6].kind == Kind::Draw);
+  CHECK(all[7].kind == Kind::EndRenderPass);
+  CHECK(all[8].kind == Kind::Finish);
 }
 
 TEST_CASE("Null: reflection merges vertex and fragment stages", "[rhi]") {
