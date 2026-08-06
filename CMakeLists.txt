@@ -706,7 +706,8 @@ add_library(badlands_patch_providers STATIC
     src/mapgen/synthetic_patch_source.cpp
     src/mapgen/file_patch_source.cpp
     src/mapgen/coarse_world_patch_source.cpp
-    src/mapgen/cubic_sample.cpp)
+    src/mapgen/cubic_sample.cpp
+    src/mapgen/relief_filter.cpp)
 target_link_libraries(badlands_patch_providers PUBLIC badlands_patch_lib)
 
 # badlands_mapview_view: everything the map tool needs to fetch a patch and
