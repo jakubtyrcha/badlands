@@ -121,6 +121,7 @@ corrosion_set_env_vars(ui "RUSTFLAGS=-Cpanic=unwind")
 # every build.
 add_library(badlands_rhi STATIC
     src/engine/rhi/rhi_common.cpp
+    src/engine/rhi/rhi_frame_allocator.cpp
     src/engine/rhi/null/null_rhi.cpp
     src/engine/rhi/validation/validation_rhi.cpp
 )

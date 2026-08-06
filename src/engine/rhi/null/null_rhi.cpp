@@ -552,6 +552,11 @@ class NullDevice final : public IRhiDevice {
   }
 
   size_t PendingDeletions() const override { return retire_->Count(); }
+
+  // The STRICTEST value any target requires, so a layout that satisfies Null
+  // satisfies every backend. Null is where portability problems should surface
+  // first, not last.
+  uint64_t MinBufferOffsetAlignment() const override { return 256; }
   // Null executes on Submit, so nothing is ever in flight. This is a real
   // answer, not a stub -- which is why the base declares it pure.
   size_t InFlightCount() override { return 0; }

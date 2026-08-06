@@ -27,6 +27,7 @@
 
 #include "engine/rhi/null/null_rhi.hpp"
 #include "engine/rhi/rhi_device.hpp"
+#include "engine/rhi/rhi_frame_allocator.hpp"
 
 namespace badlands::rhi::test {
 
@@ -663,6 +664,129 @@ inline void CheckResourceIdsAreUnique(IRhiDevice& device) {
                                  .format = Format::RGBA8Unorm,
                                  .usage = TextureUsage::Sampled});
   CHECK(c->Id() != b->Id());
+}
+
+// The transient allocator: alignment, growth, the cap, and recycling.
+inline void CheckFrameAllocatorBasics(IRhiDevice& device) {
+  auto alloc = FrameAllocator::Create(device, {.block_size = 4096,
+                                               .max_bytes_per_frame = 16384,
+                                               .label = "basics"});
+  REQUIRE(alloc);
+  const uint64_t min_align = device.MinBufferOffsetAlignment();
+  CHECK(min_align >= 1);
+  CHECK((min_align & (min_align - 1)) == 0);  // power of two
+
+  device.BeginFrame();
+  alloc->BeginFrame(device.CurrentFrame());
+
+  auto a = alloc->Allocate(100);
+  REQUIRE(a);
+  CHECK(a->buffer != nullptr);
+  CHECK(a->offset % min_align == 0);
+  CHECK(a->size == 100);
+
+  // The next allocation must not overlap the first, and must still be aligned.
+  auto b = alloc->Allocate(100);
+  REQUIRE(b);
+  CHECK(b->offset % min_align == 0);
+  CHECK(b->offset >= a->offset + a->size);
+
+  CHECK(alloc->BlocksThisFrame() == 1);
+  device.EndFrame();
+  device.WaitIdle();
+}
+
+// Refusals. A caller that treats a failed allocation as an empty one writes
+// nothing and renders nothing, with no idea why.
+inline void CheckFrameAllocatorRefusals(IRhiDevice& device) {
+  auto alloc = FrameAllocator::Create(device, {.block_size = 4096,
+                                               .max_bytes_per_frame = 8192,
+                                               .label = "refusals"});
+  REQUIRE(alloc);
+  device.BeginFrame();
+  alloc->BeginFrame(device.CurrentFrame());
+
+  const std::string log = CaptureLog([&] {
+    CHECK_FALSE(alloc->Allocate(0).has_value());        // zero bytes
+    CHECK_FALSE(alloc->Allocate(64, 24).has_value());   // not a power of two
+    CHECK_FALSE(alloc->Allocate(1024 * 1024).has_value());  // past the cap
+  });
+  INFO(log);
+  CHECK(log.find("zero-byte") != std::string::npos);
+  CHECK(log.find("power of two") != std::string::npos);
+  CHECK(log.find("cap") != std::string::npos);
+
+  device.EndFrame();
+  device.WaitIdle();
+}
+
+// Growing past the block is a WARNING, not a failure: a heavy frame should
+// still render. Exceeding the cap is an error, because an unbounded ring hides
+// a leak instead of reporting one.
+inline void CheckFrameAllocatorGrowsThenCaps(IRhiDevice& device) {
+  auto alloc = FrameAllocator::Create(device, {.block_size = 1024,
+                                               .max_bytes_per_frame = 4096,
+                                               .label = "growth"});
+  REQUIRE(alloc);
+  device.BeginFrame();
+  alloc->BeginFrame(device.CurrentFrame());
+
+  const std::string log = CaptureLog([&] {
+    // Fills the first block, then forces growth.
+    CHECK(alloc->Allocate(1024).has_value());
+    CHECK(alloc->Allocate(1024).has_value());
+  });
+  INFO(log);
+  CHECK(alloc->BlocksThisFrame() == 2);
+  CHECK(log.find("undersized") != std::string::npos);
+
+  device.EndFrame();
+  device.WaitIdle();
+}
+
+// A slot is reset only when its frame comes round again -- which BeginFrame
+// has already blocked to guarantee. Two consecutive frames must not hand out
+// the same bytes.
+inline void CheckFrameAllocatorRecyclesPerSlot(IRhiDevice& device) {
+  auto alloc = FrameAllocator::Create(device, {.block_size = 4096,
+                                               .label = "recycle"});
+  REQUIRE(alloc);
+
+  device.BeginFrame();
+  const uint64_t first_frame = device.CurrentFrame();
+  alloc->BeginFrame(first_frame);
+  auto first = alloc->Allocate(256);
+  REQUIRE(first);
+  device.EndFrame();
+
+  device.BeginFrame();
+  alloc->BeginFrame(device.CurrentFrame());
+  auto second = alloc->Allocate(256);
+  REQUIRE(second);
+  device.EndFrame();
+
+  // Different frames, so different slots: the same offset is fine, the same
+  // BUFFER is not, or the second frame is overwriting bytes the first may
+  // still be having read.
+  if (device.FramesInFlight() > 1) {
+    CHECK(first->buffer != second->buffer);
+  }
+
+  // Advance until the FIRST slot comes round again -- exactly
+  // frames_in_flight frames later, whatever that is configured to.
+  const uint64_t wrap_frame = first_frame + device.FramesInFlight();
+  while (device.CurrentFrame() < wrap_frame) {
+    device.BeginFrame();
+    alloc->BeginFrame(device.CurrentFrame());
+    if (device.CurrentFrame() < wrap_frame) device.EndFrame();
+  }
+
+  auto wrapped = alloc->Allocate(256);
+  REQUIRE(wrapped);
+  CHECK(wrapped->buffer == first->buffer);
+  CHECK(wrapped->offset == first->offset);
+  device.EndFrame();
+  device.WaitIdle();
 }
 
 // Submitted work must retire rather than accumulate.
@@ -1356,6 +1480,10 @@ inline void RunAllConformanceChecks(IRhiDevice& device) {
   CheckDestroyIsDeferredToFrameRetirement(device);
   CheckDestroyOutsideAFrameIsImmediate(device);
   CheckResourceIdsAreUnique(device);
+  CheckFrameAllocatorBasics(device);
+  CheckFrameAllocatorRefusals(device);
+  CheckFrameAllocatorGrowsThenCaps(device);
+  CheckFrameAllocatorRecyclesPerSlot(device);
   CheckTextureCreationAndViews(device);
   CheckComputePipelineReportsWorkgroupSize(device);
   CheckReflectionLookupByName(device);

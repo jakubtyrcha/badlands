@@ -1079,6 +1079,13 @@ class MetalDevice final : public IRhiDevice {
 
   size_t PendingDeletions() const override { return retire_->Count(); }
 
+  // 32, not 256. Metal has no query for this -- the requirement is documented
+  // per GPU family -- and the project's hardware floor is Apple silicon (M2+),
+  // where constant-address-space buffer offsets need 32-byte alignment. Intel
+  // Macs needed 256, and DX12 needs 256 for CBVs, so a DX12 backend will
+  // report that instead.
+  uint64_t MinBufferOffsetAlignment() const override { return 32; }
+
   size_t InFlightCount() override {
     PruneRetired();
     return in_flight_.size();

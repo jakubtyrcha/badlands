@@ -123,6 +123,23 @@ TEST_CASE("Null: resource ids are never reused", "[rhi]") {
   rhitest::CheckResourceIdsAreUnique(*d);
 }
 
+TEST_CASE("Null: frame allocator basics", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckFrameAllocatorBasics(*d);
+}
+TEST_CASE("Null: frame allocator refusals", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckFrameAllocatorRefusals(*d);
+}
+TEST_CASE("Null: frame allocator grows then caps", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckFrameAllocatorGrowsThenCaps(*d);
+}
+TEST_CASE("Null: frame allocator recycles per slot", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckFrameAllocatorRecyclesPerSlot(*d);
+}
+
 // --- Pacing, proven deterministically under manual retirement ---------------
 //
 // This is what Null's manual retirement mode is FOR. Immediate mode retires at

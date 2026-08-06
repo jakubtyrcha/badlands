@@ -877,6 +877,9 @@ class ValidationDevice final : public IRhiDevice {
   size_t PendingDeletions() const override {
     return inner_->PendingDeletions();
   }
+  uint64_t MinBufferOffsetAlignment() const override {
+    return inner_->MinBufferOffsetAlignment();
+  }
 
   void BeginValidationScope() override { ctx_.recorder.BeginScope(); }
   std::optional<ValidationReport> EndValidationScope() override {

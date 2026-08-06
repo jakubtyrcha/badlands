@@ -461,6 +461,23 @@ TEST_CASE("metal: resource ids are never reused", "[rhi]") {
   rhitest::CheckResourceIdsAreUnique(*d);
 }
 
+TEST_CASE("metal: frame allocator basics", "[rhi]") {
+  auto d = MakeMetal();
+  rhitest::CheckFrameAllocatorBasics(*d);
+}
+TEST_CASE("metal: frame allocator refusals", "[rhi]") {
+  auto d = MakeMetal();
+  rhitest::CheckFrameAllocatorRefusals(*d);
+}
+TEST_CASE("metal: frame allocator grows then caps", "[rhi]") {
+  auto d = MakeMetal();
+  rhitest::CheckFrameAllocatorGrowsThenCaps(*d);
+}
+TEST_CASE("metal: frame allocator recycles per slot", "[rhi]") {
+  auto d = MakeMetal();
+  rhitest::CheckFrameAllocatorRecyclesPerSlot(*d);
+}
+
 TEST_CASE("metal: a deferred handle is really released rather than stranded",
           "[rhi][metal]") {
   // ASan cannot see this. It catches memory freed and then touched, but an

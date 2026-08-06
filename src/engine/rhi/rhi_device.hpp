@@ -164,6 +164,17 @@ class IRhiDevice {
   // on could be entirely broken here and every test would still pass.
   virtual size_t PendingDeletions() const = 0;
 
+  // Minimum alignment, in bytes, for a buffer offset that will be bound to a
+  // shader. Always a power of two.
+  //
+  // Reported by the backend rather than hardcoded, because the figure differs
+  // by an order of magnitude: DX12 requires 256 for constant buffer views,
+  // Apple silicon needs 32. Baking 256 in would be correct everywhere and
+  // waste 8x of every transient allocation on the platform we actually ship
+  // on. Metal has no query for it -- the requirement is documented per GPU
+  // family -- so the backend states what its family needs.
+  virtual uint64_t MinBufferOffsetAlignment() const = 0;
+
   // --- Validation ---
   // All 14 of the engine's existing Dawn validation sites assert "nothing went
   // wrong", none assert that an error is raised (probe C). So the contract is
