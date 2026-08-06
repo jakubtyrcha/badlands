@@ -2719,6 +2719,11 @@ void VolumeDiscretizationInvariance() {
   Params base = Base(48);
   base.terrain = Params::Terrain::Bowl;
   base.steps = 120;
+  // Water OFF, so this measures the EROSION path alone. Each particle converts
+  // its whole remaining volume to standing water on contact or at rest, which
+  // is a second channel by which drops reaches the physics; T2b covers that one
+  // separately so a failure here names which channel leaks.
+  base.enable_water = false;
   auto rel = [](double x, double y) {
     return std::fabs(x - y) / std::max(std::fabs(x), 1e-9);
   };
@@ -3463,6 +3468,42 @@ void WaterDrainsOffTheMap() {
   Check("T16 water inland drains off the map", iters_to_drain > 0, buf);
 }
 
+// --- T2b. the water conversion scales with parcel count --------------------
+// Total water is drops * drop_volume and identical across these runs, so the
+// water DELIVERED to the standing-water field must be too. Measures delivered
+// VOLUME, not lake area -- where it lands is a separate question from whether
+// the right amount arrives.
+void WaterConversionScales() {
+  auto delivered = [](int drops, float vol) {
+    Params p = Isolated(48);
+    p.enable_water = true;
+    p.enable_erosion = true;       // particles must move to reach a sink
+    p.terrain = Params::Terrain::Bowl;
+    p.evaporation_m_per_yr = 0.f;  // measure ARRIVAL, not equilibrium
+    p.sea_level_m = -1e6f;         // and nothing drains at the boundary
+    p.steps = 120;
+    p.drops = drops;
+    p.drop_volume = vol;
+    std::vector<Lake> lakes; SimStats st;
+    Grid g = Run(p, lakes, st);
+    double v = 0;
+    for (float w : g.water) v += double(w);
+    return v * double(p.relief_m);
+  };
+  const double a = delivered(32, 4.0f), b = delivered(64, 2.0f),
+               c = delivered(128, 1.0f);
+  auto rel = [](double x, double y) {
+    return std::fabs(x - y) / std::max(std::fabs(x), 1e-9);
+  };
+  const double d1 = rel(a, b), d2 = rel(b, c);
+  char buf[200];
+  std::snprintf(buf, sizeof(buf),
+                "delivered %.3e / %.3e / %.3e m at 32x4 / 64x2 / 128x1; "
+                "successive %.0f%% then %.0f%%", a, b, c, 100 * d1, 100 * d2);
+  Check("T2b water conversion scales with parcel count",
+        d1 < 0.10 && d2 < 0.10, buf);
+}
+
 int RunAll() {
   std::printf("protogen sanity tests (small grids, production 16 m cells)\n");
   MassConservation();
@@ -3487,6 +3528,7 @@ int RunAll() {
   std::printf("\n  physics invariants (PEND = mechanism not built yet)\n");
   TerminalVelocityManning();
   VolumeDiscretizationInvariance();
+  WaterConversionScales();
   DiffusionRelaxesRidge();
   ParticleNeverSkipsACell();
   CascadeThresholdGate();
