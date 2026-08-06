@@ -224,6 +224,13 @@ target_compile_definitions(badlands_rhi PUBLIC
 # fails the depth test, which is exactly how rhi_lab first rendered pure sky.
 target_compile_definitions(badlands_rhi PUBLIC GLM_FORCE_DEPTH_ZERO_TO_ONE)
 
+# badlands_render_graph: pass declaration, ordering, and barrier derivation.
+# Depends on the RHI and NOTHING else -- in particular not on badlands_slang.
+# The graph is handed pipelines; it never compiles a shader, so the dependency
+# runs one way and a headless test needs no shader toolchain.
+add_library(badlands_render_graph STATIC src/engine/graph/render_graph.cpp)
+target_link_libraries(badlands_render_graph PUBLIC badlands_rhi)
+
 # badlands_rhi_app: the windowed render loop on the RHI, shared by every app
 # that opens a window. Separate from badlands_rhi so the RHI itself never links
 # SDL — the RHI runs headless, and a swapchain is only one of its consumers.
@@ -1347,6 +1354,25 @@ if(APPLE)
 endif()
 add_test(NAME badlands_rhi_tests COMMAND badlands_rhi_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# badlands_render_graph_tests: the graph against Null, with no GPU. The
+# transitions it derives are only observable through the validation decorator —
+# Metal renders correctly whether or not any were declared — so this is where
+# the graph's barrier derivation is actually checked.
+add_executable(badlands_render_graph_tests
+    src/engine/tests/render_graph_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_render_graph_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${CMAKE_SOURCE_DIR}/src/engine/tests
+)
+target_link_libraries(badlands_render_graph_tests PRIVATE badlands_render_graph)
+if(APPLE)
+    target_link_options(badlands_render_graph_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_render_graph_tests COMMAND badlands_render_graph_tests
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 # badlands_rhi_metal_tests: the SAME conformance list against the real backend,
 # plus readback-based correctness Null cannot assert. Needs a Metal device.
 if(APPLE)
@@ -1446,6 +1472,48 @@ if(BADLANDS_HAVE_SLANG AND APPLE)
         set_tests_properties(rhi_lab_rejects_${bad_name}
                              PROPERTIES WILL_FAIL TRUE)
     endforeach()
+endif()
+
+# badlands_object_viewer: the next iteration of badlands_viewer, on the RHI and
+# the render graph. Windowed and headless run the SAME graph — only the imported
+# output texture differs — so the headless test exercises the real path.
+if(APPLE)
+    add_executable(badlands_object_viewer src/executables/object_viewer/main.cpp)
+    target_link_libraries(badlands_object_viewer PRIVATE
+        badlands_render_graph badlands_rhi_app assets)
+    target_include_directories(badlands_object_viewer PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/third_party/glm
+        ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
+        ${CMAKE_SOURCE_DIR}/src/crates/assets/include)
+    target_link_options(badlands_object_viewer PRIVATE "-Wl,-ld_new")
+
+    # Headless render, asserted through the exit code and a pixel check. Writes
+    # into the BUILD tree: a stray .png in the repo root would match an LFS
+    # pattern in .gitattributes and get committed as a pointer.
+    add_test(NAME object_viewer_headless
+             COMMAND badlands_object_viewer --headless --width 64 --height 64
+                     --out ${CMAKE_BINARY_DIR}/object_viewer_headless.png
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+    foreach(bad_args "--width;0" "--height;4294967297" "--frames;-1" "--nope")
+        string(REPLACE ";" "_" bad_name "${bad_args}")
+        string(REPLACE "-" "" bad_name "${bad_name}")
+        add_test(NAME object_viewer_rejects_${bad_name}
+                 COMMAND badlands_object_viewer ${bad_args} --headless
+                         --out ${CMAKE_BINARY_DIR}/object_viewer_reject.png
+                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+        set_tests_properties(object_viewer_rejects_${bad_name}
+                             PROPERTIES WILL_FAIL TRUE)
+    endforeach()
+
+    # Windowed, behind the display label like rhi_lab's: over SSH or with the
+    # screen locked it would fail for reasons that say nothing about the code.
+    add_test(NAME object_viewer_windowed
+             COMMAND badlands_object_viewer --frames 20 --width 640 --height 480
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    set_tests_properties(object_viewer_windowed PROPERTIES
+                         LABELS display TIMEOUT 120)
 endif()
 
 # badlands_slang_tests: compile, cache, hot-reload and reflection, against
