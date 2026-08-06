@@ -25,51 +25,84 @@ void check_float3_approx(const simd_float3 actual, const simd_float3 expected) {
     CHECK(actual.z == doctest::Approx(expected.z));
 }
 
+// A node at the origin with default scale, so its half-extents are 0.5 and it
+// occupies exactly the unit primitive the deleted ray_unit_cube/ray_unit_sphere
+// were written against -- which is what lets the cases below keep their
+// hand-derived geometry unchanged across the switch to tracing.
+Node unit_node(Shape shape) {
+    Node node;
+    node.id = 1;
+    node.shape = shape;
+    return node;
+}
+
+// Trace-derived values land within the hit epsilon of the true surface rather
+// than exactly on it, so they need a stated tolerance where the analytic
+// results did not. Still far tighter than any of the geometry being
+// distinguished here, all of which differs by 0.5 or more.
+constexpr double kTraceTol = 1e-3;
+
+void check_float3_traced(const simd_float3 actual, const simd_float3 expected) {
+    CHECK(actual.x == doctest::Approx(expected.x).epsilon(kTraceTol));
+    CHECK(actual.y == doctest::Approx(expected.y).epsilon(kTraceTol));
+    CHECK(actual.z == doctest::Approx(expected.z).epsilon(kTraceTol));
+}
+
 } // namespace
 
-// --- ray_unit_sphere ---------------------------------------------------
+// --- raycast_node: the sphere trace that replaced the analytic primitives ----
+//
+// These are the ray_unit_sphere/ray_unit_cube cases, kept case-for-case and
+// re-pointed at raycast_node against a unit-scaled node. The geometry they
+// assert is unchanged and still hand-derived; what changed is how it is found.
 
-TEST_CASE("ray_unit_sphere: head-on hit through the near pole") {
-    // a=dot(d,d)=1, b=2*dot(o,d)=2*(2*-1)=-4, c=dot(o,o)-0.25=4-0.25=3.75.
-    // disc=16-15=1, sqrt=1; roots (4-1)/2=1.5 and (4+1)/2=2.5 -> smallest >
-    // kEps is 1.5.
-    const auto hit = ray_unit_sphere(Ray{{0.0f, 0.0f, 2.0f}, {0.0f, 0.0f, -1.0f}});
+TEST_CASE("raycast_node, sphere: head-on hit through the near pole") {
+    // Radius 0.5 at the origin, eye 2 out along +z: the surface is 1.5 away and
+    // the outward normal there is +z.
+    const auto hit = raycast_node(unit_node(Shape::Sphere),
+                                  Ray{{0.0f, 0.0f, 2.0f}, {0.0f, 0.0f, -1.0f}});
     REQUIRE(hit.has_value());
-    CHECK(hit->t == doctest::Approx(1.5f));
-    check_float3_approx(hit->point, simd_float3{0.0f, 0.0f, 0.5f});
-    check_float3_approx(hit->normal, simd_float3{0.0f, 0.0f, 1.0f});
+    CHECK(hit->t == doctest::Approx(1.5f).epsilon(kTraceTol));
+    check_float3_traced(hit->point, simd_float3{0.0f, 0.0f, 0.5f});
+    check_float3_traced(hit->normal, simd_float3{0.0f, 0.0f, 1.0f});
 }
 
-TEST_CASE("ray_unit_sphere: just-outside miss, tangent-silhouette grazing hit") {
-    // origin.x=0.6 is outside the radius-0.5 silhouette of a ray running
-    // parallel to -z: a=1, b=2*dot(o,d)=-4, c=(0.36+4)-0.25=4.11,
-    // disc=16-16.44=-0.44 < 0 -> no real roots.
-    CHECK_FALSE(ray_unit_sphere(Ray{{0.6f, 0.0f, 2.0f}, {0.0f, 0.0f, -1.0f}}).has_value());
+TEST_CASE("raycast_node, sphere: outside the silhouette misses, just inside hits") {
+    // origin.x = 0.6 is outside the radius-0.5 silhouette of a -z ray.
+    CHECK_FALSE(raycast_node(unit_node(Shape::Sphere),
+                             Ray{{0.6f, 0.0f, 2.0f}, {0.0f, 0.0f, -1.0f}}).has_value());
 
-    // origin.x=0.5 sits exactly on the silhouette: a=1, b=2*dot(o,d)=-4,
-    // c=(0.25+4)-0.25=4.0, disc=16-16=0 (grazing, still counts as a hit).
-    // Double root t=(4-0)/2=2 -> point (0.5,0,0), normal +x.
-    const auto graze = ray_unit_sphere(Ray{{0.5f, 0.0f, 2.0f}, {0.0f, 0.0f, -1.0f}});
-    REQUIRE(graze.has_value());
-    CHECK(graze->t == doctest::Approx(2.0f));
-    check_float3_approx(graze->point, simd_float3{0.5f, 0.0f, 0.0f});
-    check_float3_approx(graze->normal, simd_float3{1.0f, 0.0f, 0.0f});
-}
-
-TEST_CASE("ray_unit_sphere: origin inside the sphere takes the exit root") {
-    // a=1, b=2*dot(o,d)=0, c=0-0.25=-0.25, disc=0+1=1, sqrt=1;
-    // roots (0-1)/2=-0.5 and (0+1)/2=0.5 -> the negative (entry, behind the
-    // ray) root is <= kEps, so the exit root 0.5 wins.
-    const auto hit = ray_unit_sphere(Ray{{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}});
+    // origin.x = 0.45 is inside it: the chord's half-length is
+    // sqrt(0.25 - 0.2025) = 0.2179, so entry is at z = +0.2179, i.e. t = 1.7821.
+    const auto hit = raycast_node(unit_node(Shape::Sphere),
+                                  Ray{{0.45f, 0.0f, 2.0f}, {0.0f, 0.0f, -1.0f}});
     REQUIRE(hit.has_value());
-    CHECK(hit->t == doctest::Approx(0.5f));
-    check_float3_approx(hit->point, simd_float3{0.0f, 0.0f, 0.5f});
-    check_float3_approx(hit->normal, simd_float3{0.0f, 0.0f, 1.0f});
+    const float chord = std::sqrt(0.25f - 0.45f * 0.45f);
+    CHECK(hit->t == doctest::Approx(2.0f - chord).epsilon(kTraceTol));
+    check_float3_traced(hit->point, simd_float3{0.45f, 0.0f, chord});
+
+    // The EXACTLY tangent ray (origin.x = 0.5) is deliberately not asserted
+    // either way. A sphere trace approaches a tangency quadratically -- the
+    // step size falls off as fast as the remaining distance -- so it exhausts
+    // its budget rather than converging, and reports a miss where the analytic
+    // solver found a double root. This is the grazing-ray artifact raycast_node
+    // documents, it is measure-zero among real cursor rays, and pinning either
+    // answer here would be pinning a wart.
 }
 
-// --- ray_unit_cube -------------------------------------------------------
+TEST_CASE("raycast_node, sphere: origin inside takes the exit surface") {
+    // The behaviour that dictates marching by |d| rather than d: dollying in is
+    // unclamped, so the eye really does end up inside geometry, and whatever
+    // comes back must be in front of the ray.
+    const auto hit = raycast_node(unit_node(Shape::Sphere),
+                                  Ray{{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}});
+    REQUIRE(hit.has_value());
+    CHECK(hit->t == doctest::Approx(0.5f).epsilon(kTraceTol));
+    check_float3_traced(hit->point, simd_float3{0.0f, 0.0f, 0.5f});
+    check_float3_traced(hit->normal, simd_float3{0.0f, 0.0f, 1.0f});
+}
 
-TEST_CASE("ray_unit_cube: face hits from all 6 axis directions") {
+TEST_CASE("raycast_node, cube: face hits from all 6 axis directions") {
     struct Case {
         simd_float3 origin;
         simd_float3 dir;
@@ -91,41 +124,53 @@ TEST_CASE("ray_unit_cube: face hits from all 6 axis directions") {
     for (size_t i = 0; i < cases.size(); ++i) {
         CAPTURE(i);
         const Case& c = cases[i];
-        const auto hit = ray_unit_cube(Ray{c.origin, c.dir});
+        const auto hit = raycast_node(unit_node(Shape::Cube), Ray{c.origin, c.dir});
         REQUIRE(hit.has_value());
-        CHECK(hit->t == doctest::Approx(1.5f));
-        check_float3_approx(hit->point, c.point);
-        check_float3_approx(hit->normal, c.normal);
+        CHECK(hit->t == doctest::Approx(1.5f).epsilon(kTraceTol));
+        check_float3_traced(hit->point, c.point);
+        check_float3_traced(hit->normal, c.normal);
     }
 }
 
-TEST_CASE("ray_unit_cube: angled entry hits the correct face") {
-    // o=(2,0.25,0.25), d=normalize(-1,0,0)=(-1,0,0). x-axis: t1=(-0.5-2)/-1=2.5,
-    // t2=(0.5-2)/-1=1.5 -> near=1.5, far=2.5. y/z axes are parallel and the
-    // origin (0.25) is inside [-0.5,0.5], so they don't constrain the
-    // interval. tmin=1.5 > kEps -> entry at x=+0.5, normal +x.
+TEST_CASE("raycast_node, cube: angled entry hits the correct face") {
+    // Aimed along -x from (2, 0.25, 0.25): it crosses the +x face at x = 0.5,
+    // 1.5 away, well inside that face's y/z extent.
     const simd_float3 dir = simd_normalize(simd_float3{-1.0f, 0.0f, 0.0f});
-    const auto hit = ray_unit_cube(Ray{{2.0f, 0.25f, 0.25f}, dir});
+    const auto hit = raycast_node(unit_node(Shape::Cube), Ray{{2.0f, 0.25f, 0.25f}, dir});
     REQUIRE(hit.has_value());
-    CHECK(hit->t == doctest::Approx(1.5f));
-    check_float3_approx(hit->point, simd_float3{0.5f, 0.25f, 0.25f});
-    check_float3_approx(hit->normal, simd_float3{1.0f, 0.0f, 0.0f});
+    CHECK(hit->t == doctest::Approx(1.5f).epsilon(kTraceTol));
+    check_float3_traced(hit->point, simd_float3{0.5f, 0.25f, 0.25f});
+    check_float3_traced(hit->normal, simd_float3{1.0f, 0.0f, 0.0f});
 }
 
-TEST_CASE("ray_unit_cube: parallel-to-slab ray outside that slab misses") {
-    // y is exactly parallel (dir.y == 0) and origin.y=0.8 is outside
-    // [-0.5,0.5], so the slab test rejects immediately regardless of x/z.
-    CHECK_FALSE(ray_unit_cube(Ray{{0.0f, 0.8f, 2.0f}, {0.0f, 0.0f, -1.0f}}).has_value());
+TEST_CASE("raycast_node, cube: a ray passing clear of the box misses") {
+    // y = 0.8 is outside [-0.5, 0.5] for the whole of the ray's travel, so it
+    // never comes within reach of the surface.
+    CHECK_FALSE(raycast_node(unit_node(Shape::Cube),
+                             Ray{{0.0f, 0.8f, 2.0f}, {0.0f, 0.0f, -1.0f}}).has_value());
 }
 
-TEST_CASE("ray_unit_cube: origin inside the cube takes the exit face") {
-    // x-axis: t1=(-0.5-0)/1=-0.5, t2=(0.5-0)/1=0.5 -> tmin=-0.5 (<=kEps),
-    // tmax=0.5; y/z parallel-and-inside don't constrain. Exit at x=+0.5.
-    const auto hit = ray_unit_cube(Ray{{0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f}});
+TEST_CASE("raycast_node, cube: origin inside takes the exit face") {
+    const auto hit = raycast_node(unit_node(Shape::Cube),
+                                  Ray{{0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f}});
     REQUIRE(hit.has_value());
-    CHECK(hit->t == doctest::Approx(0.5f));
-    check_float3_approx(hit->point, simd_float3{0.5f, 0.0f, 0.0f});
-    check_float3_approx(hit->normal, simd_float3{1.0f, 0.0f, 0.0f});
+    CHECK(hit->t == doctest::Approx(0.5f).epsilon(kTraceTol));
+    check_float3_traced(hit->point, simd_float3{0.5f, 0.0f, 0.0f});
+    check_float3_traced(hit->normal, simd_float3{1.0f, 0.0f, 0.0f});
+}
+
+TEST_CASE("raycast_node: a non-unit ray direction still reports t as a world distance") {
+    // The contract that lets raycast_scene compare t across nodes: dir is
+    // normalized on entry, so a caller handing over an unnormalized ray gets
+    // the same answer rather than a t scaled by its length.
+    const auto unit = raycast_node(unit_node(Shape::Cube),
+                                   Ray{{0.0f, 0.0f, 2.0f}, {0.0f, 0.0f, -1.0f}});
+    const auto scaled = raycast_node(unit_node(Shape::Cube),
+                                     Ray{{0.0f, 0.0f, 2.0f}, {0.0f, 0.0f, -7.0f}});
+    REQUIRE(unit.has_value());
+    REQUIRE(scaled.has_value());
+    CHECK(scaled->t == doctest::Approx(unit->t).epsilon(kTraceTol));
+    check_float3_traced(scaled->point, unit->point);
 }
 
 // --- raycast_scene ---------------------------------------------------------
@@ -152,9 +197,9 @@ TEST_CASE("raycast_scene: non-uniform scale + translation still renormalizes to 
     const auto hit = raycast_scene(doc, Ray{{6.0f, 0.0f, 0.0f}, {-1.0f, 0.0f, 0.0f}});
     REQUIRE(hit.has_value());
     CHECK(hit->node_id == 7);
-    check_float3_approx(hit->hit.point, simd_float3{4.0f, 0.0f, 0.0f});
+    check_float3_traced(hit->hit.point, simd_float3{4.0f, 0.0f, 0.0f});
     CHECK(simd_length(hit->hit.normal) == doctest::Approx(1.0f));
-    check_float3_approx(hit->hit.normal, simd_float3{1.0f, 0.0f, 0.0f});
+    check_float3_traced(hit->hit.normal, simd_float3{1.0f, 0.0f, 0.0f});
 }
 
 TEST_CASE("raycast_scene: translated cube") {
@@ -168,7 +213,7 @@ TEST_CASE("raycast_scene: translated cube") {
     const auto hit = raycast_scene(doc, Ray{{0.0f, 3.0f, 5.0f}, {0.0f, 0.0f, -1.0f}});
     REQUIRE(hit.has_value());
     CHECK(hit->node_id == 9);
-    check_float3_approx(hit->hit.point, simd_float3{0.0f, 3.0f, 0.5f});
+    check_float3_traced(hit->hit.point, simd_float3{0.0f, 3.0f, 0.5f});
 }
 
 TEST_CASE("raycast_scene: nearest node wins, miss-all is nullopt, Subtract nodes are pickable") {
@@ -212,10 +257,11 @@ TEST_CASE("raycast_scene: nearest node wins, miss-all is nullopt, Subtract nodes
 // resolve_focus (navigation.h) runs raycast_scene at every camera-gesture start
 // and on every mouse-move that feeds the focus-preview dot, so the cases below
 // pin the properties that whole path leans on. Worth recording because it is
-// easy to assume otherwise in an SDF editor: raycast_scene does NOT raymarch.
-// It solves analytic ray-primitive intersections per node (ray_unit_sphere is a
-// quadratic, ray_unit_cube a slab test) in each node's local space; sphere
-// tracing lives only in shaders/raymarch.metal, on the GPU.
+// worth recording because it changed: raycast_scene used to solve analytic
+// ray-primitive intersections per node, and now sphere-traces each node's own
+// SDF in its rigid local frame (see raycast_node). Hits therefore land within
+// the trace epsilon of the surface rather than exactly on it, which is what
+// kTraceTol above exists to state out loud.
 
 TEST_CASE("raycast_scene: oblique ellipsoid normal matches the closed form") {
     // A sphere scaled (2,1,1) is the ellipsoid (x/a)^2 + (y/b)^2 + (z/c)^2 = 1
@@ -254,9 +300,9 @@ TEST_CASE("raycast_scene: oblique ellipsoid normal matches the closed form") {
     const auto hit = raycast_scene(doc, Ray{origin, -expected_normal});
     REQUIRE(hit.has_value());
     CHECK(hit->node_id == 3);
-    CHECK(hit->hit.t == doctest::Approx(3.0f));
-    check_float3_approx(hit->hit.point, P);
-    check_float3_approx(hit->hit.normal, expected_normal);
+    CHECK(hit->hit.t == doctest::Approx(3.0f).epsilon(kTraceTol));
+    check_float3_traced(hit->hit.point, P);
+    check_float3_traced(hit->hit.normal, expected_normal);
     CHECK(simd_length(hit->hit.normal) == doctest::Approx(1.0f));
     // Explicit discrimination against the swapped-component answer, so a
     // regression to either wrong transform fails on an obvious comparison
@@ -298,18 +344,18 @@ TEST_CASE("raycast_scene: world_t is a true distance and the hit lies on the que
     const auto hit = raycast_scene(doc, Ray{origin, dir});
     REQUIRE(hit.has_value());
     CHECK(hit->node_id == 1); // the sphere is nearer despite the cube being far larger
-    CHECK(hit->hit.t == doctest::Approx(8.5f));
-    CHECK(hit->hit.t == doctest::Approx(simd_length(hit->hit.point - origin)));
-    check_float3_approx(hit->hit.point, origin + hit->hit.t * dir);
+    CHECK(hit->hit.t == doctest::Approx(8.5f).epsilon(kTraceTol));
+    CHECK(hit->hit.t == doctest::Approx(simd_length(hit->hit.point - origin)).epsilon(kTraceTol));
+    check_float3_traced(hit->hit.point, origin + hit->hit.t * dir);
 
     SUBCASE("removing the nearer node promotes the farther one, still with a true t") {
         doc.remove_node(1);
         const auto far_hit = raycast_scene(doc, Ray{origin, dir});
         REQUIRE(far_hit.has_value());
         CHECK(far_hit->node_id == 2);
-        CHECK(far_hit->hit.t == doctest::Approx(14.0f));
-        CHECK(far_hit->hit.t == doctest::Approx(simd_length(far_hit->hit.point - origin)));
-        check_float3_approx(far_hit->hit.point, origin + far_hit->hit.t * dir);
+        CHECK(far_hit->hit.t == doctest::Approx(14.0f).epsilon(kTraceTol));
+        CHECK(far_hit->hit.t == doctest::Approx(simd_length(far_hit->hit.point - origin)).epsilon(kTraceTol));
+        check_float3_traced(far_hit->hit.point, origin + far_hit->hit.t * dir);
     }
 }
 
@@ -330,8 +376,8 @@ TEST_CASE("raycast_scene: an origin inside a node returns its exit face, in fron
     REQUIRE(hit.has_value());
     CHECK(hit->node_id == 5);
     CHECK(hit->hit.t > 0.0f);
-    CHECK(hit->hit.t == doctest::Approx(2.0f));
-    check_float3_approx(hit->hit.point, simd_float3{0.0f, 0.0f, -2.0f});
+    CHECK(hit->hit.t == doctest::Approx(2.0f).epsilon(kTraceTol));
+    check_float3_traced(hit->hit.point, simd_float3{0.0f, 0.0f, -2.0f});
 }
 
 TEST_CASE("raycast_scene round-trips against the camera: ray -> hit -> project returns the pixel") {
@@ -404,7 +450,7 @@ TEST_CASE("raycast_scene: both ends of the scale clamp hit finitely with unit no
         const auto hit = raycast_scene(doc, Ray{{0.0f, 0.0f, c.origin_z}, {0.0f, 0.0f, -1.0f}});
         REQUIRE(hit.has_value());
         CHECK(std::isfinite(hit->hit.t));
-        CHECK(hit->hit.t == doctest::Approx(c.expect_t));
+        CHECK(hit->hit.t == doctest::Approx(c.expect_t).epsilon(kTraceTol));
         CHECK(std::isfinite(hit->hit.point.x));
         CHECK(std::isfinite(hit->hit.point.y));
         CHECK(std::isfinite(hit->hit.point.z));
@@ -438,9 +484,9 @@ TEST_CASE("raycast_scene: a rotated node is picked in its own frame") {
 
     const auto hit = raycast_scene(doc, Ray{{0.0f, 0.0f, 5.0f}, {0.0f, 0.0f, -1.0f}});
     REQUIRE(hit.has_value());
-    CHECK(hit->hit.t == doctest::Approx(4.292893219f));
-    check_float3_approx(hit->hit.point, simd_float3{0.0f, 0.0f, 0.70710678f});
-    check_float3_approx(hit->hit.normal, simd_float3{-0.70710678f, 0.0f, 0.70710678f});
+    CHECK(hit->hit.t == doctest::Approx(4.292893219f).epsilon(kTraceTol));
+    check_float3_traced(hit->hit.point, simd_float3{0.0f, 0.0f, 0.70710678f});
+    check_float3_traced(hit->hit.normal, simd_float3{-0.70710678f, 0.0f, 0.70710678f});
     // Unrotated, the same ray would hit the long +z face at z = 1.5 with normal
     // (0, 0, 1) -- so both assertions above are discriminating, not incidental.
     CHECK(hit->hit.t != doctest::Approx(3.5f));
@@ -448,32 +494,44 @@ TEST_CASE("raycast_scene: a rotated node is picked in its own frame") {
 
 TEST_CASE("raycast_scene hits lie on the SDF's zero set, for rotated and non-uniformly "
           "scaled nodes alike") {
-    // The cross-validation between the two independent descriptions of a node's
-    // surface: picking inverts world_from_local's T*R*S of a unit primitive,
-    // while the SDF translates and rotates and then measures the shape at its
-    // true half-extents. They agree only if scale stays baked into the shape
-    // rather than folded into the transform -- so this is the assertion that
-    // fails if anyone ever "simplifies" sdf_eval_node by dividing q by
-    // half_extents, which would warp the field and desync the two paths.
+    // The cross-validation between the two descriptions of a node's surface --
+    // and since the analytic intersectors were deleted, the ONLY one left, which
+    // is why it now runs across every shape rather than a representative two.
+    //
+    // Picking transforms the ray into the node's rigid frame and marches; the
+    // SDF sampler translates, rotates and measures at the node's true
+    // half-extents. They agree only if scale stays baked into the shape rather
+    // than folded into the transform -- so this is still the assertion that
+    // fails if anyone "simplifies" sdf_eval_node by dividing q by half_extents,
+    // which would warp the field and desync the two paths.
     //
     // No hand-derived literals: the claim is agreement, not any particular
-    // number. The box branch is exact; the ellipsoid's zero SET is exact too
-    // (k0 == 1 at the surface makes the iq formula return 0), even though its
-    // distances away from the surface are approximate.
-    struct Case { const char* label; Shape shape; simd_float3 scale; };
-    const std::array<Case, 4> cases = {{
-        {"cube, uniform", Shape::Cube, {1.0f, 1.0f, 1.0f}},
-        {"cube, non-uniform", Shape::Cube, {2.0f, 0.5f, 3.0f}},
-        {"ellipsoid, uniform", Shape::Sphere, {1.5f, 1.5f, 1.5f}},
-        {"ellipsoid, non-uniform", Shape::Sphere, {1.0f, 3.0f, 2.0f}},
+    // number. Every case carries a rotation AND a non-uniform scale, so the
+    // cross-section contraction is exercised on each shape rather than only in
+    // the isotropic case where it is the identity.
+    struct Case { const char* label; Shape shape; simd_float3 scale; float param; };
+    const std::array<Case, 12> cases = {{
+        {"cube, uniform", Shape::Cube, {1.0f, 1.0f, 1.0f}, 0.0f},
+        {"cube, non-uniform", Shape::Cube, {2.0f, 0.5f, 3.0f}, 0.0f},
+        {"ellipsoid, uniform", Shape::Sphere, {1.5f, 1.5f, 1.5f}, 0.0f},
+        {"ellipsoid, non-uniform", Shape::Sphere, {1.0f, 3.0f, 2.0f}, 0.0f},
+        {"cone, sharp", Shape::Cone, {1.5f, 3.0f, 1.0f}, 0.0f},
+        {"cone, truncated", Shape::Cone, {2.0f, 1.5f, 2.0f}, 0.45f},
+        {"capsule, round", Shape::Capsule, {1.0f, 3.5f, 1.5f}, 1.0f},
+        {"capsule, flat", Shape::Capsule, {2.0f, 1.0f, 1.0f}, 0.0f},
+        {"octahedron", Shape::Octahedron, {2.0f, 1.0f, 3.0f}, 0.0f},
+        {"pyramid, frustum", Shape::Pyramid, {2.5f, 2.0f, 1.0f}, 0.35f},
+        {"prism, 5 sides", Shape::Prism, {1.5f, 2.0f, 2.5f}, 5.0f},
+        {"vesica", Shape::Vesica, {1.0f, 2.5f, 1.5f}, 0.0f},
     }};
 
     for (const Case& c : cases) {
-        INFO("case: " << c.label);
+        INFO("case: " << std::string(c.label));
         SceneDocument doc;
         Node node;
         node.id = 1;
         node.shape = c.shape;
+        node.shape_param = c.param;
         node.position = {0.25f, -0.5f, 0.75f};
         node.scale = c.scale;
         node.rotation = simd_quaternion(0.9f, simd_normalize(simd_float3{1.0f, 2.0f, -1.0f}));

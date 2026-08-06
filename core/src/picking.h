@@ -15,15 +15,33 @@ struct RayHit {
     simd_float3 normal;      // unit length
 };
 
-// Local-space primitive tests. The incoming ray is in the primitive's local
-// space and its dir is NOT normalized (it went through an inverse transform);
-// t is therefore in the local ray's parameterization — callers re-derive
-// world t from the world-space hit point.
-std::optional<RayHit> ray_unit_sphere(const Ray& local);   // radius 0.5, origin-centered
-std::optional<RayHit> ray_unit_cube(const Ray& local);     // [-0.5,0.5]^3 slab test
+// Sphere-traces ONE node's own SDF -- the same sdf_eval_node the renderer
+// evaluates, so picking cannot disagree with what is on screen about where a
+// surface is. Replaces the hand-written ray_unit_cube/ray_unit_sphere pair,
+// which had no general form for the six shapes added after them and would have
+// needed a bespoke intersector each.
+//
+// The returned hit is WORLD-SPACE, `t` in world units. That falls out of doing
+// the transform rigidly: world -> local here is rotation and translation only
+// (NOT world_from_local's inverse, which also divides out scale and lands in a
+// warped space), and a rigid map preserves distance -- so the marched parameter
+// is already a world distance and needs no recovery step.
+//
+// `world.dir` is normalized on entry, so `t` is a true distance regardless of
+// what the caller passed.
+//
+// Known and deliberate: the hit lands within the trace's epsilon of the surface
+// rather than exactly on it, and a grazing ray can exhaust the step budget and
+// report a miss -- the same artifact the raymarched viewport already accepts at
+// silhouettes. Nothing downstream needs exactness: a snapped spawn places the
+// new node's CENTRE on this point.
+std::optional<RayHit> raycast_node(const Node& node, const Ray& world);
 
 struct PickHit { int32_t node_id; RayHit hit; };           // hit is world-space, t in world units
 
+// Nearest node hit along the ray. CSG-blind by design, unchanged from the
+// analytic version: each node is traced on its own, so a region carved away by
+// a Subtract node still reports a hit, and a Subtract node is itself pickable.
 std::optional<PickHit> raycast_scene(const SceneDocument& doc, const Ray& world);
 
 // Intersect a ray with a plane. Returns the world-space intersection point,
