@@ -71,6 +71,24 @@ constexpr float kSoilGateHiM = 3.0f;
 constexpr float kWetGateHi = 0.45f;
 constexpr float kSoilWidenM = 12.0f;
 
+// An octave is audible only between the two Nyquists: the OUTPUT grid must
+// be fine enough to carry it, and the SOURCE grid must be too coarse to have
+// carried it already -- wavelengths the coarse world could represent belong
+// to stage 1, and re-adding them would overprint simulated erosion. (The
+// fixed band top of 24 m presumes production-like sources of >= ~12 m
+// texels; a much coarser source leaves a gap band below its Nyquist that a
+// fixed band cannot fill.)
+bool octave_active(int k, float src_texel_m, float out_texel_m) {
+  return kWavelengthM[k] >= 2.0f * out_texel_m &&
+         kWavelengthM[k] < 2.0f * src_texel_m;
+}
+
+bool any_octave_active(float src_texel_m, float out_texel_m) {
+  for (int k = 0; k < kOctaves; ++k)
+    if (octave_active(k, src_texel_m, out_texel_m)) return true;
+  return false;
+}
+
 float clamp01(float x) { return std::clamp(x, 0.0f, 1.0f); }
 
 float smoothstep01(float e0, float e1, float x) {
@@ -248,7 +266,7 @@ ReliefSample sample_relief_delta(const ReliefContext& ctx,
   if (!ctx.bed || !ctx.soil || !ctx.biome || !ctx.water_depth ||
       ctx.src_texel_m <= 0.0f || out_texel_m <= 0.0f)
     return {};
-  if (kWavelengthM[0] < 2.0f * out_texel_m) return {};  // nothing audible
+  if (!any_octave_active(ctx.src_texel_m, out_texel_m)) return {};
 
   // Gates that multiply the WHOLE delta. A zero here must yield an exact
   // zero -- the water-mask contract -- so bail before accumulating.
@@ -277,14 +295,14 @@ ReliefSample sample_relief_delta(const ReliefContext& ctx,
   const double r = kTargetMeanRadiusM;
   const float local_mean =
       0.25f *
-      (cubic_sample(*ctx.bed, ctx.src_texel_m, {world_pos_m.x + r,
-                                                world_pos_m.y}).value +
-       cubic_sample(*ctx.bed, ctx.src_texel_m, {world_pos_m.x - r,
-                                                world_pos_m.y}).value +
-       cubic_sample(*ctx.bed, ctx.src_texel_m, {world_pos_m.x,
-                                                world_pos_m.y + r}).value +
-       cubic_sample(*ctx.bed, ctx.src_texel_m, {world_pos_m.x,
-                                                world_pos_m.y - r}).value);
+      (cubic_sample_value(*ctx.bed, ctx.src_texel_m,
+                          {world_pos_m.x + r, world_pos_m.y}) +
+       cubic_sample_value(*ctx.bed, ctx.src_texel_m,
+                          {world_pos_m.x - r, world_pos_m.y}) +
+       cubic_sample_value(*ctx.bed, ctx.src_texel_m,
+                          {world_pos_m.x, world_pos_m.y + r}) +
+       cubic_sample_value(*ctx.bed, ctx.src_texel_m,
+                          {world_pos_m.x, world_pos_m.y - r}));
   const float target0 =
       std::clamp((base.value - local_mean) / kTargetHalfBandM, -1.0f, 1.0f);
   float target = target0;
@@ -309,8 +327,8 @@ ReliefSample sample_relief_delta(const ReliefContext& ctx,
   float rounding_mult = kRoundingOctaveMult;
 
   for (int k = 0; k < kOctaves; ++k) {
+    if (!octave_active(k, ctx.src_texel_m, out_texel_m)) continue;
     const float lambda = kWavelengthM[k];
-    if (lambda < 2.0f * out_texel_m) break;  // below the output Nyquist
     const float amp = ratio * lambda;
 
     const float gl = std::sqrt(gully_slope.x * gully_slope.x +
@@ -360,6 +378,12 @@ ReliefSample sample_relief_delta(const ReliefContext& ctx,
 void apply_relief(const ReliefContext& ctx, glm::dvec2 origin_m,
                   float out_texel_m, Field2D<float>& height_inout) {
   if (height_inout.width <= 0 || height_inout.height <= 0) return;
+  // A request with no audible octave (e.g. a Box/Crop pass-through at
+  // source density) is a guaranteed all-zero: skip the thread pool and the
+  // full-raster walk instead of paying them for provably nothing.
+  if (ctx.src_texel_m <= 0.0f || out_texel_m <= 0.0f ||
+      !any_octave_active(ctx.src_texel_m, out_texel_m))
+    return;
   parallel_tiles(
       height_inout.width, height_inout.height, 64, [] { return 0; },
       [&](int&, int x0, int y0, int x1, int y1) {

@@ -128,18 +128,22 @@ struct CoarseFixture {
   Field2D<uint8_t> biome;
   uint32_t seed = 1;
 
-  CoarseFixture(int n, float bed_slope_m_per_m, float soil_m, Biome b)
+  float texel_m = kSrcTexelM;
+
+  CoarseFixture(int n, float bed_slope_m_per_m, float soil_m, Biome b,
+                float texel = kSrcTexelM)
       : bed(n, n),
         soil(n, n, soil_m),
         depth(n, n, 0.0f),
-        biome(n, n, static_cast<uint8_t>(b)) {
+        biome(n, n, static_cast<uint8_t>(b)),
+        texel_m(texel) {
     for (int y = 0; y < n; ++y)
       for (int x = 0; x < n; ++x)
-        bed.at(x, y) = bed_slope_m_per_m * (x * kSrcTexelM);
+        bed.at(x, y) = bed_slope_m_per_m * (x * texel_m);
   }
 
   ReliefContext ctx() const {
-    return {&bed, &soil, &biome, &depth, kSrcTexelM, seed};
+    return {&bed, &soil, &biome, &depth, texel_m, seed};
   }
 };
 
@@ -330,4 +334,25 @@ TEST_CASE("relief detail is stable across output resolutions", "[relief]") {
   }
   REQUIRE(max_abs > 0.05f);  // the comparison must not be vacuous
   REQUIRE(worst < 0.25f);
+}
+
+TEST_CASE("relief octaves respect the SOURCE Nyquist too", "[relief]") {
+  // Wavelengths the coarse grid could represent belong to stage 1 -- adding
+  // them back would overprint simulated erosion. At an 8 m source, stage 1
+  // owns everything >= 16 m, so requesting output AT source density leaves
+  // no octave between the two Nyquists and the delta must be exactly zero,
+  // while a fine request still gets the sub-16 m octaves.
+  const CoarseFixture fx(32, 0.6f, 0.2f, Biome::Mountain, 8.0f);
+  const ReliefContext ctx = fx.ctx();
+  for (int i = 0; i < 50; ++i) {
+    const double x = 64.0 + (i % 10) * 11.3, y = 64.0 + (i / 10) * 13.7;
+    REQUIRE(sample_relief_delta(ctx, {x, y}, 8.0f).delta_m == 0.0f);
+  }
+  float max_abs = 0.0f;
+  for (int i = 0; i < 100; ++i) {
+    const double x = 64.0 + (i % 10) * 11.3, y = 64.0 + (i / 10) * 13.7;
+    max_abs = std::max(
+        max_abs, std::fabs(sample_relief_delta(ctx, {x, y}, 1.0f).delta_m));
+  }
+  REQUIRE(max_abs > 0.02f);
 }

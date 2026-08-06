@@ -40,6 +40,36 @@ AxisTaps axis_taps(double u, int src_n) {
 
 }  // namespace
 
+float cubic_sample_value(const Field2D<float>& src, float src_texel_m,
+                         glm::dvec2 world_pos_m) {
+  if (src.width <= 0 || src.height <= 0 || src_texel_m <= 0.0f) return 0.0f;
+  const double texel = static_cast<double>(src_texel_m);
+  const auto axis = [](double u, int src_n, int* idx, double* w) {
+    const int base = static_cast<int>(std::floor(u)) - kCubicSupport + 1;
+    double sum = 0.0;
+    for (int c = 0; c < 2 * kCubicSupport; ++c) {
+      const int i = base + c;
+      idx[c] = std::clamp(i, 0, src_n - 1);
+      w[c] = CatmullRom(u - i);
+      sum += w[c];
+    }
+    if (sum != 0.0)
+      for (int c = 0; c < 2 * kCubicSupport; ++c) w[c] /= sum;
+  };
+  int ix[2 * kCubicSupport], iy[2 * kCubicSupport];
+  double wx[2 * kCubicSupport], wy[2 * kCubicSupport];
+  axis(world_pos_m.x / texel, src.width, ix, wx);
+  axis(world_pos_m.y / texel, src.height, iy, wy);
+  double v = 0.0;
+  for (int b = 0; b < 2 * kCubicSupport; ++b) {
+    double row = 0.0;
+    for (int a = 0; a < 2 * kCubicSupport; ++a)
+      row += wx[a] * src.at(ix[a], iy[b]);
+    v += wy[b] * row;
+  }
+  return static_cast<float>(v);
+}
+
 CubicSample cubic_sample(const Field2D<float>& src, float src_texel_m,
                          glm::dvec2 world_pos_m) {
   if (src.width <= 0 || src.height <= 0 || src_texel_m <= 0.0f) return {};

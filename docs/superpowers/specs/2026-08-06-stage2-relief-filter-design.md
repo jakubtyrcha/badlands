@@ -55,9 +55,12 @@ gate) produced patchy parallel stripes, and the noisy stage-1 soil raster made t
 physical gate a blotch mask. v2 replaces the interior with an independent
 implementation of the stacked-faded-gullies technique (after Rune Skovbo Johansen's
 blog/video; oriented phasor-style stripe noise after the Gabor/phasor-noise
-literature). **No third-party code is ported** — the author's reference
-implementation is MPL-2.0 and the user chose to keep the repo free of it; this is a
-from-concepts implementation with its own kernels, constants and structure:
+literature). **Provenance decision (recalibrated by the user mid-review):** the
+implementation IS a prototype port derived from the author's MPL-2.0 reference
+(Shadertoy wXcfWn, source pasted by the user) — it will be replaced, and the
+source/license note lives at the top of `relief_filter.cpp`. An earlier "no MPL
+code" decision was superseded by the user's follow-up: "this is a prototype and it
+will be replaced, just keep a note about the source in the header."
 
 - Stripe field: cos/sin of one wave blended as a PHASOR over a jittered square
   lattice with a compact C2 kernel, partially renormalized (floor on the phasor

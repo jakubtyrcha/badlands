@@ -21,28 +21,22 @@
 
 namespace badlands::mapgen {
 
-// Mitchell-Netravali cubic family. (B, C) = (0, 0.5) is Catmull-Rom --
-// interpolating (weight exactly 1 at zero offset, 0 at every other integer),
-// mild overshoot. Shared by the raster resample and the point sampler; the
-// choice over Lanczos-3 is argued at the raster site
-// (coarse_world_patch_source.cpp: a linear ramp must reproduce exactly).
-inline double CubicWeight(double x, double B, double C) {
-  x = std::fabs(x);
-  const double x2 = x * x, x3 = x2 * x;
-  if (x < 1.0)
-    return ((12 - 9 * B - 6 * C) * x3 + (-18 + 12 * B + 6 * C) * x2 +
-            (6 - 2 * B)) /
-           6.0;
-  if (x < 2.0)
-    return ((-B - 6 * C) * x3 + (6 * B + 30 * C) * x2 + (-12 * B - 48 * C) * x +
-            (8 * B + 24 * C)) /
-           6.0;
-  return 0.0;
-}
-
 constexpr int kCubicSupport = 2;  // taps per side
 
-inline double CatmullRom(double x) { return CubicWeight(x, 0.0, 0.5); }
+// Catmull-Rom -- the (B, C) = (0, 0.5) member of the Mitchell-Netravali
+// cubic family, closed-form: interpolating (weight exactly 1 at zero offset,
+// 0 at every other integer), mild overshoot. Shared by the raster resample
+// and the point sampler; the choice over Lanczos-3 is argued at the raster
+// site (coarse_world_patch_source.cpp: a linear ramp must reproduce
+// exactly). Deliberately NOT the parameterized family: CatmullRomDeriv below
+// is this exact polynomial's derivative, and a tunable (B, C) whose
+// derivative silently does not follow would be a trap.
+inline double CatmullRom(double x) {
+  x = std::fabs(x);
+  if (x < 1.0) return (1.5 * x - 2.5) * x * x + 1.0;
+  if (x < 2.0) return ((-0.5 * x + 2.5) * x - 4.0) * x + 2.0;
+  return 0.0;
+}
 
 // d/dx of CatmullRom. The kernel is even, so the derivative is odd:
 // differentiate the |x| polynomial and restore the sign.
@@ -60,6 +54,12 @@ struct CubicSample {
 };
 
 CubicSample cubic_sample(const Field2D<float>& src, float src_texel_m,
+                         glm::dvec2 world_pos_m);
+
+// Value-only variant: identical reconstruction, none of the derivative
+// arithmetic. For callers that read .value alone (e.g. the relief filter's
+// local-mean taps) the gradient work is pure waste.
+float cubic_sample_value(const Field2D<float>& src, float src_texel_m,
                          glm::dvec2 world_pos_m);
 
 }  // namespace badlands::mapgen
