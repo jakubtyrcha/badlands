@@ -146,7 +146,10 @@ void Editor::render(void* caMetalDrawable) {
         // fire while the button is down, so hover would be stale anyway).
         const GizmoHit highlighted =
             impl_->drag.active ? GizmoHit{impl_->drag.slot, impl_->drag.handle} : impl_->hover;
-        impl_->renderer.set_gizmos(placement, shape, highlighted, camera.eye);
+        // The grid is the Placement gizmo's reference plane, and a reference is
+        // only worth its screen area while you are moving something against it.
+        const bool show_grid = impl_->drag.active && impl_->drag.slot == GizmoSlot::Placement;
+        impl_->renderer.set_gizmos(placement, shape, highlighted, camera.eye, show_grid);
     } else {
         impl_->renderer.hide_gizmo();
     }

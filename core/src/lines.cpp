@@ -117,13 +117,13 @@ void append_move_gizmo_grid(std::vector<LineVertex>& out, const GizmoFrame& fram
     // Each line is emitted as kGizmoGridSegmentsPerLine disjoint segments
     // rather than one long one: the fade is radial, so a 2-vertex line would
     // interpolate it linearly and wash out the falloff (see lines.h).
-    // The grid spans frame.grid_normal's plane, NOT the u-v drag plane: for an
-    // attached node those are the same plane, but for a free one the grid is a
-    // world-horizontal reference (see GizmoFrame in gizmo.h). Derived through
-    // tangent_basis so the attached case reproduces (u, v) exactly -- it is the
-    // same call gizmo_frame_for_node made to build them.
-    simd_float3 a_dir, b_dir;
-    tangent_basis(frame.grid_normal, a_dir, b_dir);
+    // The grid spans the grid plane, NOT the u-v plane: for an attached node
+    // those are the same, but for a free one the grid is world-horizontal (see
+    // GizmoFrame in gizmo.h). The basis comes from the frame rather than being
+    // re-derived here, so the grid, the plane patch drawn inside it, and that
+    // patch's hit region all read the same two vectors.
+    const simd_float3 a_dir = frame.grid_u;
+    const simd_float3 b_dir = frame.grid_v;
 
     const int segs = kGizmoGridSegmentsPerLine;
     for (int i = 0; i <= divisions; ++i) {
@@ -250,27 +250,22 @@ void append_move_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& f
                                   color_for(axis.handle, axis.color));
     }
 
-    // Plane handles: the [kGizmoPatchInner, kGizmoPatchOuter]^2 square of each
-    // basis pair — the same patch pick_gizmo_handle hit-tests, from the same
-    // constants. Filled translucent quad plus a hairline outline, rather than
-    // the previous bare outline of full-weight bars: a filled patch reads as
-    // a surface you can slide along, which is what the handle actually does.
-    const float a = kGizmoPatchInner * he, b = kGizmoPatchOuter * he;
-    const struct { simd_float3 e1, e2; simd_float4 color; GizmoHandle handle; } patches[] = {
-        {frame.u, frame.v, kColorPlaneUV, GizmoHandle::PlaneUV},
-        {frame.u, frame.n, kColorPlaneUN, GizmoHandle::PlaneUN},
-        {frame.v, frame.n, kColorPlaneVN, GizmoHandle::PlaneVN},
-    };
-    for (const auto& patch : patches) {
-        const simd_float4 c = color_for(patch.handle, patch.color);
-        const simd_float3 p00 = origin + a * patch.e1 + a * patch.e2;
-        const simd_float3 p10 = origin + b * patch.e1 + a * patch.e2;
-        const simd_float3 p11 = origin + b * patch.e1 + b * patch.e2;
-        const simd_float3 p01 = origin + a * patch.e1 + b * patch.e2;
+    // The plane handle: the [kGizmoPatchInner, kGizmoPatchOuter]^2 square in the
+    // GRID plane — the same patch pick_gizmo_handle hit-tests, from the same
+    // constants and the same basis. Filled translucent quad plus a hairline
+    // outline: a filled patch reads as a surface you can slide along, which is
+    // what the handle actually does, and the grid it sits in says which surface.
+    {
+        const float a = kGizmoPatchInner * he, b = kGizmoPatchOuter * he;
+        const simd_float4 c = color_for(GizmoHandle::Plane, kColorPlane);
+        const simd_float3 p00 = origin + a * frame.grid_u + a * frame.grid_v;
+        const simd_float3 p10 = origin + b * frame.grid_u + a * frame.grid_v;
+        const simd_float3 p11 = origin + b * frame.grid_u + b * frame.grid_v;
+        const simd_float3 p01 = origin + a * frame.grid_u + b * frame.grid_v;
 
         simd_float4 fill = c;
-        fill.w = ((patch.handle == highlighted) ? (2.0f * kGizmoPatchFillAlpha)
-                                                : kGizmoPatchFillAlpha) * fill_scale;
+        fill.w = ((GizmoHandle::Plane == highlighted) ? (2.0f * kGizmoPatchFillAlpha)
+                                                     : kGizmoPatchFillAlpha) * fill_scale;
         auto push_fill = [&](simd_float3 p) {
             LineVertex vertex;
             vertex.pos = (simd_float4){p.x, p.y, p.z, 1.0f};
@@ -300,7 +295,6 @@ void append_scale_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& 
                                 GizmoHandle highlighted, simd_float3 eye, float rest_alpha) {
     const simd_float3 origin = frame.origin;
     const float he = frame.half_extent;
-    const float hw = kGizmoHandleHalfWidthFrac * he;
 
     // Same rest/hot treatment as the placement gizmo, so hover reads
     // identically across both manipulators.
@@ -312,22 +306,18 @@ void append_scale_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& 
         return base;
     };
 
-    // Shafts run the Shape band, outboard of both the centre box and the
-    // Placement gizmo's own shafts; pick_gizmo_handle clamps to the same band,
-    // so drawn geometry = hit geometry here too. Emission order (u, v, n)
-    // matches the pick tie-break order; lines_tests pins the layout.
+    // Boxes on the axis rays with no shaft behind them (see lines.h), well
+    // outboard of both the centre box and the Placement gizmo's shafts.
+    // pick_gizmo_handle clamps to the box's own extent, so drawn = hit here too.
+    // Emission order (u, v, n) matches the pick tie-break order; lines_tests
+    // pins the layout.
     const struct { simd_float3 dir; simd_float4 color; GizmoHandle handle; } axes[] = {
         {frame.u, kColorAxisU, GizmoHandle::AxisU},
         {frame.v, kColorAxisV, GizmoHandle::AxisV},
         {frame.n, kColorAxisN, GizmoHandle::AxisN},
     };
     for (const auto& axis : axes) {
-        const simd_float4 c = color_for(axis.handle, axis.color);
-        append_thick_segment(out, origin + kScaleAxisInnerFrac * he * axis.dir,
-                             origin + kScaleAxisShaftFrac * he * axis.dir, eye, hw, c);
-    }
-    for (const auto& axis : axes) {
-        append_camera_facing_quad(out, origin + kScaleAxisShaftFrac * he * axis.dir,
+        append_camera_facing_quad(out, origin + kScaleTipCenterFrac * he * axis.dir,
                                   kGizmoScaleTipHalfSizeFrac * he, eye,
                                   color_for(axis.handle, axis.color));
     }

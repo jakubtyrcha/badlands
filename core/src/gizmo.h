@@ -17,7 +17,7 @@ struct Node;
 inline constexpr float kGizmoScreenFraction = 0.24f;
 
 // Plane-handle patch bounds, as fractions of half_extent: the patch is the
-// square origin + x*e1 + y*e2 with x, y in [inner*he, outer*he].
+// square origin + x*grid_u + y*grid_v with x, y in [inner*he, outer*he].
 //
 // SINGLE SOURCE OF TRUTH. "Drawn = hit" is load-bearing for this gizmo, and
 // before these existed the same two numbers were spelled out independently in
@@ -46,17 +46,23 @@ inline constexpr float kGizmoPatchCenter = 0.5f * (kGizmoPatchInner + kGizmoPatc
 // right for free, since kColorAxisU/V/N already alias the world-axis palette
 // and these reduce to world X/Y/Z at identity rotation.
 //
-// grid_normal is the normal of the plane the GRID is drawn in, and is
-// deliberately independent of n. For an attached node the two agree: the
-// tangent plane is both the surface you slide on and the u-v drag plane. For a
-// free node the grid is world-horizontal (grid_normal = +Y) -- a local echo of
-// the ground plate, which is more use than the vertical wall the u-v plane
-// would give. So the grid is a REFERENCE plane, not a drag-plane affordance as
-// it was originally specified. Scale draws no grid and leaves this at n.
+// (grid_normal, grid_u, grid_v) is the GRID plane, orthonormal and right-handed
+// like the frame proper, and deliberately independent of (n, u, v). For an
+// attached node the two coincide: the tangent plane is both the surface you
+// slide on and the u-v plane. For a free node the grid is world-horizontal
+// (grid_normal = +Y) -- a local echo of the ground plate, which is more use than
+// the vertical wall the u-v plane would give. Scale draws no grid and leaves
+// these at (n, u, v).
+//
+// This plane is BOTH the grid and the single plane handle: the grid is the
+// affordance for the patch drawn inside it, and the patch is the grabbable part
+// of the grid. They were briefly separate -- three basis-pair patches against a
+// world-horizontal grid -- which meant a free node's grid advertised XZ while
+// its plane handle dragged in XY. One plane, one meaning.
 struct GizmoFrame {
     simd_float3 origin;
     simd_float3 n, u, v;
-    simd_float3 grid_normal;
+    simd_float3 grid_normal, grid_u, grid_v;
     float half_extent;
 };
 
@@ -69,47 +75,55 @@ struct GizmoFrame {
 //
 //   0.00 .. 0.09   Shape: uniform scale (the centre disc)
 //   0.00 .. 0.60   Placement: move axes
-//   0.24 .. 0.50   Placement: move plane patches (off-axis, so never on a shaft)
-//   0.70 .. 1.00   Shape: scale axes
+//   0.24 .. 0.50   Placement: the move plane patch (off-axis, so never on a shaft)
+//   0.885 .. 0.995 Shape: scale box tips (the box's own extent -- there is no shaft)
 //   1.15           Placement: rotation rings (a radius, not a range)
 //
-// These are the DRAWN extents, and they are not the whole story for picking:
-// every handle also carries a screen-space grab tolerance (8-14 pts), which the
-// fractions below know nothing about. Since he is kGizmoScreenFraction of the
-// viewport height, the 0.10 he gap between the move and scale bands is only
-// ~0.024 * viewport_h points -- around 12 pts on a 500 pt viewport, i.e. less
-// than the two tolerances that meet there. So the bands DO overlap in practice
-// and the "dead zone" the gap suggests does not exist.
+// Scale is a BOX ON THE AXIS RAY with no shaft behind it, and that is a
+// declutter decision, not a styling one. A shaft running 0.70..0.94 put a second
+// bar of the same hue on the same line as the move axis, distinguishable only by
+// how far out it started -- six coloured bars on three lines. One line per axis
+// ending in a dot, with a box floating beyond it, is the same information
+// without the duplication (and is what Blender's combined gizmo does). The band
+// narrows to the box because drawn = hit: the pickable segment is exactly the
+// box, and the ~14 pt tolerance around it is what makes a small target grabbable.
 //
-// That is fine, but only because pick_gizmos resolves the overlap explicitly
-// rather than relying on the geometry to keep the handles apart: move axes beat
-// scale axes, and the centre beats a move axis only when it is genuinely
-// nearer. Widening the gaps enough to separate the tolerances would make the
-// gizmo far larger than the model it sits on, which is a worse trade.
-// The one thing the ordering does NOT have to arbitrate is the uniform centre
-// against the scale axes, which the drawn radii really do keep apart.
+// These are the DRAWN extents, and the grab tolerances (8-14 pts) that surround
+// them are in points, so the two cannot be compared here. But the arithmetic is
+// worth doing once: he is kGizmoScreenFraction of the viewport height, so on a
+// 500 pt viewport the 0.285 he between the move band and the scale box is around
+// 34 pts, comfortably clear of the 8 + 14 pts of tolerance that meet there. The
+// axis bands genuinely do not overlap now, which they did not before the shaft
+// came out. pick_gizmos still resolves the order explicitly rather than trusting
+// that -- the two gizmos stop sharing an origin the moment the pair splits, and
+// no rule about world-space radii can settle a screen-space contest.
 //
-// The same arithmetic applies to the 0.15 he between the scale axes and the
-// rings: below roughly a 390 pt viewport the scale tolerance reaches the ring,
-// and since scale axes are resolved first a ring grab near one of the three
-// axis directions goes to scale instead. Accepted rather than fixed -- the fix
-// is a bigger gizmo, and it only bites in a window small enough that the whole
-// manipulator already fills half the viewport.
+// The 0.155 he between the scale box and the rings is the tighter gap: below
+// roughly a 450 pt viewport the scale tolerance reaches the ring, and since
+// scale is resolved first, a ring grab near one of the three axis directions
+// goes to scale instead. Accepted rather than fixed -- the fix is a bigger
+// gizmo, and it only bites in a window small enough that the whole manipulator
+// already fills half the viewport.
 inline constexpr float kMoveAxisOuterFrac  = 0.60f;  // pick clamp
 inline constexpr float kMoveAxisShaftFrac  = 0.55f;  // drawn shaft end, and where its tip dot sits
-inline constexpr float kScaleAxisInnerFrac = 0.70f;
-inline constexpr float kScaleAxisShaftFrac = 0.94f;  // drawn shaft end, and where its box tip sits
-inline constexpr float kScaleAxisOuterFrac = 1.00f;  // pick clamp
+// Box tips, larger than the move gizmo's terminator dots: box-tipped axes are
+// the universal scale convention, and with no shaft to carry the reading, the
+// size difference is the whole of what tells the two gizmos apart at a glance.
+inline constexpr float kGizmoScaleTipHalfSizeFrac = 0.055f;
+inline constexpr float kScaleTipCenterFrac = 0.94f;  // where the box sits on the axis ray
+// The pickable band IS the box, derived rather than written out so a restyle of
+// the box cannot leave its hit region behind.
+inline constexpr float kScaleAxisInnerFrac = kScaleTipCenterFrac - kGizmoScaleTipHalfSizeFrac;
+inline constexpr float kScaleAxisOuterFrac = kScaleTipCenterFrac + kGizmoScaleTipHalfSizeFrac;
 inline constexpr float kRotateRingFrac     = 1.15f;  // ring radius, drawn and picked
 // Ordering asserts, on the DRAWN extents only -- the grab tolerances are in
 // points and cannot be compared against fractions of he here (see the note
 // above). They pin the layout's intent, not a guarantee of non-overlap.
 static_assert(kMoveAxisOuterFrac < kScaleAxisInnerFrac,
-              "move axes must be drawn inboard of scale axes: they share three lines");
+              "move axes must be drawn inboard of the scale boxes: they share three lines");
 static_assert(kScaleAxisOuterFrac < kRotateRingFrac,
               "the rings must be drawn outboard of every axis");
-static_assert(kMoveAxisShaftFrac <= kMoveAxisOuterFrac &&
-                  kScaleAxisShaftFrac <= kScaleAxisOuterFrac,
+static_assert(kMoveAxisShaftFrac <= kMoveAxisOuterFrac,
               "a drawn shaft must stay inside its own pickable band (drawn = hit)");
 
 // How close the two anchors have to be before the pair reads as one gizmo.
@@ -123,21 +137,17 @@ bool gizmos_coalesce(const GizmoFrame& placement, const GizmoFrame& shape);
 
 // --- shape (scale) gizmo ---------------------------------------------------
 //
-// Three axis shafts plus a centre box for uniform scale. No plane patches and
-// no grid: the grid is a reference plane the Placement gizmo owns, and scale
-// has no drag plane of its own.
+// Three box tips on the axis rays plus a centre box for uniform scale. No
+// shafts (see the band table), no plane handle and no grid: the grid plane
+// belongs to the Placement gizmo, and scale has no drag plane of its own.
 
-// The centre (uniform) handle's drawn half-size. With the axis shafts pulled
-// out to kScaleAxisInnerFrac, the centre owns the disc around the origin
-// outright, so "aim at the middle" can never be answered by an axis.
+// The centre (uniform) handle's drawn half-size. With the boxes way out at
+// kScaleTipCenterFrac, the centre owns the disc around the origin outright, so
+// "aim at the middle" can never be answered by an axis.
 inline constexpr float kGizmoUniformHalfSizeFrac = 0.09f;
-// Box tips, larger than the move gizmo's terminator dots: box-tipped axes are
-// the universal scale convention, and the size difference is what tells the
-// two gizmos apart at a glance without new 3D geometry.
-inline constexpr float kGizmoScaleTipHalfSizeFrac = 0.055f;
 
 // Scale's axis grab tolerance, deliberately wider than Move's
-// kAxisPickTolerancePts. With no plane patches and no grid, the scale gizmo's
+// kAxisPickTolerancePts. With no plane handle and no grid, the scale gizmo's
 // interactable footprint is far smaller than Move's -- and under the always-on
 // camera a near-miss now spins the view rather than doing nothing, so these
 // handles have to be MORE forgiving, not less. The hover highlight
@@ -189,6 +199,25 @@ int gizmo_scale_axis_index(GizmoHandle handle);
 // construction, so this is defense-in-depth only.
 void tangent_basis(simd_float3 n, simd_float3& u, simd_float3& v);
 
+// The grid plane's in-plane basis, given that plane's normal and the frame's own
+// axes. grid_u is whichever of (u, v, n) leans least on grid_normal, projected
+// into the plane and renormalized; grid_v = cross(grid_normal, grid_u).
+//
+// NOT tangent_basis(grid_normal). That would derive the basis from the world
+// alone and land the plane patch -- which is drawn in the +grid_u/+grid_v
+// quadrant -- in whatever direction the {0,1,0}/{1,0,0} reference vector happens
+// to point, typically nowhere near a drawn axis. Deriving it from the frame
+// instead keeps the patch beside an axis handle the user can already see, and
+// reproduces (u, v) EXACTLY when the grid plane is the u-v plane: there u and v
+// both have zero component along n, u wins the tie by declaration order, and
+// cross(n, u) is v by tangent_basis's own definition.
+//
+// Always well-conditioned: the least-aligned of three orthonormal vectors can
+// have at most 1/sqrt(3) of itself along any unit normal, so the projection
+// being renormalized is never shorter than sqrt(2/3).
+void grid_basis(simd_float3 grid_normal, simd_float3 u, simd_float3 v, simd_float3 n,
+                simd_float3& grid_u, simd_float3& grid_v);
+
 GizmoFrame gizmo_frame_for_node(const Node& node, const Camera& camera, GizmoSlot slot);
 
 // Screen-constant axis grab tolerance, converted to world units at the
@@ -208,22 +237,22 @@ std::optional<float> ray_axis_param(const Ray& ray, simd_float3 origin, simd_flo
 
 // Hit-tests ONE gizmo's handle set. Drawn geometry = hit geometry: axes over
 // their slot's band along u/v/n (positive half only, R3 ruling; ray-to-segment
-// distance vs the pts tolerance above), plane patches origin + x*e1 + y*e2 with
-// x, y in [kGizmoPatchInner*he, kGizmoPatchOuter*he] (ray_plane + bounds). All
-// named rather than spelled out on purpose -- this comment once restated the
-// bounds as literals and went stale the moment they moved, which is the exact
-// failure those constants exist to prevent. Any axis hit beats any plane hit;
-// among axes smallest distance wins (ties: smaller ray-t, then declaration
-// order); among planes nearest ray-t wins.
+// distance vs the pts tolerance above), and the plane patch
+// origin + x*grid_u + y*grid_v with x, y in [kGizmoPatchInner*he,
+// kGizmoPatchOuter*he] (ray_plane + bounds). All named rather than spelled out
+// on purpose -- this comment once restated the bounds as literals and went stale
+// the moment they moved, which is the exact failure those constants exist to
+// prevent. Any axis hit beats the plane; among axes smallest distance wins
+// (ties: smaller ray-t, then declaration order).
 //
 // `slot` selects the handle set, and is REQUIRED rather than defaulted: which
 // manipulator is being hit-tested is exactly the kind of thing that must not be
 // decided silently at a call site.
 //
-// Placement: axes over 0..kMoveAxisOuterFrac*he, then plane patches. Shape: the
-// uniform centre first (it owns the disc the axes are pulled back from), then
-// axes over kScaleAxisInnerFrac..kScaleAxisOuterFrac at the wider scale
-// tolerance, and no planes.
+// Placement: axes over 0..kMoveAxisOuterFrac*he, then the rings and the plane
+// patch. Shape: the uniform centre first (it owns the disc the boxes are pulled
+// out of), then the axis boxes over kScaleAxisInnerFrac..kScaleAxisOuterFrac at
+// the wider scale tolerance, and no plane.
 GizmoHandle pick_gizmo_handle(const GizmoFrame& frame, const Ray& ray,
                               float fov_y_radians, float viewport_h_pts, GizmoSlot slot);
 
@@ -232,9 +261,9 @@ GizmoHandle pick_gizmo_handle(const GizmoFrame& frame, const Ray& ray,
 // and for tests.
 //
 // Resolution runs innermost band outwards -- Shape's uniform centre, then
-// Placement's move axes, then Shape's scale axes, then Placement's rings and
-// planes -- with ONE distance comparison at the front: the uniform centre only
-// beats a move axis if it is genuinely closer to the ray.
+// Placement's move axes, then Shape's scale boxes, then Placement's rings and
+// plane patch -- with ONE distance comparison at the front: the uniform centre
+// only beats a move axis if it is genuinely closer to the ray.
 //
 // That comparison is not decoration. The bands are disjoint in radius from
 // their own origin, but the two gizmos stop sharing an origin the moment the
@@ -310,9 +339,10 @@ std::optional<simd_float3> ring_drag_dir(const Ray& ray, const GizmoFrame& frame
 float signed_angle_about(simd_float3 from, simd_float3 to, simd_float3 axis);
 
 // Handle -> frame-vector mapping shared by the drag solver and rendering.
-// axis_dir: the pull direction of an axis handle. plane_normal: the drag
-// plane of a plane handle is spanned by its two basis vectors, so its normal
-// is the pair's THIRD basis vector. Both expect their own handle kind.
+// axis_dir: the pull direction of an axis handle, and expects one. plane_normal
+// is grid_normal: there is exactly one plane handle, so the answer no longer
+// depends on which one -- the parameter stays to keep the call sites reading as
+// a lookup, and to say out loud that this is only meaningful for GizmoHandle::Plane.
 bool gizmo_handle_is_axis(GizmoHandle handle);
 simd_float3 gizmo_axis_dir(const GizmoFrame& frame, GizmoHandle handle);
 simd_float3 gizmo_plane_normal(const GizmoFrame& frame, GizmoHandle handle);

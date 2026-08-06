@@ -23,18 +23,24 @@ enum class Op    : int32_t { Add = 0, Subtract = 1 };
 
 // Gizmo handles. Crosses the boundary like Shape/Op: the canonical definition
 // lives here, core/src/gizmo.h consumes it. Axis order is also the pick
-// tie-break order (see pick_gizmo_handle). Placement uses the axis and plane
-// handles; Shape uses the axes plus Uniform, and no planes. The names are
-// shared between the two slots on purpose -- AxisU means "the first axis of
-// whichever gizmo this is" -- so a handle is only meaningful alongside its
-// GizmoSlot, which is why picking returns the pair (see GizmoHit).
+// tie-break order (see pick_gizmo_handle). Placement uses the axes, the plane
+// and the rings; Shape uses the axes plus Uniform. The names are shared between
+// the two slots on purpose -- AxisU means "the first axis of whichever gizmo
+// this is" -- so a handle is only meaningful alongside its GizmoSlot, which is
+// why picking returns the pair (see GizmoHit).
 enum class GizmoHandle : int32_t {
-    None = 0, AxisU = 1, AxisV = 2, AxisN = 3, PlaneUV = 4, PlaneUN = 5, PlaneVN = 6,
-    Uniform = 7,
+    None = 0, AxisU = 1, AxisV = 2, AxisN = 3,
+    // The ONE two-axis drag handle, in the Placement gizmo's grid plane -- the
+    // tangent plane for an attached node, world-horizontal for a free one. There
+    // were three (one per basis pair) until they proved to be the widest, most
+    // occluding thing on a coalesced gizmo for the least-used gesture; the
+    // surviving one is the tangent drag the whole attachment model is about.
+    Plane = 4,
+    Uniform = 5,
     // Rotation rings, one about each of the frame's axes. Placement only: a
     // detail swivels against the surface it sits on, which is a fact about
     // where it is, not about how big it is.
-    RingU = 8, RingV = 9, RingN = 10
+    RingU = 6, RingV = 7, RingN = 8
 };
 
 // Which of the two manipulators a handle belongs to. A selected node shows
