@@ -890,12 +890,18 @@ add_executable(badlands_geometry_tests
     # keeping badlands_usd_tests free of those is the whole point of that
     # target. Inputs are hand-built, so no .usdc is opened here.
     src/engine/tests/usd_mesh_adapter_tests.cpp
+    # Hidden [.report] characterization of how far the shipped props decimate.
+    # Unlike the adapter tests above it DOES open the real .usdc files, which is
+    # why this target links badlands_usd_lib -- the question it answers (does
+    # edge collapse floor out on unwelded prop geometry?) cannot be asked of
+    # hand-built input.
+    game/tests/prop_lod_report_tests.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_geometry_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
 )
-target_link_libraries(badlands_geometry_tests PRIVATE badlands_engine badlands_game_lib)
+target_link_libraries(badlands_geometry_tests PRIVATE badlands_engine badlands_game_lib badlands_usd_lib)
 if(APPLE)
     target_link_options(badlands_geometry_tests PRIVATE "-Wl,-ld_new")
 endif()
@@ -1032,6 +1038,25 @@ if(APPLE)
     target_link_options(badlands_usd_tests PRIVATE "-Wl,-ld_new")
 endif()
 add_test(NAME badlands_usd_tests COMMAND badlands_usd_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_material_requirements_tests: Catch2 suite for the material
+# texture-slot registry (engine/rendering/material/material_requirements.cpp).
+# Pure CPU — the registry's ctor only fills a map. Exists because a slot-name
+# mismatch between the registry and a caller's InstanceParams override is
+# SILENT (StandardMaterialFactory matches by exact string, then falls through
+# to the slot default), so the registered names have to be pinned.
+add_executable(badlands_material_requirements_tests
+    src/engine/tests/material_requirements_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_material_requirements_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_link_libraries(badlands_material_requirements_tests PRIVATE badlands_engine)
+if(APPLE)
+    target_link_options(badlands_material_requirements_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_material_requirements_tests COMMAND badlands_material_requirements_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_decal_math_tests: Catch2 suite for the projected-decal math
 # (engine/rendering/decal_math.hpp) — the CPU mirror of
