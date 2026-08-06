@@ -21,20 +21,35 @@
 
 #include <spdlog/spdlog.h>
 
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+
 #include "badlands_assets.h"
 #include "engine/app/rhi_app_shell.hpp"
 #include "engine/graph/render_graph.hpp"
+#include "engine/rendering/debug_line_buffer.hpp"
 #include "engine/rhi/rhi_device.hpp"
+#include "engine/slang/slang_compiler.hpp"
+#include "executables/object_viewer/line_pass.hpp"
 
 using namespace badlands;
 using namespace badlands::rhi;
 using badlands::graph::RasterContext;
 using badlands::graph::RenderGraph;
+using badlands::object_viewer::LinePass;
 
 namespace {
 
+// What the frame contains. A selector rather than a flag because each scene
+// carries its OWN pixel assertion -- "every texel is the clear colour" and "a
+// segment covers these texels and not those" are different claims, and a
+// headless run that could not say which it was checking would be checking
+// neither.
+enum class Scene { Clear, Lines, Grid };
+
 struct Options {
   bool headless = false;
+  Scene scene = Scene::Clear;
   uint32_t width = 1280;
   uint32_t height = 720;
   std::string out = "object_viewer.png";
@@ -65,6 +80,15 @@ bool ParseArgs(int argc, char** argv, Options& opt) {
     const char* v = nullptr;
     if (a == "--headless") {
       opt.headless = true;
+    } else if (a == "--scene") {
+      if (!value(v)) return false;
+      if (std::strcmp(v, "clear") == 0) opt.scene = Scene::Clear;
+      else if (std::strcmp(v, "lines") == 0) opt.scene = Scene::Lines;
+      else if (std::strcmp(v, "grid") == 0) opt.scene = Scene::Grid;
+      else {
+        spdlog::error("object_viewer: unknown scene '{}' (clear|lines|grid)", v);
+        return false;
+      }
     } else if (a == "--width") {
       if (!value(v) || !ParseU32(v, 1, 16384, opt.width)) return false;
     } else if (a == "--height") {
@@ -85,10 +109,87 @@ bool ParseArgs(int argc, char** argv, Options& opt) {
   return true;
 }
 
+// A fixed camera for the headless scenes, and the starting camera for the
+// windowed one. Orthographic so a world segment maps to a screen span in closed
+// form, which is what lets the line assertion name exact pixels rather than
+// eyeball a picture.
+struct Camera {
+  glm::vec3 position{0.0f, 0.0f, 10.0f};
+  float extent = 10.0f;  // half-height of the ortho box, in world units
+  // Radians. Both zero looks straight down -Z, which is what the line scene
+  // needs: its assertion names exact pixels, and that closed form only holds
+  // for an unrotated camera. The grid scene pitches down, because a ground
+  // plane viewed edge-on is a single line -- which is exactly what the first
+  // attempt rendered.
+  float pitch = 0.0f;
+  float yaw = 0.0f;
+
+  glm::vec3 Forward() const {
+    return {std::cos(pitch) * std::sin(yaw), std::sin(pitch),
+            -std::cos(pitch) * std::cos(yaw)};
+  }
+
+  // The camera-OFFSET matrices ExpandDebugLines documents: the camera sits at
+  // the origin and the world is rebased by -position.
+  glm::mat4 View() const {
+    return glm::lookAt(glm::vec3(0.0f), Forward(), glm::vec3(0, 1, 0));
+  }
+  glm::mat4 Proj(float aspect) const {
+    // near and far SWAPPED, which is how reversed-Z is spelled with
+    // GLM_FORCE_DEPTH_ZERO_TO_ONE: the near plane maps to 1 and the far to 0.
+    return glm::ortho(-extent * aspect, extent * aspect, -extent, extent,
+                      100.0f, 0.0f);
+  }
+};
+
+// The camera each scene is asserted under. The line scene MUST stay unrotated:
+// its assertion is a closed form ("half the width, middle row"), and that only
+// holds looking straight down -Z.
+Camera CameraFor(Scene scene) {
+  Camera cam;
+  if (scene == Scene::Grid) {
+    cam.position = {0.0f, 6.0f, 14.0f};
+    cam.pitch = -0.45f;
+    cam.yaw = 0.35f;
+    cam.extent = 12.0f;
+  }
+  return cam;
+}
+
+// One horizontal segment through the world origin. Deliberately the simplest
+// thing that can be asserted on: with an orthographic camera it covers the
+// middle row of the image and nothing else, so "did the line pass run" and "did
+// it run in the right place" are the same question.
+DebugLineBuffer LineScene() {
+  DebugLineBuffer lines;
+  lines.AddLine({-5.0f, 0.0f, 0.0f}, {5.0f, 0.0f, 0.0f},
+                {1.0f, 0.0f, 0.0f}, /*thickness=*/4.0f);
+  return lines;
+}
+
+// What a viewer actually wants on screen: a ground grid and the three axes.
+DebugLineBuffer GridScene() {
+  DebugLineBuffer lines;
+  constexpr int kHalf = 10;
+  constexpr float kStep = 1.0f;
+  const glm::vec3 grey{0.30f, 0.32f, 0.38f};
+  for (int i = -kHalf; i <= kHalf; ++i) {
+    const float t = float(i) * kStep;
+    const float e = float(kHalf) * kStep;
+    lines.AddLine({t, 0, -e}, {t, 0, e}, grey, 1.0f);
+    lines.AddLine({-e, 0, t}, {e, 0, t}, grey, 1.0f);
+  }
+  lines.AddLine({0, 0, 0}, {3, 0, 0}, {0.9f, 0.2f, 0.2f}, 3.0f);
+  lines.AddLine({0, 0, 0}, {0, 3, 0}, {0.2f, 0.9f, 0.2f}, 3.0f);
+  lines.AddLine({0, 0, 0}, {0, 0, 3}, {0.3f, 0.4f, 0.95f}, 3.0f);
+  return lines;
+}
+
 // THE GRAPH, built identically for both modes. `sink` is whatever the caller
 // wants rendered into; the graph neither knows nor cares whether a display is
 // attached.
-bool BuildGraph(RenderGraph& graph, ITexture* sink, const Options& opt) {
+bool BuildGraph(RenderGraph& graph, ITexture* sink, const Options& opt,
+                LinePass* lines) {
   // Undefined on entry every frame: a freshly acquired drawable is a NEW
   // resource each time, so any state carried over from last frame would be a
   // lie. Stating it here rather than assuming it is what the entry-state
@@ -99,10 +200,22 @@ bool BuildGraph(RenderGraph& graph, ITexture* sink, const Options& opt) {
   graph.AddRasterPass("clear")
       .ColorTarget(out, LoadOp::Clear, StoreOp::Store, opt.clear)
       .Execute([](const RasterContext&) {
-        // Stage 1 draws nothing. The clear IS the frame, and the pass exists so
-        // the graph has a real target to derive a transition for.
+        // The clear IS this pass. It exists as its own pass so the target has a
+        // defined starting state whether or not anything draws afterwards.
       });
+
+  // A SECOND pass into the same target, loading rather than clearing. Two
+  // passes over one attachment is the smallest case that makes the graph's
+  // ordering and its RenderTarget state carry weight.
+  if (lines) lines->AddToGraph(graph, out, LoadOp::Load);
   return graph.Compile();
+}
+
+// The Slang compiler, created only when a scene needs a shader. The clear scene
+// does not, so a run without a Slang SDK still proves the graph.
+std::unique_ptr<slang::SlangCompiler> MakeCompiler() {
+  const std::vector<std::string> paths = {"shaders/slang/object_viewer"};
+  return slang::CreateSlangCompiler(paths);
 }
 
 int RunHeadless(IRhiDevice& device, const Options& opt) {
@@ -118,11 +231,32 @@ int RunHeadless(IRhiDevice& device, const Options& opt) {
        .label = "readback"});
   if (!sink || !readback) return 1;
 
-  RenderGraph graph(device);
-  if (!BuildGraph(graph, sink.get(), opt)) return 1;
+  std::unique_ptr<slang::SlangCompiler> compiler;
+  std::unique_ptr<LinePass> lines;
+  if (opt.scene != Scene::Clear) {
+    compiler = MakeCompiler();
+    if (!compiler) return 1;
+    lines = LinePass::Create(device, *compiler, Format::RGBA8Unorm);
+    if (!lines) return 1;
+  }
 
   device.BeginValidationScope();
   device.BeginFrame();
+  if (lines) {
+    lines->BeginFrame(device.CurrentFrame());
+    const Camera cam = CameraFor(opt.scene);
+    const float aspect = float(opt.width) / float(opt.height);
+    const DebugLineBuffer scene =
+        opt.scene == Scene::Grid ? GridScene() : LineScene();
+    if (!lines->Upload(scene, cam.View(), cam.Proj(aspect),
+                       {float(opt.width), float(opt.height)}, cam.position)) {
+      return 1;
+    }
+  }
+
+  RenderGraph graph(device);
+  if (!BuildGraph(graph, sink.get(), opt, lines.get())) return 1;
+
   auto encoder = device.CreateCommandEncoder("frame");
   graph.Execute(*encoder);
   // The readback is the CALLER's, not the graph's: copying out is a property of
@@ -147,20 +281,28 @@ int RunHeadless(IRhiDevice& device, const Options& opt) {
     spdlog::error("object_viewer: readback failed");
     return 1;
   }
-  // THE ASSERTION, and the reason the headless ctest means anything: every
-  // texel must be the clear colour the graph was given. Writing a PNG and
-  // exiting 0 would pass just as well against a graph that recorded no pass at
-  // all, or one whose clear was ignored -- both of which produce a plausible
-  // file. Exit status IS the check; there is no test framework around this.
+  // THE ASSERTION, and the reason the headless ctest means anything. Exit
+  // status IS the check; there is no test framework around this, and writing a
+  // PNG and exiting 0 would pass just as well against a graph that recorded no
+  // pass at all.
   auto expect = [](float v) {
     return uint8_t(std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f));
   };
   const uint8_t want[4] = {expect(opt.clear[0]), expect(opt.clear[1]),
                            expect(opt.clear[2]), expect(opt.clear[3])};
-  for (size_t i = 0; i < pixels.size(); i += 4) {
+  auto at = [&](uint32_t x, uint32_t y) {
+    return &pixels[(size_t(y) * opt.width + x) * 4];
+  };
+  auto is_clear = [&](const uint8_t* p) {
     for (int c = 0; c < 4; ++c) {
-      // +/- 1 LSB: the clear happens in float and rounds once.
-      if (std::abs(int(pixels[i + c]) - int(want[c])) > 1) {
+      if (std::abs(int(p[c]) - int(want[c])) > 1) return false;
+    }
+    return true;
+  };
+
+  if (opt.scene == Scene::Clear) {
+    for (size_t i = 0; i < pixels.size(); i += 4) {
+      if (!is_clear(&pixels[i])) {
         spdlog::error(
             "object_viewer: texel {} is rgba({},{},{},{}) but the graph was "
             "asked to clear to rgba({},{},{},{})",
@@ -169,12 +311,108 @@ int RunHeadless(IRhiDevice& device, const Options& opt) {
         return 1;
       }
     }
+    spdlog::info("object_viewer: every texel is rgba({},{},{},{})", want[0],
+                 want[1], want[2], want[3]);
+  } else if (opt.scene == Scene::Grid) {
+    // The grid is what the viewer actually shows, so it is rendered rather than
+    // trusted. Its assertion is deliberately weak -- it is a picture, not a
+    // measurement -- but "a lot of texels changed and the origin is lit" still
+    // separates a drawn grid from a blank frame.
+    size_t lit = 0;
+    for (size_t i = 0; i < pixels.size(); i += 4) {
+      if (!is_clear(&pixels[i])) ++lit;
+    }
+    if (lit < pixels.size() / 4 / 100) {
+      spdlog::error("object_viewer: only {} lit texels -- the grid is missing",
+                    lit);
+      return 1;
+    }
+    spdlog::info("object_viewer: grid drew {} lit texels", lit);
+  } else {
+    // The segment spans world x in [-5, 5] at y = 0, under an orthographic
+    // camera of half-height 10. So it covers the middle ROW and the middle
+    // HALF of the width, and nothing else -- three claims, each falsifiable.
+    const uint32_t mid_y = opt.height / 2;
+    const uint32_t centre_x = opt.width / 2;
+    size_t lit = 0;
+    for (uint32_t x = 0; x < opt.width; ++x) {
+      if (!is_clear(at(x, mid_y))) ++lit;
+    }
+    const uint8_t* centre = at(centre_x, mid_y);
+    if (is_clear(centre)) {
+      spdlog::error(
+          "object_viewer: the centre texel is still the clear colour -- the "
+          "line pass drew nothing");
+      return 1;
+    }
+    if (centre[0] < 128 || centre[1] > 64) {
+      spdlog::error("object_viewer: the centre texel is rgba({},{},{},{}), not "
+                    "the red the segment was given",
+                    centre[0], centre[1], centre[2], centre[3]);
+      return 1;
+    }
+    // Half the width, within the antialias fringe on either end.
+    const size_t want_lit = opt.width / 2;
+    if (lit < want_lit - 4 || lit > want_lit + 4) {
+      spdlog::error(
+          "object_viewer: {} lit texels across the middle row, expected about "
+          "{} for a segment spanning half the view",
+          lit, want_lit);
+      return 1;
+    }
+    // THE FRINGE, which is the only place blending is observable. The shader
+    // emits a 1px alpha ramp at the quad's edge; blended, that composites
+    // against the clear colour and the target stays opaque. Without blending
+    // the shader's own alpha is written straight through, so the fringe texel
+    // comes back with alpha 128 instead of 255 -- and every other assertion in
+    // this scene passes either way, which is exactly why this one is here.
+    bool found_fringe = false;
+    for (uint32_t y = 0; y < opt.height; ++y) {
+      const uint8_t* p = at(centre_x, y);
+      if (is_clear(p)) continue;
+      const bool core = p[0] > 250 && p[1] < 8 && p[2] < 8 && p[3] == 255;
+      if (core) continue;
+      found_fringe = true;
+      if (p[3] != 255) {
+        spdlog::error(
+            "object_viewer: fringe texel at y={} has alpha {} -- the shader's "
+            "alpha reached the target unblended",
+            y, p[3]);
+        return 1;
+      }
+      if (p[0] <= want[0] || p[0] >= 255) {
+        spdlog::error(
+            "object_viewer: fringe texel at y={} is rgba({},{},{},{}), not a "
+            "blend of the line colour and the clear colour",
+            y, p[0], p[1], p[2], p[3]);
+        return 1;
+      }
+    }
+    if (!found_fringe) {
+      spdlog::error(
+          "object_viewer: no antialias fringe anywhere in the centre column -- "
+          "the line has hard edges");
+      return 1;
+    }
+
+    // ...and the corners are untouched, so the line is a line and not a fill.
+    for (auto [x, y] : {std::pair<uint32_t, uint32_t>{0, 0},
+                        {opt.width - 1, 0},
+                        {0, opt.height - 1},
+                        {opt.width - 1, opt.height - 1}}) {
+      if (!is_clear(at(x, y))) {
+        spdlog::error("object_viewer: corner ({},{}) is not the clear colour",
+                      x, y);
+        return 1;
+      }
+    }
+    spdlog::info("object_viewer: {} lit texels across the middle row, corners "
+                 "clear", lit);
   }
 
   badlands_write_png(opt.out.c_str(), pixels.data(), opt.width, opt.height);
-  spdlog::info("object_viewer: wrote {} ({}x{}), every texel rgba({},{},{},{})",
-               opt.out, opt.width, opt.height, want[0], want[1], want[2],
-               want[3]);
+  spdlog::info("object_viewer: wrote {} ({}x{})", opt.out, opt.width,
+               opt.height);
   return 0;
 }
 
@@ -185,16 +423,52 @@ int RunWindowed(IRhiDevice& device, const Options& opt) {
                                                   .present_format =
                                                       Format::BGRA8Unorm});
   if (!shell) return 1;
-  spdlog::info("object_viewer: Esc to quit");
+
+  // BGRA, because that is what CAMetalLayer accepts and the pipeline's colour
+  // format has to match its attachment. The shader is unchanged either way --
+  // channel order is the hardware's business.
+  auto compiler = MakeCompiler();
+  if (!compiler) return 1;
+  auto lines = LinePass::Create(device, *compiler, Format::BGRA8Unorm);
+  if (!lines) return 1;
+
+  Camera cam = CameraFor(Scene::Grid);
+  spdlog::info("object_viewer: WASD/QE to move, wheel to zoom, Esc to quit");
 
   rhi_app::AppShellCallbacks cb;
-  cb.OnRender = [&](ITextureView* target, const rhi_app::FrameInfo&) {
+  cb.OnEvent = [&](const SDL_Event& e) {
+    if (e.type == SDL_EVENT_MOUSE_WHEEL) {
+      cam.extent =
+          std::clamp(cam.extent * (e.wheel.y > 0 ? 0.9f : 1.1f), 1.0f, 200.0f);
+      return true;
+    }
+    return false;
+  };
+  cb.OnUpdate = [&](const rhi_app::FrameInfo& f) {
+    const float step = cam.extent * std::min(f.dt, 0.1f);
+    if (f.keys[SDL_SCANCODE_W]) cam.position.z -= step;
+    if (f.keys[SDL_SCANCODE_S]) cam.position.z += step;
+    if (f.keys[SDL_SCANCODE_A]) cam.position.x -= step;
+    if (f.keys[SDL_SCANCODE_D]) cam.position.x += step;
+    if (f.keys[SDL_SCANCODE_E]) cam.position.y += step;
+    if (f.keys[SDL_SCANCODE_Q]) cam.position.y -= step;
+  };
+  cb.OnFrameBegin = [&](uint64_t frame_index) {
+    // After BeginFrame, so a SKIPPED frame still recycles its slot.
+    lines->BeginFrame(frame_index);
+  };
+  cb.OnRender = [&](ITextureView* target, const rhi_app::FrameInfo& f) {
+    const float aspect = float(f.width) / float(std::max(1u, f.height));
+    if (!lines->Upload(GridScene(), cam.View(), cam.Proj(aspect),
+                       {float(f.width), float(f.height)}, cam.position)) {
+      return false;
+    }
     // Rebuilt per frame because the drawable is a different texture each time.
     // Cheap at this size, and the alternative -- caching a graph keyed on a
     // resource that changes every frame -- is how a stale view gets rendered
     // into.
     RenderGraph graph(device);
-    if (!BuildGraph(graph, target->GetTexture(), opt)) return false;
+    if (!BuildGraph(graph, target->GetTexture(), opt, lines.get())) return false;
     auto encoder = device.CreateCommandEncoder("frame");
     graph.Execute(*encoder);
     encoder->Finish();

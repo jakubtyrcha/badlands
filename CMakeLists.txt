@@ -1478,9 +1478,13 @@ endif()
 # the render graph. Windowed and headless run the SAME graph — only the imported
 # output texture differs — so the headless test exercises the real path.
 if(APPLE)
-    add_executable(badlands_object_viewer src/executables/object_viewer/main.cpp)
+    add_executable(badlands_object_viewer
+        src/executables/object_viewer/main.cpp
+        src/executables/object_viewer/line_pass.cpp
+        src/engine/rendering/debug_line_buffer.cpp
+        src/engine/rendering/debug_line_expand.cpp)
     target_link_libraries(badlands_object_viewer PRIVATE
-        badlands_render_graph badlands_rhi_app assets)
+        badlands_render_graph badlands_rhi_app badlands_slang assets)
     target_include_directories(badlands_object_viewer PRIVATE
         ${CMAKE_SOURCE_DIR}/src
         ${CMAKE_SOURCE_DIR}/third_party/glm
@@ -1494,6 +1498,19 @@ if(APPLE)
     add_test(NAME object_viewer_headless
              COMMAND badlands_object_viewer --headless --width 64 --height 64
                      --out ${CMAKE_BINARY_DIR}/object_viewer_headless.png
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    # The debug-line pass, asserted on pixels: the segment covers the middle row
+    # and half the width, the centre texel is the red it was given, and the
+    # corners stay the clear colour.
+    add_test(NAME object_viewer_grid
+             COMMAND badlands_object_viewer --headless --scene grid
+                     --width 256 --height 192
+                     --out ${CMAKE_BINARY_DIR}/object_viewer_grid.png
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME object_viewer_lines
+             COMMAND badlands_object_viewer --headless --scene lines
+                     --width 64 --height 64
+                     --out ${CMAKE_BINARY_DIR}/object_viewer_lines.png
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
     foreach(bad_args "--width;0" "--height;4294967297" "--frames;-1" "--nope")
