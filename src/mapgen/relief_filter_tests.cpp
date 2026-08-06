@@ -273,3 +273,63 @@ TEST_CASE("relief gradient matches a finite difference", "[relief]") {
   }
   REQUIRE(checked >= 8);
 }
+
+TEST_CASE("relief strength feathers down approaching a shoreline", "[relief]") {
+  // Between open ground and the exact-zero wet mask sits the feather: a dry
+  // texel whose coarse neighborhood is partly wet must carry LESS detail
+  // than the same texel in an identical world without the lake -- and a
+  // texel with no wet neighborhood at all must carry exactly the same.
+  CoarseFixture dry_fx(32, 0.6f, 0.2f, Biome::Mountain);
+  CoarseFixture lake_fx(32, 0.6f, 0.2f, Biome::Mountain);
+  for (int y = 10; y < 22; ++y)
+    for (int x = 10; x < 22; ++x) lake_fx.depth.at(x, y) = 3.0f;
+  const ReliefContext dry = dry_fx.ctx();
+  const ReliefContext lake = lake_fx.ctx();
+
+  // The dry ring half a coarse cell outside the lake: wet fraction in (0,1).
+  double rms_dry = 0.0, rms_lake = 0.0;
+  int count = 0;
+  for (int i = 0; i < 32; ++i) {
+    const double along = 10.0 * kSrcTexelM + i * 3.7;
+    const glm::dvec2 p{along, 9.4 * kSrcTexelM};  // just north of the lake
+    const float a = sample_relief_delta(dry, p, 1.0f).delta_m;
+    const float b = sample_relief_delta(lake, p, 1.0f).delta_m;
+    rms_dry += a * a;
+    rms_lake += b * b;
+    ++count;
+  }
+  REQUIRE(rms_dry > 0.0);
+  REQUIRE(rms_lake < rms_dry);
+
+  // Far from the lake (no wet cell within the bilinear footprint): identical.
+  const glm::dvec2 far{4.0 * kSrcTexelM + 3.3, 4.0 * kSrcTexelM + 7.7};
+  REQUIRE(sample_relief_delta(dry, far, 1.0f).delta_m ==
+          sample_relief_delta(lake, far, 1.0f).delta_m);
+}
+
+TEST_CASE("relief detail is stable across output resolutions", "[relief]") {
+  // 0.5 m and 1 m requests reveal the same four octaves, so the fine field
+  // box-downsampled must agree with the coarse field up to the profile's
+  // curvature inside one texel -- resolution sharpens detail, never moves it.
+  const CoarseFixture fx(32, 0.6f, 0.2f, Biome::Mountain);
+  const ReliefContext ctx = fx.ctx();
+  const glm::dvec2 origin{128.0, 128.0};
+  Field2D<float> fine(128, 128, 0.0f), coarse(64, 64, 0.0f);
+  apply_relief(ctx, origin, 0.5f, fine);
+  apply_relief(ctx, origin, 1.0f, coarse);
+
+  float max_abs = 0.0f, worst = 0.0f;
+  for (int y = 2; y < 62; ++y) {
+    for (int x = 2; x < 62; ++x) {
+      // The fine field's node at (2x, 2y) IS the coarse node's world
+      // position; average the 2x2 block around it for a fair box compare.
+      const float avg = 0.25f * (fine.at(2 * x, 2 * y) + fine.at(2 * x + 1, 2 * y) +
+                                 fine.at(2 * x, 2 * y + 1) +
+                                 fine.at(2 * x + 1, 2 * y + 1));
+      worst = std::max(worst, std::fabs(avg - coarse.at(x, y)));
+      max_abs = std::max(max_abs, std::fabs(coarse.at(x, y)));
+    }
+  }
+  REQUIRE(max_abs > 0.05f);  // the comparison must not be vacuous
+  REQUIRE(worst < 0.25f);
+}
