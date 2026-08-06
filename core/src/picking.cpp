@@ -156,11 +156,4 @@ std::optional<simd_float3> ray_plane(const Ray& ray, simd_float3 plane_point, si
     return ray.origin + t * ray.dir;
 }
 
-DragPlane drag_plane_for_node(const Node& node, simd_float3 camera_forward) {
-    if (node.snapped) {
-        return DragPlane{node.snap_point, node.snap_normal};
-    }
-    return DragPlane{node.position, -camera_forward};
-}
-
 } // namespace sq

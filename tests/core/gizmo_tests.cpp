@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <simd/simd.h>
+#include <utility>
 #include <vector>
 
 #include "camera.h"
@@ -83,41 +84,171 @@ TEST_CASE("tangent_basis: degenerate zero normal falls back to {0,1,0} instead o
 
 // --- gizmo_frame_for_node ---------------------------------------------------
 
-TEST_CASE("gizmo_frame_for_node: snapped node uses the snap frame; unsnapped faces the camera; "
-          "half_extent is screen-constant") {
+TEST_CASE("gizmo_frame_for_node: snapped Move uses the snap frame; everything else uses the "
+          "node's own axes; half_extent is screen-constant") {
     const Camera cam = test_camera();
-    const simd_float3 forward = simd_normalize(cam.target - cam.eye);
 
     Node node;
     node.position = {0.5f, 1.0f, -0.25f};
 
-    SUBCASE("unsnapped: origin = position, n = -camera_forward") {
-        const GizmoFrame f = gizmo_frame_for_node(node, cam, GizmoKind::Move);
+    SUBCASE("free Move: origin = position, basis = the node's local axes") {
+        const GizmoFrame f = gizmo_frame_for_node(node, cam, GizmoSlot::Placement);
         check_float3_approx(f.origin, node.position);
-        check_float3_approx(f.n, -forward);
-
-        simd_float3 u, v;
-        tangent_basis(-forward, u, v);
-        check_float3_approx(f.u, u);
-        check_float3_approx(f.v, v);
+        // Identity rotation, so the local axes are world X/Y/Z. This used to be
+        // a camera-facing basis (-camera_forward and its tangent basis), which
+        // is exactly the behaviour being reversed here.
+        check_float3_approx(f.u, simd_float3{1.0f, 0.0f, 0.0f});
+        check_float3_approx(f.v, simd_float3{0.0f, 1.0f, 0.0f});
+        check_float3_approx(f.n, simd_float3{0.0f, 0.0f, 1.0f});
+        // ...and its grid is world-horizontal, not the u-v plane.
+        check_float3_approx(f.grid_normal, simd_float3{0.0f, 1.0f, 0.0f});
     }
 
-    SUBCASE("snapped: origin = snap_point, n = snap_normal") {
+    SUBCASE("snapped Move: origin = snap_point, n = snap_normal, grid = the tangent plane") {
         node.snapped = true;
         node.snap_point = {1.0f, 0.0f, 1.0f};
         node.snap_normal = simd_normalize(simd_float3{0.0f, 1.0f, 0.2f});
 
-        const GizmoFrame f = gizmo_frame_for_node(node, cam, GizmoKind::Move);
+        const GizmoFrame f = gizmo_frame_for_node(node, cam, GizmoSlot::Placement);
         check_float3_approx(f.origin, node.snap_point);
         check_float3_approx(f.n, node.snap_normal);
+        check_float3_approx(f.grid_normal, node.snap_normal);
+
+        simd_float3 u, v;
+        tangent_basis(node.snap_normal, u, v);
+        check_float3_approx(f.u, u);
+        check_float3_approx(f.v, v);
+    }
+
+    SUBCASE("Scale ignores snapping entirely: always the node's centre and own axes") {
+        node.snapped = true;
+        node.snap_point = {1.0f, 0.0f, 1.0f};
+        node.snap_normal = simd_normalize(simd_float3{0.0f, 1.0f, 0.2f});
+
+        const GizmoFrame f = gizmo_frame_for_node(node, cam, GizmoSlot::Shape);
+        check_float3_approx(f.origin, node.position); // NOT snap_point
+        check_float3_approx(f.u, simd_float3{1.0f, 0.0f, 0.0f});
+        check_float3_approx(f.v, simd_float3{0.0f, 1.0f, 0.0f});
+        check_float3_approx(f.n, simd_float3{0.0f, 0.0f, 1.0f});
     }
 
     SUBCASE("half_extent = kGizmoScreenFraction * d * 2*tan(fov/2)") {
-        const GizmoFrame f = gizmo_frame_for_node(node, cam, GizmoKind::Move);
+        const GizmoFrame f = gizmo_frame_for_node(node, cam, GizmoSlot::Placement);
         const float d = simd_length(node.position - cam.eye);
         const float expected = kGizmoScreenFraction * d * 2.0f * std::tan(cam.fov_y_radians * 0.5f);
         CHECK(f.half_extent == doctest::Approx(expected));
         CHECK(f.half_extent > 0.0f);
+    }
+}
+
+TEST_CASE("gizmo_frame_for_node: the basis does not depend on the camera") {
+    // THE regression test for this rework. A manipulator whose axes swim as you
+    // orbit cannot build muscle memory, and an unsnapped node's basis used to
+    // be derived straight from camera_forward. Only half_extent (screen-constant
+    // sizing) is allowed to vary with the camera, so it is asserted to differ
+    // rather than merely left unchecked -- otherwise a frame that ignored the
+    // camera completely would pass this case for the wrong reason.
+    Camera a = test_camera();
+    Camera b = test_camera();
+    b.eye = {-7.0f, -4.0f, -2.0f}; // a wholly different pose, far side of the scene
+    b.target = {0.5f, 1.0f, -0.25f};
+
+    Node free_node;
+    free_node.position = {0.5f, 1.0f, -0.25f};
+
+    Node snapped = free_node;
+    snapped.snapped = true;
+    snapped.snap_point = {1.0f, 0.0f, 1.0f};
+    snapped.snap_normal = simd_normalize(simd_float3{0.3f, 1.0f, 0.2f});
+
+    for (const Node& node : {free_node, snapped}) {
+        for (const GizmoSlot slot : {GizmoSlot::Placement, GizmoSlot::Shape}) {
+            INFO("snapped: " << node.snapped << ", shape slot: " << (slot == GizmoSlot::Shape));
+            const GizmoFrame fa = gizmo_frame_for_node(node, a, slot);
+            const GizmoFrame fb = gizmo_frame_for_node(node, b, slot);
+            check_float3_approx(fa.origin, fb.origin);
+            check_float3_approx(fa.u, fb.u);
+            check_float3_approx(fa.v, fb.v);
+            check_float3_approx(fa.n, fb.n);
+            check_float3_approx(fa.grid_normal, fb.grid_normal);
+            CHECK(fa.half_extent != doctest::Approx(fb.half_extent)); // sizing still tracks depth
+        }
+    }
+}
+
+TEST_CASE("gizmo_frame_for_node: the node's own axes follow its rotation") {
+    const Camera cam = test_camera();
+
+    Node node;
+    node.position = {0.0f, 0.0f, 0.0f};
+    // A quarter turn about +Y takes local X to world -Z and local Z to world X.
+    node.rotation = simd_quaternion(static_cast<float>(M_PI_2), simd_float3{0.0f, 1.0f, 0.0f});
+
+    for (const GizmoSlot slot : {GizmoSlot::Placement, GizmoSlot::Shape}) {
+        INFO("shape slot: " << (slot == GizmoSlot::Shape));
+        const GizmoFrame f = gizmo_frame_for_node(node, cam, slot);
+        check_float3_approx(f.u, simd_float3{0.0f, 0.0f, -1.0f});
+        check_float3_approx(f.v, simd_float3{0.0f, 1.0f, 0.0f});
+        check_float3_approx(f.n, simd_float3{1.0f, 0.0f, 0.0f});
+        // Still right-handed after the turn, which is what the drag and draw
+        // paths both assume.
+        check_float3_approx(simd_cross(f.u, f.v), f.n);
+    }
+
+    SUBCASE("but a snapped Move frame follows the SURFACE, not the node's spin") {
+        node.snapped = true;
+        node.snap_point = {0.0f, 0.0f, 0.0f};
+        node.snap_normal = {0.0f, 1.0f, 0.0f};
+        const GizmoFrame f = gizmo_frame_for_node(node, cam, GizmoSlot::Placement);
+        check_float3_approx(f.n, node.snap_normal);
+    }
+}
+
+// --- gizmos_coalesce --------------------------------------------------------
+
+TEST_CASE("gizmos_coalesce: the two anchors merge below the threshold and split above it") {
+    const Camera cam = test_camera();
+
+    Node node;
+    node.position = {0.0f, 0.0f, 0.0f};
+    node.snapped = true;
+    node.snap_normal = {0.0f, 1.0f, 0.0f};
+
+    const auto pair_for = [&](simd_float3 position, simd_float3 snap_point) {
+        Node n = node;
+        n.position = position;
+        n.snap_point = snap_point;
+        return std::pair<GizmoFrame, GizmoFrame>{
+            gizmo_frame_for_node(n, cam, GizmoSlot::Placement),
+            gizmo_frame_for_node(n, cam, GizmoSlot::Shape)};
+    };
+
+    SUBCASE("a freshly spawned detail is coalesced: spawn_snapped puts its centre ON its "
+            "snap point, so the two anchors are the same point") {
+        const auto [placement, shape] = pair_for(simd_float3{1.0f, 0.0f, 1.0f}, simd_float3{1.0f, 0.0f, 1.0f});
+        CHECK(gizmos_coalesce(placement, shape));
+    }
+
+    SUBCASE("lifting the node off the surface splits them") {
+        // The threshold is a fraction of half_extent, which is screen-constant,
+        // so it is derived here rather than written as a world distance.
+        const auto [p0, s0] = pair_for(simd_float3{0.0f, 0.0f, 0.0f}, simd_float3{0.0f, 0.0f, 0.0f});
+        const float he = p0.half_extent;
+
+        const float inside = 0.5f * kGizmoCoalesceFrac * he;
+        const auto [p1, s1] = pair_for(simd_float3{0.0f, inside, 0.0f}, simd_float3{0.0f, 0.0f, 0.0f});
+        CHECK(gizmos_coalesce(p1, s1));
+
+        const float outside = 2.0f * kGizmoCoalesceFrac * he;
+        const auto [p2, s2] = pair_for(simd_float3{0.0f, outside, 0.0f}, simd_float3{0.0f, 0.0f, 0.0f});
+        CHECK_FALSE(gizmos_coalesce(p2, s2));
+    }
+
+    SUBCASE("a free node is always coalesced: both slots anchor on its centre") {
+        Node free_node;
+        free_node.position = {2.0f, -1.0f, 0.5f};
+        CHECK(gizmos_coalesce(gizmo_frame_for_node(free_node, cam, GizmoSlot::Placement),
+                              gizmo_frame_for_node(free_node, cam, GizmoSlot::Shape)));
     }
 }
 
@@ -147,15 +278,16 @@ Ray ray_through(simd_float3 eye, simd_float3 target) {
     return Ray{eye, simd_normalize(target - eye)};
 }
 
-// Test-local convenience; the kind defaults to Move because most cases here
-// predate the scale gizmo. The production entry point takes it explicitly.
+// Test-local convenience; the slot defaults to Placement because most cases
+// here predate the second gizmo. The production entry point takes it
+// explicitly, and pick_gizmos takes both frames at once.
 GizmoHandle pick(const GizmoFrame& f, simd_float3 eye, simd_float3 target,
-                 GizmoKind kind = GizmoKind::Move) {
-    return pick_gizmo_handle(f, ray_through(eye, target), kTestFov, kTestViewportH, kind);
+                 GizmoSlot slot = GizmoSlot::Placement) {
+    return pick_gizmo_handle(f, ray_through(eye, target), kTestFov, kTestViewportH, slot);
 }
 
 // A scale gizmo's frame: node-local axes (world X/Y/Z at identity rotation),
-// matching what gizmo_frame_for_node builds for GizmoKind::Scale.
+// matching what gizmo_frame_for_node builds for GizmoSlot::Shape.
 GizmoFrame make_scale_frame(simd_float3 origin = simd_float3{0.0f, 0.0f, 0.0f},
                             float half_extent = 1.5f) {
     GizmoFrame f;
@@ -199,7 +331,7 @@ TEST_CASE("ray_axis_param/pick: near-parallel fuzz — finite or rejected, and t
         }
         // cos(0.05) ~= 0.99875 > kAxisViewAlignLimit: all three fuzz angles are
         // inside the guard, so the u axis must never be the pick result.
-        CHECK(pick_gizmo_handle(f, ray, kTestFov, kTestViewportH, GizmoKind::Move) != GizmoHandle::AxisU);
+        CHECK(pick_gizmo_handle(f, ray, kTestFov, kTestViewportH, GizmoSlot::Placement) != GizmoHandle::AxisU);
     }
 }
 
@@ -208,10 +340,14 @@ TEST_CASE("pick_gizmo_handle: each axis picked through a point on it; origin tie
     const float he = f.half_extent;
     const simd_float3 eye = {2.0f, 3.0f, 5.0f};
 
-    CHECK(pick(f, eye, f.origin + 0.8f * he * f.u) == GizmoHandle::AxisU);
-    CHECK(pick(f, eye, f.origin + 0.8f * he * f.v) == GizmoHandle::AxisV);
+    // Mid-band, so the point is on the drawn shaft rather than past its end:
+    // Placement's axes stop at kMoveAxisOuterFrac now that Shape's own axes own
+    // everything outboard of kScaleAxisInnerFrac.
+    const float mid = 0.5f * kMoveAxisOuterFrac;
+    CHECK(pick(f, eye, f.origin + mid * he * f.u) == GizmoHandle::AxisU);
+    CHECK(pick(f, eye, f.origin + mid * he * f.v) == GizmoHandle::AxisV);
     // n from an eye whose view of the n axis is well off end-on.
-    CHECK(pick(f, simd_float3{3.0f, 2.0f, 5.0f}, f.origin + 0.8f * he * f.n) == GizmoHandle::AxisN);
+    CHECK(pick(f, simd_float3{3.0f, 2.0f, 5.0f}, f.origin + mid * he * f.n) == GizmoHandle::AxisN);
 
     // Through the origin every axis is at distance 0 with the same ray-t:
     // deterministic declaration-order tie-break.
@@ -241,15 +377,26 @@ TEST_CASE("pick_gizmo_handle: plane patches hit at their centers, bounds respect
     CHECK(pick(f, simd_float3{0.8f, 0.3f, 6.0f}, f.origin + c * he * (f.u + f.v)) == GizmoHandle::PlaneUV);
     CHECK(pick(f, simd_float3{0.3f, 5.0f, 4.0f}, f.origin + c * he * (f.u + f.n)) == GizmoHandle::PlaneUN);
     CHECK(pick(f, simd_float3{5.0f, 0.3f, 4.0f}, f.origin + c * he * (f.v + f.n)) == GizmoHandle::PlaneVN);
-    const simd_float3 eye = {0.8f, 0.3f, 6.0f}; // uv-patch / bounds cases below
+    // Bounds cases below: eye on the SAME side of both the x=0 and y=0 planes
+    // as the uv patch (which sits at negative u and v). Those two planes are
+    // where RingU and RingV live, and a ray that crosses one of them can pass
+    // within tolerance of that ring's circle BEFORE reaching the patch -- in
+    // which case the ring is genuinely the nearer handle and correctly wins.
+    // Staying on one side keeps the probe about patch bounds, which is what
+    // this case is for.
+    const simd_float3 eye = {-0.6f, -0.5f, 6.0f};
 
     // Patch bounds, just inside and just outside each edge.
     const float inside = kGizmoPatchInner + 0.02f;
     const float below  = kGizmoPatchInner - 0.02f;
     const float above  = kGizmoPatchOuter + 0.02f;
     CHECK(pick(f, eye, f.origin + inside * he * f.u + inside * he * f.v) == GizmoHandle::PlaneUV);
-    CHECK(pick(f, eye, f.origin + below * he * f.u + c * he * f.v) == GizmoHandle::None);
-    CHECK(pick(f, eye, f.origin + above * he * f.u + c * he * f.v) == GizmoHandle::None);
+    // Outside the patch means NOT the patch -- not necessarily nothing at all.
+    // A ray aimed just inboard of the patch still travels on and can cross a
+    // rotation ring's plane at ring radius, which is a real hit on a real
+    // handle. The claim here is bounds enforcement, so that is what it asserts.
+    CHECK(pick(f, eye, f.origin + below * he * f.u + c * he * f.v) != GizmoHandle::PlaneUV);
+    CHECK(pick(f, eye, f.origin + above * he * f.u + c * he * f.v) != GizmoHandle::PlaneUV);
 
     // Off everything.
     CHECK(pick(f, eye, f.origin + 3.0f * he * f.u + 3.0f * he * f.v) == GizmoHandle::None);
@@ -263,7 +410,7 @@ TEST_CASE("pick_gizmo_handle: the patch it hit-tests is the patch lines.cpp draw
     const GizmoFrame f = test_frame();
     const float he = f.half_extent;
     std::vector<LineVertex> out;
-    append_move_gizmo_handles(out, f, GizmoHandle::None, simd_float3{0.8f, 0.3f, 6.0f});
+    append_move_gizmo_handles(out, f, GizmoHandle::None, simd_float3{0.8f, 0.3f, 6.0f}, kGizmoHandleRestAlpha);
     REQUIRE(out.size() == 132);
 
     for (size_t i = 36; i < 42; ++i) { // uv patch fill
@@ -295,7 +442,7 @@ TEST_CASE("pick_gizmo_handle: a ray grazing an axis while crossing a plane patch
     // from the u-axis line (within tolerance) and then lands inside the u-n
     // patch at (u,n) ~ (0.675, 0.7). Axis priority must win.
     const Ray ray = ray_through(simd_float3{-0.675f, 0.08f, 5.0f}, simd_float3{-0.675f, 0.0f, 0.7f});
-    CHECK(pick_gizmo_handle(f, ray, kTestFov, kTestViewportH, GizmoKind::Move) == GizmoHandle::AxisU);
+    CHECK(pick_gizmo_handle(f, ray, kTestFov, kTestViewportH, GizmoSlot::Placement) == GizmoHandle::AxisU);
 }
 
 TEST_CASE("pick_gizmo_handle: gizmo entirely behind the ray origin is unpickable "
@@ -303,7 +450,7 @@ TEST_CASE("pick_gizmo_handle: gizmo entirely behind the ray origin is unpickable
     const GizmoFrame f = test_frame();
     const simd_float3 eye = {0.2f, 0.1f, 5.0f};
     const Ray away{eye, simd_normalize(eye - f.origin)}; // pointing away from the gizmo
-    CHECK(pick_gizmo_handle(f, away, kTestFov, kTestViewportH, GizmoKind::Move) == GizmoHandle::None);
+    CHECK(pick_gizmo_handle(f, away, kTestFov, kTestViewportH, GizmoSlot::Placement) == GizmoHandle::None);
 }
 
 TEST_CASE("pivot_marker_alpha: hold at full, then smoothstep to nothing") {
@@ -363,8 +510,8 @@ TEST_CASE("gizmo_frame_for_node: the scale frame is node-local, not the drag pla
     node.snap_point = {1.0f, 1.5f, 0.0f};
     node.snap_normal = simd_normalize(simd_float3{1.0f, 1.0f, 0.0f});
 
-    const GizmoFrame move = gizmo_frame_for_node(node, cam, GizmoKind::Move);
-    const GizmoFrame scale = gizmo_frame_for_node(node, cam, GizmoKind::Scale);
+    const GizmoFrame move = gizmo_frame_for_node(node, cam, GizmoSlot::Placement);
+    const GizmoFrame scale = gizmo_frame_for_node(node, cam, GizmoSlot::Shape);
 
     check_float3_approx(move.origin, node.snap_point); // move rides the snap frame
     check_float3_approx(scale.origin, node.position);  // scale is centred on the node
@@ -382,8 +529,8 @@ TEST_CASE("gizmo_frame_for_node: the scale frame is node-local, not the drag pla
 
         Camera other = cam;
         other.eye = {5.0f, -4.0f, 2.0f};
-        const GizmoFrame a = gizmo_frame_for_node(loose, cam, GizmoKind::Scale);
-        const GizmoFrame b = gizmo_frame_for_node(loose, other, GizmoKind::Scale);
+        const GizmoFrame a = gizmo_frame_for_node(loose, cam, GizmoSlot::Shape);
+        const GizmoFrame b = gizmo_frame_for_node(loose, other, GizmoSlot::Shape);
         check_float3_approx(a.u, b.u);
         check_float3_approx(a.v, b.v);
         check_float3_approx(a.n, b.n);
@@ -397,15 +544,15 @@ TEST_CASE("pick_gizmo_handle (Scale): centre owns the middle, axes own outboard,
     const simd_float3 eye = {0.0f, 0.0f, 8.0f};
 
     SUBCASE("dead centre is the uniform handle, never an axis") {
-        CHECK(pick(f, eye, f.origin, GizmoKind::Scale) == GizmoHandle::Uniform);
+        CHECK(pick(f, eye, f.origin, GizmoSlot::Shape) == GizmoHandle::Uniform);
     }
 
     SUBCASE("each axis is picked through a point on its drawn shaft") {
-        const float mid = 0.5f * (kScaleAxisInnerFrac + kGizmoAxisShaftFrac) * f.half_extent;
-        CHECK(pick(f, eye, f.origin + mid * f.u, GizmoKind::Scale) == GizmoHandle::AxisU);
-        CHECK(pick(f, eye, f.origin + mid * f.v, GizmoKind::Scale) == GizmoHandle::AxisV);
+        const float mid = 0.5f * (kScaleAxisInnerFrac + kScaleAxisShaftFrac) * f.half_extent;
+        CHECK(pick(f, eye, f.origin + mid * f.u, GizmoSlot::Shape) == GizmoHandle::AxisU);
+        CHECK(pick(f, eye, f.origin + mid * f.v, GizmoSlot::Shape) == GizmoHandle::AxisV);
         // n points at the eye here, so aim from off-axis for a usable view of it.
-        CHECK(pick(f, simd_float3{7.0f, 1.0f, 1.0f}, f.origin + mid * f.n, GizmoKind::Scale) ==
+        CHECK(pick(f, simd_float3{7.0f, 1.0f, 1.0f}, f.origin + mid * f.n, GizmoSlot::Shape) ==
               GizmoHandle::AxisN);
     }
 
@@ -414,22 +561,22 @@ TEST_CASE("pick_gizmo_handle (Scale): centre owns the middle, axes own outboard,
         // Scale (the ray still misses the axes out there).
         const simd_float3 patch =
             f.origin + kGizmoPatchCenter * f.half_extent * (f.u + f.v);
-        CHECK(pick(f, eye, patch, GizmoKind::Move) == GizmoHandle::PlaneUV);
-        CHECK(pick(f, eye, patch, GizmoKind::Scale) == GizmoHandle::None);
+        CHECK(pick(f, eye, patch, GizmoSlot::Placement) == GizmoHandle::PlaneUV);
+        CHECK(pick(f, eye, patch, GizmoSlot::Shape) == GizmoHandle::None);
     }
 
     SUBCASE("scale's wider tolerance catches grabs that move's would drop") {
         // Offset perpendicular to the u axis by more than Move's 8pt tolerance
         // but less than Scale's 14pt, at the same depth — the near-miss the
         // wider tolerance exists for, now that a miss drives the camera.
-        const float mid = 0.5f * (kScaleAxisInnerFrac + kGizmoAxisShaftFrac) * f.half_extent;
+        const float mid = 0.5f * (kScaleAxisInnerFrac + kScaleAxisShaftFrac) * f.half_extent;
         const simd_float3 on_axis = f.origin + mid * f.u;
         const float pts_to_world = 2.0f * std::tan(kTestFov * 0.5f) / kTestViewportH;
         const float world_per_pt = simd_length(on_axis - eye) * pts_to_world;
         const simd_float3 near_miss = on_axis + (11.0f * world_per_pt) * f.v;
 
-        CHECK(pick(f, eye, near_miss, GizmoKind::Scale) == GizmoHandle::AxisU);
-        CHECK(pick(f, eye, near_miss, GizmoKind::Move) != GizmoHandle::AxisU);
+        CHECK(pick(f, eye, near_miss, GizmoSlot::Shape) == GizmoHandle::AxisU);
+        CHECK(pick(f, eye, near_miss, GizmoSlot::Placement) != GizmoHandle::AxisU);
     }
 }
 
@@ -440,12 +587,17 @@ TEST_CASE("pick_gizmo_handle (Scale): the shafts it hit-tests are the shafts lin
     const simd_float3 eye = {0.8f, 0.3f, 8.0f};
 
     std::vector<LineVertex> out;
-    append_scale_gizmo_handles(out, f, GizmoHandle::None, eye);
+    append_scale_gizmo_handles(out, f, GizmoHandle::None, eye, kGizmoHandleRestAlpha);
     CHECK(out.size() == 42); // 3 shafts + 3 tips + 1 centre box, 6 verts each
 
-    // Just inboard of the drawn shaft start belongs to the centre, not the axis.
-    const simd_float3 inboard = f.origin + 0.5f * kScaleAxisInnerFrac * f.half_extent * f.u;
-    CHECK(pick(f, eye, inboard, GizmoKind::Scale) == GizmoHandle::Uniform);
+    // Dead centre belongs to the uniform handle, never an axis: the shafts
+    // start at kScaleAxisInnerFrac and the centre owns the disc inside that.
+    CHECK(pick(f, eye, f.origin, GizmoSlot::Shape) == GizmoHandle::Uniform);
+    // And a point in the band's inner GAP -- past the uniform handle's grab
+    // radius but short of the drawn shaft -- hits nothing on this gizmo, which
+    // is what leaves it free for Placement's axes when the two are coalesced.
+    const simd_float3 gap = f.origin + 0.5f * kScaleAxisInnerFrac * f.half_extent * f.u;
+    CHECK(pick(f, eye, gap, GizmoSlot::Shape) == GizmoHandle::None);
 }
 
 TEST_CASE("scale_axis_param floors the parameter so the drag ratio stays sane") {
@@ -520,4 +672,120 @@ TEST_CASE("gizmo_scale_axis_index maps u/v/n onto scale.x/y/z, and nothing else"
     // Uniform drives a screen-space drag, not an axis solve, so anything
     // branching on "is this an axis?" must route it elsewhere.
     CHECK_FALSE(gizmo_handle_is_axis(GizmoHandle::Uniform));
+}
+
+// --- pick_gizmos: resolving between the two ---------------------------------
+
+TEST_CASE("pick_gizmos: a coalesced pair resolves by radius band") {
+    // Both gizmos on one origin with the same basis -- the hardest case for the
+    // resolution rule, because every handle of both is in play along the same
+    // three lines. The bands are what keep them apart.
+    const Camera cam = test_camera();
+    Node node;
+    node.position = {0.0f, 0.0f, 0.0f};
+
+    const GizmoFrame placement = gizmo_frame_for_node(node, cam, GizmoSlot::Placement);
+    const GizmoFrame shape = gizmo_frame_for_node(node, cam, GizmoSlot::Shape);
+    REQUIRE(gizmos_coalesce(placement, shape));
+    const float he = placement.half_extent;
+    const simd_float3 eye = cam.eye;
+
+    const auto hit_at = [&](simd_float3 target) {
+        return pick_gizmos(placement, shape, ray_through(eye, target), cam.fov_y_radians,
+                           kTestViewportH);
+    };
+
+    SUBCASE("the centre is Shape's uniform handle") {
+        const GizmoHit hit = hit_at(placement.origin);
+        CHECK(hit.slot == GizmoSlot::Shape);
+        CHECK(hit.handle == GizmoHandle::Uniform);
+    }
+
+    SUBCASE("the inner shaft is Placement's move axis") {
+        const GizmoHit hit = hit_at(placement.origin + 0.5f * kMoveAxisOuterFrac * he * placement.u);
+        CHECK(hit.slot == GizmoSlot::Placement);
+        CHECK(hit.handle == GizmoHandle::AxisU);
+    }
+
+    SUBCASE("the outer shaft is Shape's scale axis") {
+        const float mid = 0.5f * (kScaleAxisInnerFrac + kScaleAxisShaftFrac);
+        const GizmoHit hit = hit_at(shape.origin + mid * he * shape.u);
+        CHECK(hit.slot == GizmoSlot::Shape);
+        CHECK(hit.handle == GizmoHandle::AxisU);
+    }
+
+    SUBCASE("the plane patch is Placement's, and loses to no axis out there") {
+        const GizmoHit hit =
+            hit_at(placement.origin + kGizmoPatchCenter * he * (placement.u + placement.v));
+        CHECK(hit.slot == GizmoSlot::Placement);
+        CHECK(hit.handle == GizmoHandle::PlaneUV);
+    }
+
+    SUBCASE("well clear of everything hits nothing") {
+        const GizmoHit hit = hit_at(placement.origin + 4.0f * he * placement.u);
+        CHECK(hit.handle == GizmoHandle::None);
+    }
+}
+
+TEST_CASE("pick_gizmos: a split pair is picked at whichever anchor the ray is near") {
+    const Camera cam = test_camera();
+    Node node;
+    node.snapped = true;
+    node.snap_point = {0.0f, 0.0f, 0.0f};
+    node.snap_normal = {0.0f, 1.0f, 0.0f};
+    node.position = {0.0f, 2.5f, 0.0f}; // lifted well clear of the surface
+
+    const GizmoFrame placement = gizmo_frame_for_node(node, cam, GizmoSlot::Placement);
+    const GizmoFrame shape = gizmo_frame_for_node(node, cam, GizmoSlot::Shape);
+    REQUIRE_FALSE(gizmos_coalesce(placement, shape));
+
+    const auto hit_at = [&](simd_float3 target) {
+        return pick_gizmos(placement, shape, ray_through(cam.eye, target), cam.fov_y_radians,
+                           kTestViewportH);
+    };
+
+    // Down at the surface: only Placement is there.
+    const GizmoHit low =
+        hit_at(placement.origin + 0.5f * kMoveAxisOuterFrac * placement.half_extent * placement.u);
+    CHECK(low.slot == GizmoSlot::Placement);
+    CHECK(low.handle == GizmoHandle::AxisU);
+
+    // Up at the node's centre: only Shape is there.
+    const GizmoHit high = hit_at(shape.origin);
+    CHECK(high.slot == GizmoSlot::Shape);
+    CHECK(high.handle == GizmoHandle::Uniform);
+}
+
+TEST_CASE("pick_gizmos: a split pair does not let the uniform handle swallow the "
+          "placement gizmo it happens to line up behind") {
+    // Review finding: Shape's uniform centre had UNCONDITIONAL top priority,
+    // justified by "when the gizmos are apart at most one is near the cursor".
+    // That is a world-space claim licensing a screen-space decision, and it
+    // fails exactly when the tether points at the camera: lift a detail off its
+    // surface, then look along the lift, and the two origins project on top of
+    // each other while the Placement axes remain fully visible around them.
+    Camera cam;
+    cam.eye = {0.0f, 10.0f, 0.001f};
+    cam.target = {0.0f, 0.0f, 0.0f};
+    cam.up = {0.0f, 0.0f, -1.0f};
+    cam.fov_y_radians = 1.0472f;
+    cam.aspect = 800.0f / 500.0f;
+
+    Node node;
+    node.snapped = true;
+    node.snap_point = {0.0f, 0.0f, 0.0f};
+    node.snap_normal = {0.0f, 1.0f, 0.0f};
+    node.position = {0.0f, 2.0f, 0.0f}; // lifted along the normal, straight at the eye
+
+    const GizmoFrame placement = gizmo_frame_for_node(node, cam, GizmoSlot::Placement);
+    const GizmoFrame shape = gizmo_frame_for_node(node, cam, GizmoSlot::Shape);
+    REQUIRE_FALSE(gizmos_coalesce(placement, shape)); // genuinely split...
+
+    // ...yet aiming at a Placement move axis, well inside its own band and on
+    // drawn geometry, must still give that axis.
+    const simd_float3 target = placement.origin + 0.10f * placement.half_extent * placement.u;
+    const GizmoHit hit = pick_gizmos(placement, shape, ray_through(cam.eye, target),
+                                     cam.fov_y_radians, kTestViewportH);
+    CHECK(hit.slot == GizmoSlot::Placement);
+    CHECK(hit.handle == GizmoHandle::AxisU);
 }

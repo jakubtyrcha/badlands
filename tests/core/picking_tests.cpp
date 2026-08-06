@@ -9,6 +9,7 @@
 #include "camera.h"
 #include "picking.h"
 #include "scene.h"
+#include "sdf.h" // evaluate_scene_sdf -- the zero-set cross-validation below
 
 using namespace sq;
 
@@ -411,6 +412,90 @@ TEST_CASE("raycast_scene: both ends of the scale clamp hit finitely with unit no
     }
 }
 
+TEST_CASE("raycast_scene: a rotated node is picked in its own frame") {
+    // Rotation was unreachable before it became renderable, so this pins
+    // behaviour raycast_scene already had rather than behaviour it gained: it
+    // inverts the full world_from_local (position, rotation AND scale), so the
+    // only thing that had to be true was that nothing else assumed identity.
+    //
+    // A 1 x 1 x 3 box (half = 0.5, 0.5, 1.5) turned 45 deg about +Y, hit by a
+    // ray straight down -z through x = 0. A CUBE would be the wrong subject
+    // twice over: it is symmetric under this rotation at 90 deg, and at 45 deg
+    // the ray lands exactly on an edge where the slab test's normal is
+    // ambiguous. The elongated box puts the same ray cleanly on the local -X
+    // face instead.
+    //
+    // Slab test in local space (numpy, Rodrigues inverse-rotating the ray):
+    //   t = 4.292893219, local hit (-0.5, 0, 0.5), local normal (-1, 0, 0)
+    //   -> world hit (0, 0, 0.70710678), world normal (-0.70710678, 0, 0.70710678)
+    SceneDocument doc;
+    Node node;
+    node.id = 1;
+    node.shape = Shape::Cube;
+    node.scale = {1.0f, 1.0f, 3.0f};
+    node.rotation = simd_quaternion(static_cast<float>(M_PI_4), simd_float3{0.0f, 1.0f, 0.0f});
+    doc.add(node);
+
+    const auto hit = raycast_scene(doc, Ray{{0.0f, 0.0f, 5.0f}, {0.0f, 0.0f, -1.0f}});
+    REQUIRE(hit.has_value());
+    CHECK(hit->hit.t == doctest::Approx(4.292893219f));
+    check_float3_approx(hit->hit.point, simd_float3{0.0f, 0.0f, 0.70710678f});
+    check_float3_approx(hit->hit.normal, simd_float3{-0.70710678f, 0.0f, 0.70710678f});
+    // Unrotated, the same ray would hit the long +z face at z = 1.5 with normal
+    // (0, 0, 1) -- so both assertions above are discriminating, not incidental.
+    CHECK(hit->hit.t != doctest::Approx(3.5f));
+}
+
+TEST_CASE("raycast_scene hits lie on the SDF's zero set, for rotated and non-uniformly "
+          "scaled nodes alike") {
+    // The cross-validation between the two independent descriptions of a node's
+    // surface: picking inverts world_from_local's T*R*S of a unit primitive,
+    // while the SDF translates and rotates and then measures the shape at its
+    // true half-extents. They agree only if scale stays baked into the shape
+    // rather than folded into the transform -- so this is the assertion that
+    // fails if anyone ever "simplifies" sdf_eval_node by dividing q by
+    // half_extents, which would warp the field and desync the two paths.
+    //
+    // No hand-derived literals: the claim is agreement, not any particular
+    // number. The box branch is exact; the ellipsoid's zero SET is exact too
+    // (k0 == 1 at the surface makes the iq formula return 0), even though its
+    // distances away from the surface are approximate.
+    struct Case { const char* label; Shape shape; simd_float3 scale; };
+    const std::array<Case, 4> cases = {{
+        {"cube, uniform", Shape::Cube, {1.0f, 1.0f, 1.0f}},
+        {"cube, non-uniform", Shape::Cube, {2.0f, 0.5f, 3.0f}},
+        {"ellipsoid, uniform", Shape::Sphere, {1.5f, 1.5f, 1.5f}},
+        {"ellipsoid, non-uniform", Shape::Sphere, {1.0f, 3.0f, 2.0f}},
+    }};
+
+    for (const Case& c : cases) {
+        INFO("case: " << c.label);
+        SceneDocument doc;
+        Node node;
+        node.id = 1;
+        node.shape = c.shape;
+        node.position = {0.25f, -0.5f, 0.75f};
+        node.scale = c.scale;
+        node.rotation = simd_quaternion(0.9f, simd_normalize(simd_float3{1.0f, 2.0f, -1.0f}));
+        doc.add(node);
+
+        // A spread of oblique rays, so no single lucky alignment can carry the
+        // case and each one meets the surface at a different orientation.
+        const std::array<simd_float3, 4> eyes = {{
+            {0.0f, 0.0f, 8.0f}, {7.0f, 2.0f, 3.0f}, {-4.0f, -5.0f, 2.0f}, {1.0f, 9.0f, -2.0f},
+        }};
+        for (const simd_float3& eye : eyes) {
+            INFO("eye: (" << eye.x << ", " << eye.y << ", " << eye.z << ")");
+            const simd_float3 dir = simd_normalize(node.position - eye);
+            const auto hit = raycast_scene(doc, Ray{eye, dir});
+            REQUIRE(hit.has_value());
+            const auto d = evaluate_scene_sdf(doc, hit->hit.point);
+            REQUIRE(d.has_value());
+            CHECK(std::fabs(*d) < 1e-4f);
+        }
+    }
+}
+
 // --- ray_plane -------------------------------------------------------------
 
 TEST_CASE("ray_plane: literals from the task brief") {
@@ -448,33 +533,10 @@ TEST_CASE("ray_plane: literals from the task brief") {
     }
 }
 
-// --- drag_plane_for_node ----------------------------------------------------
-
-TEST_CASE("drag_plane_for_node: snapped node ignores camera_forward, uses its snap fields") {
-    Node node;
-    node.snapped = true;
-    node.snap_point = {1.0f, 2.0f, 3.0f};
-    node.snap_normal = {0.0f, 0.0f, 1.0f};
-    node.position = {99.0f, 99.0f, 99.0f}; // must be ignored: snapped wins over position
-
-    for (const simd_float3 camera_forward :
-         {simd_float3{0.0f, 0.0f, -1.0f}, simd_float3{1.0f, 0.0f, 0.0f}, simd_normalize(simd_float3{1.0f, 1.0f, 1.0f})}) {
-        CAPTURE(camera_forward.x);
-        const DragPlane dp = drag_plane_for_node(node, camera_forward);
-        check_float3_approx(dp.point, simd_float3{1.0f, 2.0f, 3.0f});
-        check_float3_approx(dp.normal, simd_float3{0.0f, 0.0f, 1.0f});
-    }
-}
-
-TEST_CASE("drag_plane_for_node: unsnapped node uses its position and -camera_forward") {
-    Node node;
-    node.snapped = false;
-    node.position = {5.0f, 6.0f, 7.0f};
-
-    const DragPlane dp = drag_plane_for_node(node, simd_float3{0.0f, 0.0f, -1.0f});
-    check_float3_approx(dp.point, simd_float3{5.0f, 6.0f, 7.0f});
-    check_float3_approx(dp.normal, simd_float3{0.0f, 0.0f, 1.0f}); // -camera_forward
-}
+// drag_plane_for_node's two cases moved to gizmo_tests.cpp when the function
+// was folded into gizmo_frame_for_node -- the behaviour they pinned (snapped ->
+// the snap frame, free -> the node's own) is now a property of the frame, and
+// the camera no longer takes part in either.
 
 // --- Editor integration: scene built entirely through spawn() -------------
 

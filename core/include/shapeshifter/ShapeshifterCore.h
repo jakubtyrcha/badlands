@@ -10,6 +10,9 @@
 namespace sq {
 
 struct Vec3f { float x, y, z; };
+// A unit quaternion, xyz imaginary and w real — the same component order
+// simd_quatf::vector uses, so crossing the boundary is a field copy.
+struct Vec4f { float x, y, z, w; };
 
 // Shape/Op cross the interop boundary (spawn() below, and Node::shape/op in
 // core/src/scene.h), so their canonical definitions live here rather than in
@@ -20,19 +23,39 @@ enum class Op    : int32_t { Add = 0, Subtract = 1 };
 
 // Gizmo handles. Crosses the boundary like Shape/Op: the canonical definition
 // lives here, core/src/gizmo.h consumes it. Axis order is also the pick
-// tie-break order (see pick_gizmo_handle). The move gizmo uses the axis and
-// plane handles; the scale gizmo uses the axes plus Uniform, and no planes.
+// tie-break order (see pick_gizmo_handle). Placement uses the axis and plane
+// handles; Shape uses the axes plus Uniform, and no planes. The names are
+// shared between the two slots on purpose -- AxisU means "the first axis of
+// whichever gizmo this is" -- so a handle is only meaningful alongside its
+// GizmoSlot, which is why picking returns the pair (see GizmoHit).
 enum class GizmoHandle : int32_t {
     None = 0, AxisU = 1, AxisV = 2, AxisN = 3, PlaneUV = 4, PlaneUN = 5, PlaneVN = 6,
-    Uniform = 7
+    Uniform = 7,
+    // Rotation rings, one about each of the frame's axes. Placement only: a
+    // detail swivels against the surface it sits on, which is a fact about
+    // where it is, not about how big it is.
+    RingU = 8, RingV = 9, RingN = 10
 };
 
-// Which manipulator modify-mode is showing. The two differ in more than
-// styling — Move works in the node's tangent frame and offers plane handles,
-// Scale works in the node's local axes and offers a uniform centre handle — so
-// this selects the frame, the drawn geometry AND what beginDrag hit-tests, all
-// from one value.
-enum class GizmoKind : int32_t { Move = 0, Scale = 1 };
+// Which of the two manipulators a handle belongs to. A selected node shows
+// BOTH at once; they are not modes and there is nothing to arm.
+//
+// Placement answers "where does this node sit" and is anchored at the node's
+// attachment point -- its snap point when it has one, its own centre when it
+// does not -- in the surface's tangent frame. Shape answers "how big is this
+// node" and is always anchored at the node's centre in the node's own local
+// axes, because a scale handle has to map onto a scale COMPONENT.
+//
+// For a node that is not attached, or one whose centre still sits on its snap
+// point, the two anchors coincide and the pair reads as a single gizmo. That
+// is emergent rather than a special case: with the same origin, drawing both
+// handle sets IS the combined gizmo, and their radius bands are disjoint so
+// nothing collides.
+enum class GizmoSlot : int32_t { Placement = 0, Shape = 1 };
+
+// A hit on one of the two gizmos. `handle` is None exactly when nothing was
+// hit, in which case `slot` carries no meaning.
+struct GizmoHit { GizmoSlot slot; GizmoHandle handle; };
 
 // Camera gesture verbs. Each has exactly one trackpad gesture and one pointer
 // chord in the app layer; nothing is bound twice.
@@ -115,15 +138,17 @@ public:
     // selection; clears selection and refreshes line colors
     void deleteSelectedNode();
 
-    // modify tool — core owns all gizmo math. beginDrag hit-tests whichever
-    // gizmo is showing (see setGizmoKind) and returns whether a drag
-    // activated; off-handle presses return false, which is what lets the app
-    // layer hand the gesture to the camera instead. One drag path serves both
-    // kinds: move solves an axis/plane, scale solves an axis ratio or a
-    // screen-space vertical drag for the uniform handle, and core captures the
-    // press position so the cumulative-from-start arithmetic lives in one place.
+    // Manipulators — core owns all gizmo math. beginDrag hit-tests BOTH gizmos
+    // and returns whether a drag activated; off-handle presses return false,
+    // which is what lets the app layer hand the gesture to the camera instead.
+    // One drag path serves both slots: Placement solves an axis/plane, Shape
+    // solves an axis ratio or a screen-space vertical drag for the uniform
+    // handle, and core captures the press position so the
+    // cumulative-from-start arithmetic lives in one place.
+    //
+    // There is no tool to arm: both gizmos are live whenever one is visible, so
+    // which manipulator you get is decided by which handle you grab.
     void setGizmoVisible(bool visible);
-    void setGizmoKind(GizmoKind kind);   // also clears hover: it belonged to the other handle set
     bool beginDrag(float x, float y);
     void updateDrag(float x, float y);
     void endDrag();
@@ -143,7 +168,7 @@ public:
     // belt to these suspenders.
     void updateGizmoHover(float x, float y);
     void clearGizmoHover();
-    GizmoHandle gizmoHoverHandle() const;
+    GizmoHit gizmoHoverHandle() const;   // .handle == None when nothing is hovered
 
     // node info (tests + later UI)
     Vec3f nodePosition(int32_t nodeId) const;   // {0,0,0} for unknown id
@@ -158,6 +183,7 @@ public:
 
     // node info (tests)
     Vec3f nodeScale(int32_t nodeId) const;          // {0,0,0} for unknown id
+    Vec4f nodeRotation(int32_t nodeId) const;       // identity {0,0,0,1} for unknown id
 
 private:
     Editor();

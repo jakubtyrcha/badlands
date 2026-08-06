@@ -252,6 +252,9 @@ GizmoFrame make_gizmo_frame(simd_float3 origin, simd_float3 n, float he) {
     f.origin = origin;
     f.n = n;
     tangent_basis(n, f.u, f.v);
+    // The attached-node case, where the grid plane and the drag plane are the
+    // same plane. The free case (grid_normal != n) has its own test below.
+    f.grid_normal = n;
     f.half_extent = he;
     return f;
 }
@@ -304,7 +307,7 @@ TEST_CASE("append_move_gizmo_grid: n={0,1,0}, he=2, divisions=12 — coplanar, r
     const GizmoFrame f = make_gizmo_frame(simd_float3{0.0f, 0.0f, 0.0f}, simd_float3{0.0f, 1.0f, 0.0f}, 2.0f);
     const float he = f.half_extent;
     std::vector<LineVertex> out;
-    append_move_gizmo_grid(out, f, 12);
+    append_move_gizmo_grid(out, f, 12, 1.0f);
 
     // 26 grid lines (2*(divisions+1), center lines included — the positive-
     // only axis handles no longer cover their negative halves), each split
@@ -356,6 +359,40 @@ TEST_CASE("append_move_gizmo_grid: n={0,1,0}, he=2, divisions=12 — coplanar, r
     }
 }
 
+TEST_CASE("append_move_gizmo_grid: the grid follows grid_normal, not n") {
+    // A free node's frame: axes on the node's own (here world) basis, but the
+    // grid world-horizontal. The two disagree, which is the whole point -- the
+    // grid is a world reference plane, not the u-v drag plane, so a free node
+    // gets a local echo of the ground plate instead of a vertical wall.
+    GizmoFrame f;
+    f.origin = {0.0f, 1.5f, 0.0f};
+    f.u = {1.0f, 0.0f, 0.0f};
+    f.v = {0.0f, 1.0f, 0.0f};
+    f.n = {0.0f, 0.0f, 1.0f};
+    f.grid_normal = {0.0f, 1.0f, 0.0f};
+    f.half_extent = 2.0f;
+
+    std::vector<LineVertex> out;
+    append_move_gizmo_grid(out, f, 12, 1.0f);
+    REQUIRE(out.size() == 26 * kGizmoGridSegmentsPerLine * 2);
+
+    for (size_t i = 0; i < out.size(); ++i) {
+        CAPTURE(i);
+        // Horizontal: every vertex sits at the origin's height...
+        CHECK(std::fabs(out[i].pos.y - f.origin.y) < 1e-5f);
+        // ...which is emphatically NOT the u-v plane (z = origin.z), where the
+        // grid would have been drawn had it followed n.
+        CHECK(std::fabs(simd_dot(f.grid_normal, out[i].pos.xyz - f.origin)) < 1e-5f);
+    }
+
+    // The grid genuinely spans z, so it cannot be the (constant-z) u-v plane.
+    bool spans_z = false;
+    for (const LineVertex& v : out) {
+        spans_z = spans_z || std::fabs(v.pos.z - f.origin.z) > 0.5f;
+    }
+    CHECK(spans_z);
+}
+
 TEST_CASE("append_move_gizmo_handles: counts, geometry, desaturated axis colors and "
           "filled plane patches") {
     const GizmoFrame f = make_gizmo_frame(simd_float3{0.0f, 0.0f, 0.0f}, simd_float3{0.0f, 1.0f, 0.0f}, 2.0f);
@@ -365,7 +402,7 @@ TEST_CASE("append_move_gizmo_handles: counts, geometry, desaturated axis colors 
     const float tip = kGizmoAxisTipHalfSizeFrac * he;
     const simd_float3 eye = {3.0f, 8.0f, 2.0f}; // off every axis: no degenerate expansion
     std::vector<LineVertex> out;
-    append_move_gizmo_handles(out, f, GizmoHandle::None, eye);
+    append_move_gizmo_handles(out, f, GizmoHandle::None, eye, kGizmoHandleRestAlpha);
 
     // 3 shafts*6 + 3 tips*6 + 3 patches*(6 fill + 24 outline) + 6 pip = 132.
     REQUIRE(out.size() == 132);
@@ -376,7 +413,7 @@ TEST_CASE("append_move_gizmo_handles: counts, geometry, desaturated axis colors 
 
     SUBCASE("shafts run the POSITIVE half only, stopping short for the tip dot") {
         for (const auto& axis : axes) {
-            const simd_float3 end = f.origin + kGizmoAxisShaftFrac * he * axis.dir;
+            const simd_float3 end = f.origin + kMoveAxisShaftFrac * he * axis.dir;
             for (size_t i = axis.shaft; i < axis.shaft + 6; ++i) {
                 CAPTURE(i);
                 check_on_thick_segment(out[i].pos.xyz, f.origin, end, hw);
@@ -389,7 +426,7 @@ TEST_CASE("append_move_gizmo_handles: counts, geometry, desaturated axis colors 
 
     SUBCASE("tip dots cap the shafts and face the eye") {
         for (const auto& axis : axes) {
-            const simd_float3 center = f.origin + kGizmoAxisShaftFrac * he * axis.dir;
+            const simd_float3 center = f.origin + kMoveAxisShaftFrac * he * axis.dir;
             for (size_t i = axis.tip; i < axis.tip + 6; ++i) {
                 CAPTURE(i);
                 // Corners of a square of half-size `tip`, so at most sqrt(2)*tip out.
@@ -461,7 +498,7 @@ TEST_CASE("append_move_gizmo_handles: the highlighted handle's vertices — and 
     // everywhere -- hence the explicit exclusion in the sweep below.
     auto check_hot = [&](GizmoHandle highlighted, std::vector<std::pair<size_t, size_t>> ranges) {
         out.clear();
-        append_move_gizmo_handles(out, f, highlighted, eye);
+        append_move_gizmo_handles(out, f, highlighted, eye, kGizmoHandleRestAlpha);
         REQUIRE(out.size() == 132);
 
         for (size_t i = 0; i < out.size(); ++i) {
@@ -484,7 +521,7 @@ TEST_CASE("append_move_gizmo_handles: the highlighted handle's vertices — and 
 
     SUBCASE("a highlighted patch brightens its fill without making it opaque") {
         out.clear();
-        append_move_gizmo_handles(out, f, GizmoHandle::PlaneUV, eye);
+        append_move_gizmo_handles(out, f, GizmoHandle::PlaneUV, eye, kGizmoHandleRestAlpha);
         // Fill stays translucent (it sits over the model), outline goes solid.
         CHECK(alpha_of(out[36]) == doctest::Approx(2.0f * kGizmoPatchFillAlpha));
         CHECK(alpha_of(out[36]) < 1.0f);
@@ -493,7 +530,7 @@ TEST_CASE("append_move_gizmo_handles: the highlighted handle's vertices — and 
 
     SUBCASE("unhighlighted handles rest below full opacity") {
         out.clear();
-        append_move_gizmo_handles(out, f, GizmoHandle::None, eye);
+        append_move_gizmo_handles(out, f, GizmoHandle::None, eye, kGizmoHandleRestAlpha);
         CHECK(alpha_of(out[0]) == doctest::Approx(kGizmoHandleRestAlpha));
         CHECK(alpha_of(out[0]) < 1.0f);
     }

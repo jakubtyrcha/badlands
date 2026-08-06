@@ -17,7 +17,11 @@ struct Node {
     Shape shape = Shape::Cube;
     Op op = Op::Add;
     simd_float3 position = {0, 0, 0};
-    simd_quatf rotation = simd_quaternion(0.f, 0.f, 0.f, 1.f);  // identity; stays identity in MVP
+    // Unit quaternion, editable via the placement gizmo's rotation rings. The
+    // ring drag renormalizes on every update, which pack_scene relies on: it
+    // packs the CONJUGATE as the inverse, and those agree only for a unit
+    // quaternion.
+    simd_quatf rotation = simd_quaternion(0.f, 0.f, 0.f, 1.f);
     simd_float3 scale = {1, 1, 1};
     bool snapped = false;
     simd_float3 snap_point = {0, 0, 0};
@@ -36,9 +40,10 @@ public:
     // spawn entry points (id/name allocation, snap bookkeeping).
     Node& add(Node node);
 
-    // hit/unit_normal: world-space raycast_scene hit; the new node rests on
-    // the surface (position = hit + unit_normal * 0.5). parent_id: the node
-    // that was hit, stored as snap_parent.
+    // hit/unit_normal: world-space raycast_scene hit; the new node is CENTRED
+    // on the surface (position = hit), so it is half-embedded in whatever it
+    // was placed on and its centre coincides with its snap point. parent_id:
+    // the node that was hit, stored as snap_parent.
     int32_t spawn_snapped(Shape shape, Op op, simd_float3 hit, simd_float3 unit_normal, int32_t parent_id);
     // position: world-space placement as given (e.g. a fixed distance along
     // the spawn ray on a raycast miss). Not snapped; snap fields at Node's

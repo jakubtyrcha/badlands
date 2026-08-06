@@ -83,6 +83,30 @@ handle's last position started a real drag and **moved the node**. Pinned by
 the app has always performed, including the off-handle case, which without it
 would have started passing for the wrong reason.
 
+SUPERSEDED (2026-08-06, `2026-08-06-gizmo-frames-design.md`): three of this
+spec's rulings are reversed there, each deliberately.
+
+- **The camera-facing basis for unsnapped nodes is gone.** "Axes swim as the
+  camera orbits" was the original user ruling; a free node now uses its own
+  local axes instead, and nothing in any gizmo frame depends on the camera
+  except its screen-constant size. `drag_plane_for_node` and `DragPlane` were
+  deleted along with it — `gizmo_frame_for_node` was their only consumer and
+  what remained was a one-line branch on `snapped`.
+- **§4's rigid snap-frame ride is gone.** `snap_point` no longer translates
+  with the node during a move. It had to go: spawn now centres a node ON its
+  snap point, so an attachment that rode along would keep the placement and
+  shape anchors equal forever and the two-gizmo split could never be observed.
+- **R4's "Scale has no gizmo, Move is hidden while Scale is armed" is gone**,
+  and so is arming itself. Both manipulators are live on every selection;
+  `GizmoKind`/`setGizmoKind` no longer exist, and the radial menu's Move and
+  Scale buttons went with them.
+
+Still standing: R3's positive-only axes, R1's screen-constant sizing and
+degenerate-normal fallback, R2's thick coloured handles, and the "clicking off
+any handle does nothing" ruling that the always-on camera is built on. The
+grid survives too, but reclassified — it is a world reference plane now, not
+the drag-plane affordance §2 describes.
+
 ## 1. Gizmo frame — new `core/src/gizmo.h/.cpp`
 
 `GizmoFrame { simd_float3 origin; simd_float3 n, u, v; float half_extent; }`

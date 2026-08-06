@@ -31,9 +31,4 @@ std::optional<PickHit> raycast_scene(const SceneDocument& doc, const Ray& world)
 // or the intersection is at/behind the ray origin (t <= 1e-4).
 std::optional<simd_float3> ray_plane(const Ray& ray, simd_float3 plane_point, simd_float3 plane_normal);
 
-// The drag/gizmo reference plane for a node: snapped -> {snap_point, snap_normal};
-// unsnapped -> {node.position, -camera_forward} (camera_forward = normalize(target - eye), unit).
-struct DragPlane { simd_float3 point; simd_float3 normal; };
-DragPlane drag_plane_for_node(const Node& node, simd_float3 camera_forward);
-
 } // namespace sq

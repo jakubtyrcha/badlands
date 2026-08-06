@@ -28,11 +28,18 @@ void pack_scene(const SceneDocument& doc, std::vector<SdfNode>& out) {
     for (size_t i = 0; i < count; ++i) {
         const Node& node = nodes[i];
         const simd_float3 half = node.scale * 0.5f;
+        // Conjugate, not a general inverse: that identity holds only for a
+        // UNIT quaternion, which Node::rotation is expected to be. The drag
+        // that writes it normalizes on every update (editor.cpp), so the
+        // precondition is maintained at the one place rotation is produced
+        // rather than re-established here per node per frame.
+        const simd_float4 inv = simd_conjugate(node.rotation).vector;
         SdfNode sn;
         sn.pos_shape = sdf_make4(node.position.x, node.position.y, node.position.z,
                                   (node.shape == Shape::Cube) ? 0.0f : 1.0f);
         sn.half_extents_op =
             sdf_make4(half.x, half.y, half.z, (node.op == Op::Add) ? 0.0f : 1.0f);
+        sn.inv_rotation = sdf_make4(inv.x, inv.y, inv.z, inv.w);
         out.push_back(sn);
     }
 }

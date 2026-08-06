@@ -39,12 +39,21 @@ inline constexpr simd_float4 kColorGizmoHot = {1.0f, 1.0f, 1.0f, 1.0f};
 // three components at once, so borrowing any single axis hue would misread as
 // that axis.
 inline constexpr simd_float4 kColorGizmoUniform = {0.86f, 0.86f, 0.90f, 1.0f};
+// The tether between a split pair of gizmos. Quiet by design: it is a
+// relationship, not a handle, and nothing about it is grabbable.
+inline constexpr simd_float4 kColorAnchorTether = {1.0f, 1.0f, 1.0f, 0.30f};
 
 // Resting vs highlighted opacity. Everything used to draw at full strength
 // all the time, which is most of why the gizmo shouted over the model; now
 // only the hovered/active handle does. Hover feedback is therefore carried by
 // brightness AND color, so it survives on any handle.
 inline constexpr float kGizmoHandleRestAlpha = 0.62f;
+// The rest alpha the gizmo you are NOT pointing at falls back to. Both gizmos
+// are live at once and, when their anchors coincide, share an origin -- so at
+// the moment you reach for a handle the other manipulator is pure competition
+// for the eye. Dropping it back is what keeps a coalesced gizmo readable
+// without taking any handle away.
+inline constexpr float kGizmoHandleDimAlpha = 0.22f;
 
 // Handle line half-width as a fraction of the frame's half_extent. he is
 // screen-constant, so this is screen-constant thickness too (~2.6pts full
@@ -54,8 +63,8 @@ inline constexpr float kGizmoHandleHalfWidthFrac = 0.011f;
 // The hairline outlining a plane patch's translucent fill — thinner still, so
 // the patch reads as a surface rather than a second set of bars.
 inline constexpr float kGizmoPatchBorderHalfWidthFrac = 0.006f;
-// Axis shafts stop just short of he, and a camera-facing dot caps each one.
-inline constexpr float kGizmoAxisShaftFrac = 0.94f;
+// Each axis shaft stops just short of its band's outer edge and a camera-facing
+// dot caps it; the band bounds themselves live in gizmo.h, shared with the pick.
 inline constexpr float kGizmoAxisTipHalfSizeFrac = 0.030f;
 // Plane patches are filled at this alpha, with their outline at full weight.
 inline constexpr float kGizmoPatchFillAlpha = 0.16f;
@@ -129,35 +138,44 @@ std::vector<LineVertex> build_scene_lines(const SceneDocument& doc, int32_t sele
 // midpoint of a line passing near the origin would come out darker than its
 // ends. 2*(divisions+1) lines * segments * 2 verts = 624 verts at
 // divisions=12: past the 4KB setVertexBytes limit, hence the vertex buffer.
-void append_move_gizmo_grid(std::vector<LineVertex>& out, const GizmoFrame& frame, int divisions);
+// `alpha_scale` multiplies kGizmoGridAlpha, so the grid dims along with the
+// handles when the OTHER gizmo owns the hover. It is the largest thing this
+// gizmo draws, so leaving it at full strength while everything around it fell
+// back would have defeated the dimming entirely.
+void append_move_gizmo_grid(std::vector<LineVertex>& out, const GizmoFrame& frame, int divisions,
+                            float alpha_scale);
 //
 // Handles (TRIANGLE primitives): each handle line is expanded into a
 // camera-facing quad of half-width kGizmoHandleHalfWidthFrac * he (Metal has
 // no line width), endpoints extended by the half-width so segments sharing a
 // corner overlap instead of notching. Emits, in this order (pinned by
 // lines_tests):
-//  - 3 axis shafts from the origin, POSITIVE half only: 0..kGizmoAxisShaftFrac*he
-//    along u/v/n (R3 user ruling; pick clamps to the full 0..he segment),
-//    colors kColorAxisU/V/N — 6 verts each
+//  - 3 axis shafts from the origin, POSITIVE half only: 0..kMoveAxisShaftFrac*he
+//    along u/v/n (R3 user ruling; pick clamps to kMoveAxisOuterFrac, so the tip
+//    dot below is grabbable), colors kColorAxisU/V/N — 6 verts each
 //  - 3 camera-facing tip dots capping those shafts — 6 verts each
 //  - 3 plane patches (uv, un, vn) over [kGizmoPatchInner, kGizmoPatchOuter]^2
 //    in each basis pair: a translucent fill quad (6 verts) then a 4-segment
 //    hairline outline (24 verts), colors kColorPlaneUV/UN/VN
 //  - 1 camera-facing origin pip — 6 verts
-// Handles rest at kGizmoHandleRestAlpha; the `highlighted` one draws opaque
-// in kColorGizmoHot instead (hover/active feedback). A segment pointing
-// straight at the eye has no on-screen extent and is skipped. Total:
-// 18 + 18 + 90 + 6 = 132 verts, which is why these ride a vertex buffer
-// rather than setVertexBytes.
+// Handles rest at `rest_alpha` -- kGizmoHandleRestAlpha normally, or
+// kGizmoHandleDimAlpha when the OTHER gizmo owns the hover, which is what keeps
+// a coalesced pair readable. The `highlighted` one draws opaque in
+// kColorGizmoHot instead (hover/active feedback), so pass None for whichever
+// gizmo is not hovered. Plane fills and the origin pip scale with rest_alpha
+// too, so a dimmed gizmo dims whole. A segment pointing straight at the eye has
+// no on-screen extent and is skipped. Total: 18 + 18 + 90 + 6 = 132 verts,
+// which is why these ride a vertex buffer rather than setVertexBytes.
 void append_move_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& frame,
-                               GizmoHandle highlighted, simd_float3 eye);
+                               GizmoHandle highlighted, simd_float3 eye, float rest_alpha);
 
-// The scale gizmo's handles (TRIANGLE primitives), from the same GizmoFrame
-// pick_gizmo_handle hit-tests with GizmoKind::Scale. No grid and no plane
-// patches: the grid is a drag-PLANE affordance and scale has no drag plane.
+// The Shape gizmo's handles (TRIANGLE primitives), from the same GizmoFrame
+// pick_gizmo_handle hit-tests with GizmoSlot::Shape. No grid and no plane
+// patches: the grid is a reference plane belonging to the Placement gizmo, and
+// scale has no drag plane of its own.
 //
 // Emits, in this order (pinned by lines_tests):
-//  - 3 axis shafts running kScaleAxisInnerFrac*he .. kGizmoAxisShaftFrac*he
+//  - 3 axis shafts running kScaleAxisInnerFrac*he .. kScaleAxisShaftFrac*he
 //    along u/v/n, colors kColorAxisU/V/N — 6 verts each. They start OUTBOARD
 //    of the centre box rather than at the origin, which is what lets the
 //    uniform handle own the middle unambiguously (gizmo.h).
@@ -166,9 +184,32 @@ void append_move_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& f
 //    convention, and the size difference is what distinguishes the two gizmos
 //    at a glance.
 //  - 1 camera-facing centre box, the uniform handle — 6 verts.
-// Total 42 verts. Same rest/hot alpha treatment as the move gizmo.
+// Total 42 verts. Same rest/hot/dim alpha treatment as the move gizmo.
 void append_scale_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& frame,
-                                GizmoHandle highlighted, simd_float3 eye);
+                                GizmoHandle highlighted, simd_float3 eye, float rest_alpha);
+
+// The Placement gizmo's three rotation rings (TRIANGLE primitives), at
+// kRotateRingFrac * he in the plane perpendicular to each frame axis, coloured
+// like the axis they turn about. Same camera-facing thick-quad expansion and
+// the same rest/hot/dim treatment as the handle sets above.
+//
+// Full circles rather than camera-facing half-rings: a half-ring needs a
+// near-side test that goes unstable exactly when the ring is viewed face-on,
+// where every point is equidistant from the eye and the visible half flickers
+// around the circumference. It also keeps drawn == hit trivially true.
+// 3 rings * kRotateRingSegments segments * 6 verts.
+inline constexpr int kRotateRingSegments = 32;
+void append_rotate_gizmo_rings(std::vector<LineVertex>& out, const GizmoFrame& frame,
+                               GizmoHandle highlighted, simd_float3 eye, float rest_alpha);
+
+// Joins the two gizmos' anchors when they are apart: one thin segment from the
+// node's attachment point to its centre. It says the two handle clusters belong
+// to one node, and shows how far the detail has been lifted off the surface it
+// was placed on -- the quantity a real attachment model would later make live.
+// Drawn only when the pair is NOT coalesced (gizmos_coalesce), where it would
+// otherwise be a zero-length segment inside the handles. 6 verts.
+void append_anchor_tether(std::vector<LineVertex>& out, simd_float3 anchor, simd_float3 centre,
+                          float half_width, simd_float3 eye);
 
 // The world origin's vertical marker: the +Y axis plus a small pip at the
 // origin itself. X and Z are drawn by the ground plate's fragment shader

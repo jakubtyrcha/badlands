@@ -50,6 +50,7 @@ inline sq_float3 sdf_max(sq_float3 a, sq_float3 b) { return metal::max(a, b); }
 inline float sdf_min(float a, float b) { return metal::min(a, b); }
 inline float sdf_max(float a, float b) { return metal::max(a, b); }
 inline float sdf_length(sq_float3 v) { return metal::length(v); }
+inline sq_float3 sdf_cross(sq_float3 a, sq_float3 b) { return metal::cross(a, b); }
 inline sq_float3 sdf_normalize(sq_float3 v) { return metal::normalize(v); }
 inline float sdf_reduce_max(sq_float3 v) { return metal::max(v.x, metal::max(v.y, v.z)); }
 inline float sdf_reduce_min(sq_float3 v) { return metal::min(v.x, metal::min(v.y, v.z)); }
@@ -63,6 +64,7 @@ inline sq_float3 sdf_max(sq_float3 a, sq_float3 b) { return simd_max(a, b); }
 inline float sdf_min(float a, float b) { return std::fmin(a, b); }
 inline float sdf_max(float a, float b) { return std::fmax(a, b); }
 inline float sdf_length(sq_float3 v) { return simd_length(v); }
+inline sq_float3 sdf_cross(sq_float3 a, sq_float3 b) { return simd_cross(a, b); }
 inline sq_float3 sdf_normalize(sq_float3 v) { return simd_normalize(v); }
 inline float sdf_reduce_max(sq_float3 v) { return simd_reduce_max(v); }
 inline float sdf_reduce_min(sq_float3 v) { return simd_reduce_min(v); }
@@ -70,6 +72,19 @@ inline sq_float3 sdf_make3(float x, float y, float z) { return simd_make_float3(
 inline sq_float4 sdf_make4(float x, float y, float z, float w) { return simd_make_float4(x, y, z, w); }
 inline sq_float4 sdf_transform(sq_float4x4 m, sq_float4 v) { return simd_mul(m, v); }
 #endif
+
+// Rotates `v` by the unit quaternion `q` (xyz = imaginary, w = real -- the
+// same layout simd_quatf::vector uses, so packing is a straight field copy).
+//
+// The standard two-cross-product form, written out by hand rather than
+// dispatched per language: MSL has no quaternion type at all, so there is
+// nothing to wrap on the Metal side. Non-unit `q` scales the result; every
+// caller is responsible for supplying a normalized quaternion (see
+// pack_scene).
+inline sq_float3 sdf_rotate(sq_float4 q, sq_float3 v) {
+    const sq_float3 axis = sdf_make3(q.x, q.y, q.z);
+    return v + 2.0f * sdf_cross(axis, sdf_cross(axis, v) + q.w * v);
+}
 
 // ---------------------------------------------------------------------------
 // SdfNode: one CSG primitive, packed for the raymarch shader's node buffer
@@ -80,15 +95,21 @@ inline sq_float4 sdf_transform(sq_float4x4 m, sq_float4 v) { return simd_mul(m, 
 // pos_shape.xyz = world position; pos_shape.w = shape (0 = cube, 1 = sphere).
 // half_extents_op.xyz = per-axis half extents (scale * 0.5);
 // half_extents_op.w = op (0 = add, 1 = subtract).
+// inv_rotation = the INVERSE of the node's rotation, as a unit quaternion
+// (xyz imaginary, w real). Inverted at pack time rather than here because
+// evaluation only ever needs world -> local, and a sphere trace evaluates
+// every node at every step: conjugating once per node per frame is free,
+// conjugating per step per pixel is not.
 typedef struct {
     sq_float4 pos_shape;
     sq_float4 half_extents_op;
+    sq_float4 inv_rotation;
 } SdfNode;
 
 // Compiled under both __METAL_VERSION__ (a future raymarch .metal TU) and
 // plain C++ (core/tests), via the dual-compile typedefs above -- so this one
 // assert covers both sides, matching shared_types.h's MeshVertex precedent.
-static_assert(sizeof(SdfNode) == 32, "SdfNode must be 32 bytes");
+static_assert(sizeof(SdfNode) == 48, "SdfNode must be 48 bytes");
 
 // ---------------------------------------------------------------------------
 // Per-shape local SDFs (both exact under identity rotation; see sdf_eval_node
@@ -117,16 +138,21 @@ inline float sdf_sd_ellipsoid(sq_float3 q, sq_float3 radii) {
     return k0 * (k0 - 1.0f) / k1;
 }
 
-// Evaluates one packed node's local SDF at world-space point p.
+// Evaluates one packed node's local SDF at world-space point p: translate
+// into the node's frame, rotate into its axes, then measure.
 //
-// Node rotation is always identity in the current MVP (see scene.h's Node),
-// so this evaluates directly in the node's translation-only frame: q = p -
-// node position. If/when rotation becomes editable, q must be rotated by the
-// inverse rotation before this dispatch (and before sdf_sd_box/
-// sdf_sd_ellipsoid above, which assume q already comes in axis-aligned with
-// the shape).
+// SCALE IS NOT PART OF THIS TRANSFORM, and must not become part of it. It
+// lives in half_extents, which sdf_sd_box takes exactly and sdf_sd_ellipsoid
+// takes as radii -- so the shape is measured at its true dimensions rather
+// than unit-normalized. Dividing q by half_extents to evaluate a unit
+// primitive is the obvious-looking "simplification" here and it WARPS the
+// field: distances would come back in a scaled space, non-uniformly so, and
+// the sphere trace would overstep. As written, this composes to exactly the
+// T*R*S of a unit primitive that Node::world_from_local() builds and
+// raycast_scene inverts, which is why the picking and rendering paths agree
+// on where the surface is (pinned by picking_tests' zero-set case).
 inline float sdf_eval_node(SdfNode node, sq_float3 p) {
-    const sq_float3 q = p - node.pos_shape.xyz;
+    const sq_float3 q = sdf_rotate(node.inv_rotation, p - node.pos_shape.xyz);
     // NOT named `half`: that's a reserved MSL type keyword (the 16-bit float
     // type), and this header must compile under __METAL_VERSION__ too.
     const sq_float3 half_extents = node.half_extents_op.xyz;

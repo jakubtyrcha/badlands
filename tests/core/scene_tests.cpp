@@ -75,7 +75,7 @@ TEST_CASE("SceneDocument: per-shape name counters are independent of node ids") 
 
 // --- spawn_snapped -----------------------------------------------------------
 
-TEST_CASE("SceneDocument::spawn_snapped: axis-aligned normal places the node on the surface") {
+TEST_CASE("SceneDocument::spawn_snapped: the node is CENTRED on the surface, not resting on it") {
     SceneDocument doc;
 
     const simd_float3 hit = {1.0f, 2.0f, 3.0f};
@@ -85,15 +85,20 @@ TEST_CASE("SceneDocument::spawn_snapped: axis-aligned normal places the node on 
     const Node* node = doc.find(id);
     REQUIRE(node != nullptr);
 
-    // position = hit + unit_normal * 0.5 -> {1, 2.5, 3}
-    check_float3_approx(node->position, simd_float3{1.0f, 2.5f, 3.0f});
+    // position == hit. This used to be hit + normal * 0.5, which left the
+    // shape sitting on top of its parent instead of half-embedded in it, and
+    // put the node's centre permanently half a unit off its own snap point.
+    check_float3_approx(node->position, hit);
+    check_float3_approx(node->position, node->snap_point); // the coincidence the gizmos rely on
     CHECK(node->snapped == true);
     check_float3_approx(node->snap_point, hit);
     check_float3_approx(node->snap_normal, normal);
     CHECK(node->snap_parent == 7);
 }
 
-TEST_CASE("SceneDocument::spawn_snapped: non-axis normal offsets by 0.5 along the normal") {
+TEST_CASE("SceneDocument::spawn_snapped: an oblique normal does not displace the node either") {
+    // The normal still defines the snap FRAME (and so the placement gizmo's
+    // basis); it just no longer displaces the node along itself.
     SceneDocument doc;
 
     const simd_float3 hit = {4.0f, 5.0f, 6.0f};
@@ -103,8 +108,7 @@ TEST_CASE("SceneDocument::spawn_snapped: non-axis normal offsets by 0.5 along th
     const Node* node = doc.find(id);
     REQUIRE(node != nullptr);
 
-    const simd_float3 expected_position = hit + normal * 0.5f;
-    check_float3_approx(node->position, expected_position);
+    check_float3_approx(node->position, hit);
     CHECK(node->snapped == true);
     check_float3_approx(node->snap_point, hit);
     check_float3_approx(node->snap_normal, normal);

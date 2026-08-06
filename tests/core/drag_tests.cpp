@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <simd/simd.h>
+#include <utility>
 
 #include <shapeshifter/ShapeshifterCore.h>
 
@@ -48,7 +49,7 @@ GizmoFrame frame_for(Editor* editor, int32_t node_id, bool snapped,
     stub.snapped = snapped;
     stub.snap_point = snap_point;
     stub.snap_normal = snap_normal;
-    return gizmo_frame_for_node(stub, editor_test_camera(), GizmoKind::Move);
+    return gizmo_frame_for_node(stub, editor_test_camera(), GizmoSlot::Placement);
 }
 
 // Projects a world point and returns its view coords, REQUIREing visibility.
@@ -76,7 +77,7 @@ void check_float3_close(const simd_float3 actual, const simd_float3 expected, co
 // same two literals rather than hardcoded, so the test stays correct if the
 // camera setup ever changes.
 
-TEST_CASE("Editor: PlaneUV drag moves an unsnapped node within the camera-orthogonal plane") {
+TEST_CASE("Editor: PlaneUV drag moves a free node within its own world-fixed u-v plane") {
     Editor* editor = Editor::create();
     editor->setViewportSize(800.0f, 500.0f, 2.0f);
 
@@ -85,8 +86,8 @@ TEST_CASE("Editor: PlaneUV drag moves an unsnapped node within the camera-orthog
     const simd_float3 camera_forward = simd_normalize(target - eye);
 
     // Empty scene: the center-ray raycast misses everything, so this spawn
-    // lands unsnapped at eye + dir*kUnsnappedSpawnDistance (scene.h) — the
-    // gizmo frame for an unsnapped node is {node.position, -camera_forward}.
+    // lands unsnapped at eye + dir*kUnsnappedSpawnDistance (scene.h). A free
+    // node's frame is its own local axes -- world X/Y/Z at identity rotation.
     const SpawnResult spawned = editor->spawn(Shape::Cube, Op::Add, 400.0f, 250.0f);
     REQUIRE(spawned.node_id != kInvalidNode);
     REQUIRE(spawned.snapped == false);
@@ -95,6 +96,12 @@ TEST_CASE("Editor: PlaneUV drag moves an unsnapped node within the camera-orthog
     const GizmoFrame f = frame_for(editor, spawned.node_id, false);
     const float he = f.half_extent;
     const simd_float3 before = to_simd(editor->nodePosition(spawned.node_id));
+
+    // The plane this drag runs in is world XY, and stays world XY whatever the
+    // camera does. It used to be the camera-orthogonal plane, which is the
+    // behaviour this rework reverses.
+    check_float3_close(f.n, simd_float3{0.0f, 0.0f, 1.0f}, 1e-5f);
+    REQUIRE(std::fabs(simd_dot(f.n, camera_forward)) > 0.1f); // genuinely not the camera plane
 
     // Grab the u-v patch center (derived from the shared bounds, not a
     // literal -- those bounds moved once already), pull it 0.3he along u.
@@ -109,10 +116,10 @@ TEST_CASE("Editor: PlaneUV drag moves an unsnapped node within the camera-orthog
     const simd_float3 delta = after - before;
 
     check_float3_close(delta, 0.3f * he * f.u, 5e-3f);
-    // Both the drag-start hit and every subsequent hit lie on the same
-    // stored plane (normal == -camera_forward), so the delta between any two
-    // of them is exactly in-plane, i.e. orthogonal to camera_forward.
-    CHECK(std::fabs(simd_dot(delta, camera_forward)) < 1e-4f);
+    // Both the drag-start hit and every subsequent hit lie on the same stored
+    // plane, so the delta between any two of them is exactly in-plane --
+    // orthogonal to the plane's normal, which is now the frame's n.
+    CHECK(std::fabs(simd_dot(delta, f.n)) < 1e-4f);
 
     SUBCASE("a second updateDrag after endDrag does nothing") {
         editor->updateDrag(200.0f, 450.0f);
@@ -132,8 +139,11 @@ TEST_CASE("Editor: AxisU drag constrains the move to the grabbed axis") {
     const float he = f.half_extent;
     const simd_float3 before = to_simd(editor->nodePosition(spawned.node_id));
 
-    const ClickPoint p1 = click_at(f.origin + 0.8f * he * f.u);
-    const ClickPoint p2 = click_at(f.origin + 1.2f * he * f.u);
+    // Both points inside Placement's own axis band: past it lies Shape's scale
+    // axis, and on a free node the two gizmos are coalesced, so an out-of-band
+    // grab would silently become a scale drag.
+    const ClickPoint p1 = click_at(f.origin + 0.2f * he * f.u);
+    const ClickPoint p2 = click_at(f.origin + 0.6f * he * f.u);
     CHECK(editor->beginDrag(p1.x, p1.y));
     editor->updateDrag(p2.x, p2.y);
     editor->endDrag();
@@ -214,8 +224,11 @@ TEST_CASE("Editor: snapped node — PlaneUV drag moves it in the snap plane; Axi
 
     SUBCASE("AxisN pull moves along the surface normal; a second grab on the moved frame works") {
         const simd_float3 before = to_simd(editor->nodePosition(b.node_id));
-        const ClickPoint p1 = click_at(f.origin + 0.8f * he * f.n);
-        const ClickPoint p2 = click_at(f.origin + 1.2f * he * f.n);
+        // Inside Placement's axis band. A freshly snapped node is centred on
+        // its own snap point, so the two gizmos start coalesced and a grab out
+        // at 0.8 he would land on Shape's scale axis instead of moving it.
+        const ClickPoint p1 = click_at(f.origin + 0.2f * he * f.n);
+        const ClickPoint p2 = click_at(f.origin + 0.6f * he * f.n);
         CHECK(editor->beginDrag(p1.x, p1.y));
         editor->updateDrag(p2.x, p2.y);
         editor->endDrag();
@@ -223,12 +236,11 @@ TEST_CASE("Editor: snapped node — PlaneUV drag moves it in the snap plane; Axi
         const simd_float3 delta = to_simd(editor->nodePosition(b.node_id)) - before;
         check_float3_close(delta, 0.4f * he * f.n, 5e-3f);
 
-        // The frame rides rigidly with the node (snap_point += delta), so the
-        // same handle-relative grab on the NEW frame must activate again —
-        // this is the observable proof snap_point tracked the move.
-        const GizmoFrame f2 = frame_for(editor, b.node_id, true,
-                                        to_simd(pr.point) + delta, to_simd(pr.normal));
-        const ClickPoint p3 = click_at(f2.origin + 0.8f * f2.half_extent * f2.n);
+        // The attachment STAYS PUT while the node comes off the surface — the
+        // snap frame no longer rides along, which is what opens a real offset
+        // between the placement and shape gizmos. Observable because the very
+        // same grab, on the frame built before the drag, still activates.
+        const ClickPoint p3 = click_at(f.origin + 0.2f * he * f.n);
         CHECK(editor->beginDrag(p3.x, p3.y));
         editor->endDrag();
     }
@@ -283,11 +295,11 @@ TEST_CASE("Editor: updateDrag ignores a stale drag left active across a selectio
 TEST_CASE("Editor: updateGizmoHover with no viewport or no selection stays None") {
     Editor* editor = Editor::create();
     editor->updateGizmoHover(400.0f, 250.0f); // zero viewport
-    CHECK(editor->gizmoHoverHandle() == GizmoHandle::None);
+    CHECK(editor->gizmoHoverHandle().handle == GizmoHandle::None);
 
     editor->setViewportSize(800.0f, 500.0f, 2.0f);
     editor->updateGizmoHover(400.0f, 250.0f); // no selection
-    CHECK(editor->gizmoHoverHandle() == GizmoHandle::None);
+    CHECK(editor->gizmoHoverHandle().handle == GizmoHandle::None);
 }
 
 TEST_CASE("Editor: gizmo hover tracks handles and never outlives the gizmo it points at") {
@@ -302,33 +314,33 @@ TEST_CASE("Editor: gizmo hover tracks handles and never outlives the gizmo it po
     const ClickPoint on_u = click_at(f.origin + 0.8f * f.half_extent * f.u);
 
     editor->updateGizmoHover(on_u.x, on_u.y);
-    CHECK(editor->gizmoHoverHandle() == GizmoHandle::AxisU);
+    CHECK(editor->gizmoHoverHandle().handle == GizmoHandle::AxisU);
 
     SUBCASE("moving off every handle resets to None") {
         editor->updateGizmoHover(60.0f, 60.0f);
-        CHECK(editor->gizmoHoverHandle() == GizmoHandle::None);
+        CHECK(editor->gizmoHoverHandle().handle == GizmoHandle::None);
     }
 
     SUBCASE("clearGizmoHover resets") {
         editor->clearGizmoHover();
-        CHECK(editor->gizmoHoverHandle() == GizmoHandle::None);
+        CHECK(editor->gizmoHoverHandle().handle == GizmoHandle::None);
     }
 
     SUBCASE("hiding the gizmo clears hover, and hover stays None while hidden") {
         editor->setGizmoVisible(false);
-        CHECK(editor->gizmoHoverHandle() == GizmoHandle::None);
+        CHECK(editor->gizmoHoverHandle().handle == GizmoHandle::None);
         editor->updateGizmoHover(on_u.x, on_u.y);
-        CHECK(editor->gizmoHoverHandle() == GizmoHandle::None);
+        CHECK(editor->gizmoHoverHandle().handle == GizmoHandle::None);
     }
 
     SUBCASE("selection change clears hover") {
         editor->select(kInvalidNode);
-        CHECK(editor->gizmoHoverHandle() == GizmoHandle::None);
+        CHECK(editor->gizmoHoverHandle().handle == GizmoHandle::None);
     }
 
     SUBCASE("deleting the selected node clears hover (deletion bypasses select())") {
         editor->deleteSelectedNode();
-        CHECK(editor->gizmoHoverHandle() == GizmoHandle::None);
+        CHECK(editor->gizmoHoverHandle().handle == GizmoHandle::None);
     }
 
     SUBCASE("endDrag clears hover — a drag can move the gizmo out from under the cursor, "
@@ -336,7 +348,7 @@ TEST_CASE("Editor: gizmo hover tracks handles and never outlives the gizmo it po
         REQUIRE(editor->beginDrag(on_u.x, on_u.y));
         editor->updateDrag(on_u.x + 40.0f, on_u.y);
         editor->endDrag();
-        CHECK(editor->gizmoHoverHandle() == GizmoHandle::None);
+        CHECK(editor->gizmoHoverHandle().handle == GizmoHandle::None);
     }
 }
 
@@ -419,24 +431,33 @@ TEST_CASE("Editor: projectSelectedAnchor tracks the node through a drag") {
     REQUIRE(spawned.snapped == false);
     editor->setGizmoVisible(true); // the VM does this in modify mode with a selection
 
-    // Pull along +u, which projects screen-LEFT for this camera (u == -camera
-    // right for an unsnapped frame): the anchor must follow below x=400.
+    const ScreenPoint before = editor->projectSelectedAnchor();
+    REQUIRE(before.visible);
+
+    // Pull along +u. Which way that projects is a property of the camera and
+    // the frame, not something worth pinning here -- the claim is that the
+    // anchor FOLLOWS, so the expected direction is derived from the drag's own
+    // screen displacement rather than hardcoded. (It was hardcoded to
+    // screen-left, which held only while a free node's u was the camera's own
+    // right vector.)
     const GizmoFrame f = frame_for(editor, spawned.node_id, false);
-    const ClickPoint p1 = click_at(f.origin + 0.8f * f.half_extent * f.u);
-    const ClickPoint p2 = click_at(f.origin + 1.2f * f.half_extent * f.u);
+    const ClickPoint p1 = click_at(f.origin + 0.2f * f.half_extent * f.u);
+    const ClickPoint p2 = click_at(f.origin + 0.6f * f.half_extent * f.u);
     REQUIRE(editor->beginDrag(p1.x, p1.y));
     editor->updateDrag(p2.x, p2.y);
     editor->endDrag();
 
-    const ScreenPoint anchor = editor->projectSelectedAnchor();
-    CHECK(anchor.visible);
-    CHECK(anchor.x < 400.0f); // anchor moved the same direction as the drag
+    const ScreenPoint after = editor->projectSelectedAnchor();
+    CHECK(after.visible);
+    REQUIRE(std::fabs(p2.x - p1.x) > 1.0f); // the drag has a real horizontal component
+    CHECK(after.x != doctest::Approx(before.x));
+    CHECK((after.x - before.x) * (p2.x - p1.x) > 0.0f); // same screen direction as the drag
 }
 
 // --- Editor: scale tool ------------------------------------------------------
 //
 // Scale now runs through the SAME begin/update/endDrag path as move, selected
-// by setGizmoKind. The uniform (centre) handle carries the gesture that used to
+// by setGizmoSlot. The uniform (centre) handle carries the gesture that used to
 // be beginScale/updateScale: a screen-space vertical drag, cumulative from the
 // press. Because the scale gizmo's frame is centred on the node, the node's
 // projected anchor IS the uniform handle's screen position, which is what these
@@ -447,7 +468,6 @@ namespace {
 // Arms the scale gizmo and grabs its uniform handle at the node's anchor.
 // Returns the press point so updates can be expressed as offsets from it.
 ClickPoint grab_uniform_handle(Editor* editor) {
-    editor->setGizmoKind(GizmoKind::Scale);
     editor->setGizmoVisible(true);
     const ScreenPoint anchor = editor->projectSelectedAnchor();
     REQUIRE(anchor.visible);
@@ -518,7 +538,6 @@ TEST_CASE("Editor: an axis scale handle scales only its own component") {
     const SpawnResult spawned = editor->spawn(Shape::Cube, Op::Add, 400.0f, 250.0f);
     REQUIRE(spawned.node_id != kInvalidNode);
 
-    editor->setGizmoKind(GizmoKind::Scale);
     editor->setGizmoVisible(true);
 
     // The scale frame is the node's local axes centred on it, so build the
@@ -529,11 +548,13 @@ TEST_CASE("Editor: an axis scale handle scales only its own component") {
                      std::tan(cam.fov_y_radians * 0.5f);
     const simd_float3 x_axis = {1.0f, 0.0f, 0.0f};
 
-    const ClickPoint grab = click_at(origin + 0.6f * he * x_axis);
+    // Grab on Shape's own axis band (outboard of Placement's), or the press
+    // would land on the move axis instead and translate the node.
+    const ClickPoint grab = click_at(origin + 0.8f * he * x_axis);
     REQUIRE(editor->beginDrag(grab.x, grab.y));
 
     // Pull out to twice the grabbed parameter: factor = s_now / s_start = 2.
-    const ClickPoint pull = click_at(origin + 1.2f * he * x_axis);
+    const ClickPoint pull = click_at(origin + 1.6f * he * x_axis);
     editor->updateDrag(pull.x, pull.y);
 
     const simd_float3 scale = to_simd(editor->nodeScale(spawned.node_id));
@@ -550,7 +571,6 @@ TEST_CASE("Editor: a scale drag is a safe no-op outside an active begin/endDrag 
     const SpawnResult spawned = editor->spawn(Shape::Cube, Op::Add, 400.0f, 250.0f);
     REQUIRE(spawned.node_id != kInvalidNode);
     const simd_float3 unit_scale = {1.0f, 1.0f, 1.0f};
-    editor->setGizmoKind(GizmoKind::Scale);
     editor->setGizmoVisible(true);
 
     SUBCASE("updateDrag without a prior beginDrag changes nothing") {
@@ -652,3 +672,190 @@ TEST_CASE("Editor: a scale drag ignores a stale gesture left active across a sel
     check_float3_approx(to_simd(editor->nodeScale(b.node_id)), b_before); // B not rescaled by A's factor
 }
 
+
+// --- Editor: rotation rings --------------------------------------------------
+//
+// Rings live on the Placement gizmo, at kRotateRingFrac * he in the plane
+// perpendicular to each frame axis. The drag reads a signed angle about that
+// axis from the direction grabbed at mouse-down, so it is a pure function of
+// the current cursor position -- the same cumulative-from-start contract the
+// camera and scale gestures hold.
+
+namespace {
+
+// A point ON the ring about `handle`'s axis, `turns` of the way around from
+// the ring's own e1 basis vector. Mirrors append_rotate_gizmo_rings' traversal
+// (e1, e2 taken from the other two frame vectors, right-handed about the axis)
+// so a test aiming here aims at drawn geometry.
+// Three orthogonal rings of equal radius INTERSECT, at the six points where a
+// frame axis pierces the other two circles -- i.e. at multiples of pi/2 around
+// any of them. A grab there is genuinely ambiguous and the pick is arbitrary,
+// so every case below starts from this offset instead of from zero. Nothing is
+// wrong with the pick at those points; there is simply no right answer.
+constexpr float kRingGrabAngle = 0.4f;
+
+simd_float3 ring_point(const GizmoFrame& f, GizmoHandle handle, float radians) {
+    simd_float3 e1, e2;
+    switch (handle) {
+        case GizmoHandle::RingU: e1 = f.v; e2 = f.n; break;
+        case GizmoHandle::RingV: e1 = f.n; e2 = f.u; break;
+        default:                 e1 = f.u; e2 = f.v; break;
+    }
+    const float r = kRotateRingFrac * f.half_extent;
+    return f.origin + r * (std::cos(radians) * e1 + std::sin(radians) * e2);
+}
+
+// The angle a quaternion turns through, regardless of axis sign.
+float rotation_angle(Vec4f q) {
+    return 2.0f * std::acos(std::fmin(1.0f, std::fabs(q.w)));
+}
+
+// Its axis, as a unit vector. Undefined for a near-identity rotation, which no
+// caller below asks about.
+simd_float3 rotation_axis(Vec4f q) {
+    return simd_normalize(simd_float3{q.x, q.y, q.z});
+}
+
+} // namespace
+
+TEST_CASE("Editor: a ring drag rotates the node about that ring's axis") {
+    Editor* editor = Editor::create();
+    editor->setViewportSize(800.0f, 500.0f, 2.0f);
+    const SpawnResult spawned = editor->spawn(Shape::Cube, Op::Add, 400.0f, 250.0f);
+    REQUIRE(spawned.node_id != kInvalidNode);
+    editor->setGizmoVisible(true);
+
+    const GizmoFrame f = frame_for(editor, spawned.node_id, false);
+    const simd_float3 before = to_simd(editor->nodePosition(spawned.node_id));
+
+    // RingN's plane is spanned by u and v, and the test camera looks along
+    // neither -- so it is the one ring comfortably clear of edge-on here.
+    const ClickPoint grab = click_at(ring_point(f, GizmoHandle::RingN, kRingGrabAngle));
+    REQUIRE(editor->beginDrag(grab.x, grab.y));
+
+    const float quarter = static_cast<float>(M_PI_2);
+    const ClickPoint pull = click_at(ring_point(f, GizmoHandle::RingN, kRingGrabAngle + quarter));
+    editor->updateDrag(pull.x, pull.y);
+    editor->endDrag();
+
+    const Vec4f r = editor->nodeRotation(spawned.node_id);
+    CHECK(rotation_angle(r) == doctest::Approx(quarter).epsilon(0.02));
+    // About n (world +z at identity), not some other axis.
+    check_float3_close(rotation_axis(r), f.n, 1e-2f);
+    // A free node's anchor IS its centre, so it spins in place.
+    check_float3_close(to_simd(editor->nodePosition(spawned.node_id)), before, 1e-4f);
+}
+
+TEST_CASE("Editor: a ring drag is cumulative from the press, not integrated") {
+    // Each subcase gets its OWN editor: a rotation composes with whatever the
+    // node already carried, so running two gestures against one node would
+    // compare a first rotation with a doubled one -- and past pi the measured
+    // angle folds back, which reads as a failure that is really just wrapping.
+    const auto fresh = [] {
+        Editor* e = Editor::create();
+        e->setViewportSize(800.0f, 500.0f, 2.0f);
+        const SpawnResult s = e->spawn(Shape::Cube, Op::Add, 400.0f, 250.0f);
+        REQUIRE(s.node_id != kInvalidNode);
+        e->setGizmoVisible(true);
+        return std::pair<Editor*, int32_t>{e, s.node_id};
+    };
+
+    const float target = 0.7f;
+
+    SUBCASE("ten updates ending where one update would have gives the same rotation") {
+        auto [ea, ida] = fresh();
+        const GizmoFrame fa = frame_for(ea, ida, false);
+        const ClickPoint grab_a = click_at(ring_point(fa, GizmoHandle::RingN, kRingGrabAngle));
+        const ClickPoint end_a = click_at(ring_point(fa, GizmoHandle::RingN, kRingGrabAngle + target));
+        REQUIRE(ea->beginDrag(grab_a.x, grab_a.y));
+        ea->updateDrag(end_a.x, end_a.y);
+        ea->endDrag();
+        const Vec4f once = ea->nodeRotation(ida);
+
+        auto [eb, idb] = fresh();
+        const GizmoFrame fb = frame_for(eb, idb, false);
+        const ClickPoint grab_b = click_at(ring_point(fb, GizmoHandle::RingN, kRingGrabAngle));
+        REQUIRE(eb->beginDrag(grab_b.x, grab_b.y));
+        for (int i = 1; i <= 10; ++i) {
+            const float t = kRingGrabAngle + target * static_cast<float>(i) / 10.0f;
+            const ClickPoint step = click_at(ring_point(fb, GizmoHandle::RingN, t));
+            eb->updateDrag(step.x, step.y);
+        }
+        eb->endDrag();
+        const Vec4f many = eb->nodeRotation(idb);
+
+        // Identical, component for component: the result is a function of the
+        // final cursor position alone, so the intermediate updates cannot have
+        // contributed anything.
+        CHECK(many.x == doctest::Approx(once.x));
+        CHECK(many.y == doctest::Approx(once.y));
+        CHECK(many.z == doctest::Approx(once.z));
+        CHECK(many.w == doctest::Approx(once.w));
+        // And it really did turn -- otherwise this passes as two no-ops.
+        CHECK(rotation_angle(once) == doctest::Approx(target).epsilon(0.05));
+    }
+
+    SUBCASE("dragging back to the press angle restores the start rotation exactly") {
+        auto [e, id] = fresh();
+        const GizmoFrame f = frame_for(e, id, false);
+        const ClickPoint grab = click_at(ring_point(f, GizmoHandle::RingN, kRingGrabAngle));
+        const ClickPoint end = click_at(ring_point(f, GizmoHandle::RingN, kRingGrabAngle + target));
+        REQUIRE(e->beginDrag(grab.x, grab.y));
+        e->updateDrag(end.x, end.y);
+        e->updateDrag(grab.x, grab.y);
+        e->endDrag();
+        CHECK(rotation_angle(e->nodeRotation(id)) < 1e-4f);
+    }
+}
+
+TEST_CASE("Editor: rotating a snapped node swings it around its contact point") {
+    Editor* editor = Editor::create();
+    editor->setViewportSize(800.0f, 500.0f, 2.0f);
+
+    const SpawnResult a = editor->spawn(Shape::Cube, Op::Add, 400.0f, 250.0f);
+    REQUIRE(a.snapped == false);
+    const PickResult pr = editor->pick(400.0f, 250.0f);
+    REQUIRE(pr.node_id == a.node_id);
+    const SpawnResult b = editor->spawn(Shape::Sphere, Op::Add, 400.0f, 250.0f);
+    REQUIRE(b.snapped == true);
+    editor->setGizmoVisible(true);
+
+    const simd_float3 anchor = to_simd(pr.point);
+    const GizmoFrame f = frame_for(editor, b.node_id, true, anchor, to_simd(pr.normal));
+
+    // Lift the node off the surface first, so the anchor and the centre are
+    // genuinely different points and "swings around the anchor" has content.
+    const float he = f.half_extent;
+    const ClickPoint lift1 = click_at(f.origin + 0.2f * he * f.n);
+    const ClickPoint lift2 = click_at(f.origin + 0.6f * he * f.n);
+    REQUIRE(editor->beginDrag(lift1.x, lift1.y));
+    editor->updateDrag(lift2.x, lift2.y);
+    editor->endDrag();
+
+    const simd_float3 lifted = to_simd(editor->nodePosition(b.node_id));
+    // The attachment stayed on the surface while the node came off it, so the
+    // placement frame is unchanged and there is now a real arm between them.
+    const float arm = simd_length(lifted - anchor);
+    REQUIRE(arm > 0.05f);
+
+    // RingU turns about a TANGENT of the surface. RingN would turn about the
+    // normal -- the very direction the node was just lifted along -- and a
+    // rotation leaves a vector parallel to its own axis untouched, so the node
+    // would not move at all and the case would prove nothing.
+    const ClickPoint grab = click_at(ring_point(f, GizmoHandle::RingU, kRingGrabAngle));
+    REQUIRE(editor->beginDrag(grab.x, grab.y));
+    const ClickPoint pull = click_at(ring_point(f, GizmoHandle::RingU, kRingGrabAngle + 0.6f));
+    editor->updateDrag(pull.x, pull.y);
+    editor->endDrag();
+
+    const simd_float3 after = to_simd(editor->nodePosition(b.node_id));
+    // The node moved, but stayed exactly the same distance from the anchor --
+    // that is what rotating ABOUT the contact point means.
+    CHECK(simd_distance(after, lifted) > 1e-3f);
+    CHECK(simd_length(after - anchor) == doctest::Approx(arm).epsilon(1e-3));
+    // The attachment itself never moved -- observable because the SAME ring
+    // point, derived from the frame built before any of this, is still grabbable.
+    const ClickPoint regrab = click_at(ring_point(f, GizmoHandle::RingU, 2.0f));
+    CHECK(editor->beginDrag(regrab.x, regrab.y));
+    editor->endDrag();
+}

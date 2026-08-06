@@ -82,7 +82,8 @@ void append_sphere_outline(std::vector<LineVertex>& out, const simd_float4x4& wo
     }
 }
 
-void append_move_gizmo_grid(std::vector<LineVertex>& out, const GizmoFrame& frame, int divisions) {
+void append_move_gizmo_grid(std::vector<LineVertex>& out, const GizmoFrame& frame, int divisions,
+                            float alpha_scale) {
     const simd_float3 origin = frame.origin;
     const float he = frame.half_extent;
     const float step = 2.0f * he / static_cast<float>(divisions);
@@ -95,7 +96,7 @@ void append_move_gizmo_grid(std::vector<LineVertex>& out, const GizmoFrame& fram
                                        ((kGizmoGridFadeEnd - kGizmoGridFadeBegin) * he),
                                    0.0f, 1.0f);
         const float smooth = t * t * (3.0f - 2.0f * t);
-        return kGizmoGridAlpha * (1.0f - smooth);
+        return kGizmoGridAlpha * alpha_scale * (1.0f - smooth);
     };
 
     auto push = [&](float a, float b, simd_float3 e1, simd_float3 e2) {
@@ -116,18 +117,26 @@ void append_move_gizmo_grid(std::vector<LineVertex>& out, const GizmoFrame& fram
     // Each line is emitted as kGizmoGridSegmentsPerLine disjoint segments
     // rather than one long one: the fade is radial, so a 2-vertex line would
     // interpolate it linearly and wash out the falloff (see lines.h).
+    // The grid spans frame.grid_normal's plane, NOT the u-v drag plane: for an
+    // attached node those are the same plane, but for a free one the grid is a
+    // world-horizontal reference (see GizmoFrame in gizmo.h). Derived through
+    // tangent_basis so the attached case reproduces (u, v) exactly -- it is the
+    // same call gizmo_frame_for_node made to build them.
+    simd_float3 a_dir, b_dir;
+    tangent_basis(frame.grid_normal, a_dir, b_dir);
+
     const int segs = kGizmoGridSegmentsPerLine;
     for (int i = 0; i <= divisions; ++i) {
         const float offset = -he + static_cast<float>(i) * step;
         for (int s = 0; s < segs; ++s) {
             const float t0 = -he + 2.0f * he * static_cast<float>(s) / static_cast<float>(segs);
             const float t1 = -he + 2.0f * he * static_cast<float>(s + 1) / static_cast<float>(segs);
-            // Along u (offset along v): coordinates are (t, offset) in (u, v).
-            push(t0, offset, frame.u, frame.v);
-            push(t1, offset, frame.u, frame.v);
-            // Along v (offset along u): coordinates are (offset, t).
-            push(offset, t0, frame.u, frame.v);
-            push(offset, t1, frame.u, frame.v);
+            // Along a (offset along b): coordinates are (t, offset) in (a, b).
+            push(t0, offset, a_dir, b_dir);
+            push(t1, offset, a_dir, b_dir);
+            // Along b (offset along a): coordinates are (offset, t).
+            push(offset, t0, a_dir, b_dir);
+            push(offset, t1, a_dir, b_dir);
         }
     }
 }
@@ -199,28 +208,31 @@ void append_camera_facing_quad(std::vector<LineVertex>& out, simd_float3 center,
 } // namespace
 
 void append_move_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& frame,
-                               GizmoHandle highlighted, simd_float3 eye) {
+                               GizmoHandle highlighted, simd_float3 eye, float rest_alpha) {
     const simd_float3 origin = frame.origin;
     const float he = frame.half_extent;
     const float hw = kGizmoHandleHalfWidthFrac * he;
     const float border_hw = kGizmoPatchBorderHalfWidthFrac * he;
+    // Plane fills track the handles' own opacity, so a dimmed gizmo dims as a
+    // whole rather than keeping its largest, loudest element at full strength.
+    const float fill_scale = rest_alpha / kGizmoHandleRestAlpha;
 
-    // A resting handle is its own color at kGizmoHandleRestAlpha; the
-    // highlighted one goes opaque white. Hover therefore reads as both a
-    // brightness and a color change, which is what lets it stay legible on
-    // every handle regardless of that handle's base color.
+    // A resting handle is its own color at `rest_alpha`; the highlighted one
+    // goes opaque white. Hover therefore reads as both a brightness and a color
+    // change, which is what lets it stay legible on every handle regardless of
+    // that handle's base color.
     auto color_for = [&](GizmoHandle handle, simd_float4 base) {
         if (handle == highlighted) {
             return kColorGizmoHot;
         }
-        base.w = kGizmoHandleRestAlpha;
+        base.w = rest_alpha;
         return base;
     };
 
-    // Axis shafts from the origin, POSITIVE half only (R3 user ruling). The
-    // shaft stops at kGizmoAxisShaftFrac*he and a camera-facing dot caps it;
-    // pick_gizmo_handle still clamps to the full 0..he segment, so the dot is
-    // grabbable rather than being dead space past the end of the target.
+    // Axis shafts from the origin, POSITIVE half only (R3 user ruling), over
+    // the Placement band. The shaft stops at kMoveAxisShaftFrac*he and a
+    // camera-facing dot caps it; the pick clamps to kMoveAxisOuterFrac, so the
+    // dot is grabbable rather than being dead space past the end of the target.
     // Emission order (u, v, n) matches the pick tie-break order; lines_tests
     // pins the layout.
     const struct { simd_float3 dir; simd_float4 color; GizmoHandle handle; } axes[] = {
@@ -229,11 +241,11 @@ void append_move_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& f
         {frame.n, kColorAxisN, GizmoHandle::AxisN},
     };
     for (const auto& axis : axes) {
-        append_thick_segment(out, origin, origin + kGizmoAxisShaftFrac * he * axis.dir,
+        append_thick_segment(out, origin, origin + kMoveAxisShaftFrac * he * axis.dir,
                              eye, hw, color_for(axis.handle, axis.color));
     }
     for (const auto& axis : axes) {
-        append_camera_facing_quad(out, origin + kGizmoAxisShaftFrac * he * axis.dir,
+        append_camera_facing_quad(out, origin + kMoveAxisShaftFrac * he * axis.dir,
                                   kGizmoAxisTipHalfSizeFrac * he, eye,
                                   color_for(axis.handle, axis.color));
     }
@@ -257,7 +269,8 @@ void append_move_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& f
         const simd_float3 p01 = origin + a * patch.e1 + b * patch.e2;
 
         simd_float4 fill = c;
-        fill.w = (patch.handle == highlighted) ? (2.0f * kGizmoPatchFillAlpha) : kGizmoPatchFillAlpha;
+        fill.w = ((patch.handle == highlighted) ? (2.0f * kGizmoPatchFillAlpha)
+                                                : kGizmoPatchFillAlpha) * fill_scale;
         auto push_fill = [&](simd_float3 p) {
             LineVertex vertex;
             vertex.pos = (simd_float4){p.x, p.y, p.z, 1.0f};
@@ -274,30 +287,35 @@ void append_move_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& f
     }
 
     // Origin pip: anchors the three shafts at a single visible point, which
-    // matters more now that they are thin.
-    append_camera_facing_quad(out, origin, kGizmoAxisTipHalfSizeFrac * he, eye, kColorOriginPip);
+    // matters more now that they are thin. Dims with the rest of the gizmo --
+    // when the pair is coalesced this sits inside the Shape gizmo's uniform
+    // box, and a full-strength white dot there would read as a handle of its
+    // own rather than as the Placement gizmo's centre.
+    simd_float4 pip = kColorOriginPip;
+    pip.w *= rest_alpha / kGizmoHandleRestAlpha;
+    append_camera_facing_quad(out, origin, kGizmoAxisTipHalfSizeFrac * he, eye, pip);
 }
 
 void append_scale_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& frame,
-                                GizmoHandle highlighted, simd_float3 eye) {
+                                GizmoHandle highlighted, simd_float3 eye, float rest_alpha) {
     const simd_float3 origin = frame.origin;
     const float he = frame.half_extent;
     const float hw = kGizmoHandleHalfWidthFrac * he;
 
-    // Same rest/hot treatment as the move gizmo, so hover reads identically
-    // across both manipulators.
+    // Same rest/hot treatment as the placement gizmo, so hover reads
+    // identically across both manipulators.
     auto color_for = [&](GizmoHandle handle, simd_float4 base) {
         if (handle == highlighted) {
             return kColorGizmoHot;
         }
-        base.w = kGizmoHandleRestAlpha;
+        base.w = rest_alpha;
         return base;
     };
 
-    // Shafts start at kScaleAxisInnerFrac*he, not at the origin: the centre box
-    // owns the middle, and pick_gizmo_handle clamps to the same segment, so
-    // drawn geometry = hit geometry here too. Emission order (u, v, n) matches
-    // the pick tie-break order; lines_tests pins the layout.
+    // Shafts run the Shape band, outboard of both the centre box and the
+    // Placement gizmo's own shafts; pick_gizmo_handle clamps to the same band,
+    // so drawn geometry = hit geometry here too. Emission order (u, v, n)
+    // matches the pick tie-break order; lines_tests pins the layout.
     const struct { simd_float3 dir; simd_float4 color; GizmoHandle handle; } axes[] = {
         {frame.u, kColorAxisU, GizmoHandle::AxisU},
         {frame.v, kColorAxisV, GizmoHandle::AxisV},
@@ -306,16 +324,65 @@ void append_scale_gizmo_handles(std::vector<LineVertex>& out, const GizmoFrame& 
     for (const auto& axis : axes) {
         const simd_float4 c = color_for(axis.handle, axis.color);
         append_thick_segment(out, origin + kScaleAxisInnerFrac * he * axis.dir,
-                             origin + kGizmoAxisShaftFrac * he * axis.dir, eye, hw, c);
+                             origin + kScaleAxisShaftFrac * he * axis.dir, eye, hw, c);
     }
     for (const auto& axis : axes) {
-        append_camera_facing_quad(out, origin + kGizmoAxisShaftFrac * he * axis.dir,
+        append_camera_facing_quad(out, origin + kScaleAxisShaftFrac * he * axis.dir,
                                   kGizmoScaleTipHalfSizeFrac * he, eye,
                                   color_for(axis.handle, axis.color));
     }
 
     append_camera_facing_quad(out, origin, kGizmoUniformHalfSizeFrac * he, eye,
                               color_for(GizmoHandle::Uniform, kColorGizmoUniform));
+}
+
+void append_rotate_gizmo_rings(std::vector<LineVertex>& out, const GizmoFrame& frame,
+                               GizmoHandle highlighted, simd_float3 eye, float rest_alpha) {
+    const simd_float3 origin = frame.origin;
+    const float radius = kRotateRingFrac * frame.half_extent;
+    const float hw = kGizmoHandleHalfWidthFrac * frame.half_extent;
+
+    auto color_for = [&](GizmoHandle handle, simd_float4 base) {
+        if (handle == highlighted) {
+            return kColorGizmoHot;
+        }
+        base.w = rest_alpha;
+        return base;
+    };
+
+    // Each ring is spanned by the OTHER two frame vectors, taken in an order
+    // that keeps the traversal right-handed about its own axis. Using the frame
+    // directly rather than tangent_basis(axis) matters: these have to be the
+    // same vectors the drag reads its angle in, or the drawn ring and the angle
+    // it produces would disagree about which way is positive.
+    //
+    // Full circles, not just the camera-facing halves. Half-rings are the
+    // denser-looking convention, but they need a near-side test that goes
+    // unstable exactly when a ring is viewed face-on -- every point is then
+    // equidistant from the eye and the visible half flickers around the
+    // circumference. The whole circle costs more lines and no correctness.
+    const struct { simd_float3 e1, e2, axis; simd_float4 color; GizmoHandle handle; } rings[] = {
+        {frame.v, frame.n, frame.u, kColorAxisU, GizmoHandle::RingU},
+        {frame.n, frame.u, frame.v, kColorAxisV, GizmoHandle::RingV},
+        {frame.u, frame.v, frame.n, kColorAxisN, GizmoHandle::RingN},
+    };
+    for (const auto& ring : rings) {
+        const simd_float4 c = color_for(ring.handle, ring.color);
+        simd_float3 prev = origin + radius * ring.e1;
+        for (int i = 1; i <= kRotateRingSegments; ++i) {
+            const float t = 2.0f * static_cast<float>(M_PI) * static_cast<float>(i) /
+                            static_cast<float>(kRotateRingSegments);
+            const simd_float3 p =
+                origin + radius * (std::cos(t) * ring.e1 + std::sin(t) * ring.e2);
+            append_thick_segment(out, prev, p, eye, hw, c);
+            prev = p;
+        }
+    }
+}
+
+void append_anchor_tether(std::vector<LineVertex>& out, simd_float3 anchor, simd_float3 centre,
+                          float half_width, simd_float3 eye) {
+    append_thick_segment(out, anchor, centre, eye, half_width, kColorAnchorTether);
 }
 
 void append_focus_dot(std::vector<LineVertex>& out, simd_float3 center, float half_size,
