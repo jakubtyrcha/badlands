@@ -174,6 +174,71 @@ void append_prism_edges(std::vector<LineVertex>& out, const simd_float4x4& m, si
     }
 }
 
+// Rounded box: the six FLAT FACES, each a rectangle bounded by where that face
+// meets the rounded edge around it. Every corner of every rectangle lies on the
+// surface, and at full roundness each rectangle collapses to a point at its
+// face's centre -- which is exactly where the resulting ball touches its box.
+//
+// Not used at zero roundness: the six rectangles degenerate to the box's own
+// edges there, drawn twice over, so append_cube_edges' single pass is both
+// cheaper and what the existing vertex-count expectations pin.
+void append_rounded_box_edges(std::vector<LineVertex>& out, const simd_float4x4& m,
+                              simd_float4 color, simd_float3 half, float roundness) {
+    const float rb = roundness * simd_reduce_min(half);
+    // Unit-local half-width of each face's flat portion. Anisotropic, because
+    // the rounding radius is a single world length while unit-local space
+    // divides each axis by its own half-extent.
+    const simd_float3 flat = 0.5f * (simd_float3{1.0f, 1.0f, 1.0f} - rb / half);
+    for (int axis = 0; axis < 3; ++axis) {
+        const int b = (axis + 1) % 3;
+        const int c = (axis + 2) % 3;
+        for (const float side : {0.5f, -0.5f}) {
+            std::array<simd_float3, 4> corner{};
+            for (int k = 0; k < 4; ++k) {
+                const float sb = (k == 0 || k == 3) ? 1.0f : -1.0f;
+                const float sc = (k < 2) ? 1.0f : -1.0f;
+                corner[k] = simd_float3{0.0f, 0.0f, 0.0f};
+                corner[k][axis] = side;
+                corner[k][b] = sb * flat[b];
+                corner[k][c] = sc * flat[c];
+            }
+            for (int k = 0; k < 4; ++k) {
+                out.push_back(make_vertex(corner[k], m, color));
+                out.push_back(make_vertex(corner[(k + 1) % 4], m, color));
+            }
+        }
+    }
+}
+
+// Rounded octahedron: the eight flat triangular faces. In unit-local space the
+// evaluator reduces to an octahedron of vertex distance (1-c)/2 offset by c/2 --
+// isotropic, whatever the node's half-extents, because that shape contracts all
+// three axes onto one. So the core shrinks and the offset grows as the dial
+// turns, and at full roundness all eight triangles collapse onto the sphere the
+// shape has become. Sharp case excluded for the same reason as the box above.
+void append_rounded_octahedron_edges(std::vector<LineVertex>& out, const simd_float4x4& m,
+                                     simd_float4 color, float roundness) {
+    const float core = 0.5f * (1.0f - roundness);          // vertex distance of the core
+    const float offset = 0.5f * roundness / std::sqrt(3.0f); // face offset, per component
+    for (int sx = -1; sx <= 1; sx += 2) {
+        for (int sy = -1; sy <= 1; sy += 2) {
+            for (int sz = -1; sz <= 1; sz += 2) {
+                const simd_float3 n{static_cast<float>(sx), static_cast<float>(sy),
+                                    static_cast<float>(sz)};
+                const std::array<simd_float3, 3> tri = {{
+                    simd_float3{n.x * core, 0.0f, 0.0f} + offset * n,
+                    simd_float3{0.0f, n.y * core, 0.0f} + offset * n,
+                    simd_float3{0.0f, 0.0f, n.z * core} + offset * n,
+                }};
+                for (int k = 0; k < 3; ++k) {
+                    out.push_back(make_vertex(tri[k], m, color));
+                    out.push_back(make_vertex(tri[(k + 1) % 3], m, color));
+                }
+            }
+        }
+    }
+}
+
 // Octahedron: the 12 edges joining its 6 axis vertices.
 void append_octahedron_edges(std::vector<LineVertex>& out, const simd_float4x4& m,
                              simd_float4 color) {
@@ -628,13 +693,23 @@ void append_node_wireframe(std::vector<LineVertex>& out, const Node& node, simd_
     // against a tip-up surface. Unreachable through the UI, where every drag
     // clamps to kNodeScaleMin, but SceneDocument::add takes a Node verbatim.
     const simd_float4x4 m = trs_matrix(node.position, node.rotation, simd_abs(node.scale));
+    const simd_float3 half = 0.5f * simd_abs(node.scale);
     const float param = node.shape_param;
+    // Zero-roundness threshold: below it the rounded builders would draw every
+    // edge twice for no visible gain, so the sharp forms take over.
+    const bool rounded = param > 1e-4f;
     switch (node.shape) {
-        case Shape::Cube:       append_cube_edges(out, m, color); break;
+        case Shape::Cube:
+            if (rounded) { append_rounded_box_edges(out, m, color, half, param); }
+            else { append_cube_edges(out, m, color); }
+            break;
         case Shape::Sphere:     append_sphere_outline(out, m, color, eye_world); break;
         case Shape::Cone:       append_cone_edges(out, m, color, param); break;
         case Shape::Capsule:    append_lathe_shape(out, m, color, node); break;
-        case Shape::Octahedron: append_octahedron_edges(out, m, color); break;
+        case Shape::Octahedron:
+            if (rounded) { append_rounded_octahedron_edges(out, m, color, param); }
+            else { append_octahedron_edges(out, m, color); }
+            break;
         case Shape::Pyramid:    append_pyramid_edges(out, m, color, param); break;
         case Shape::Prism:
             append_prism_edges(out, m, color,

@@ -102,7 +102,12 @@ inline constexpr int kSphereOutlineSegments = 48;
 // alongside other structural lines, not a single silhouette carrying the whole
 // read of the shape.
 inline constexpr int kShapeRingSegments = 32;
-inline constexpr int kShapeProfileSegments = 12;
+// Samples along a lathe profile. Generous because sample_profile fans rays at
+// uniform POLAR ANGLE, which cannot land on a sharp rim exactly -- a
+// flat-capped capsule's corner falls between two samples, and the polyline
+// chamfers it. The error shrinks in proportion to the count, so this buys the
+// chamfer down to something under a pixel rather than trying to detect corners.
+inline constexpr int kShapeProfileSegments = 40;
 
 // 12 edges -> 24 vertices. Unit cube corners at ±0.5.
 void append_cube_edges(std::vector<LineVertex>& out, const simd_float4x4& world_from_local, simd_float4 color);

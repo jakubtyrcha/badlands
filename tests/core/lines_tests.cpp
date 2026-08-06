@@ -8,6 +8,7 @@
 
 #include "gizmo.h"
 #include "lines.h"
+#include "sdf.h"   // evaluate_scene_sdf -- the zero-set cross-check below
 #include "scene.h"
 
 using namespace sq;
@@ -730,5 +731,65 @@ TEST_CASE("append_node_wireframe: the drawn outline tracks the shape parameter")
             }
         }
         CHECK(on_axis_at_top == 0);
+    }
+}
+
+TEST_CASE("every wireframe vertex lies on the shape's own zero set") {
+    // The invariant that makes a wireframe an outline rather than a decoration,
+    // and the one this file was missing: it is what catches a builder that
+    // ignores the dial. Cube and octahedron did exactly that -- they drew hard
+    // edges at every roundness, so a Subtract cube dialled round carved a ball
+    // while its wireframe, which is a Subtract node's ONLY visual when
+    // unselected, still showed a box.
+    //
+    // Vertices only. The straight segments between them cut inside a curved
+    // surface by design; it is the sampled points that have to be on it.
+    struct Case { const char* label; Shape shape; float param; };
+    const Case cases[] = {
+        {"cube, sharp", Shape::Cube, 0.0f},          {"cube, half round", Shape::Cube, 0.5f},
+        {"cube, ball", Shape::Cube, 1.0f},           {"sphere", Shape::Sphere, 0.0f},
+        {"cone, sharp", Shape::Cone, 0.0f},          {"cone, truncated", Shape::Cone, 0.45f},
+        {"cone, cylinder", Shape::Cone, 1.0f},       {"capsule, flat", Shape::Capsule, 0.0f},
+        {"capsule, half", Shape::Capsule, 0.5f},     {"capsule, round", Shape::Capsule, 1.0f},
+        {"octahedron, sharp", Shape::Octahedron, 0.0f},
+        {"octahedron, half round", Shape::Octahedron, 0.5f},
+        {"octahedron, ball", Shape::Octahedron, 1.0f},
+        {"pyramid, sharp", Shape::Pyramid, 0.0f},    {"pyramid, frustum", Shape::Pyramid, 0.6f},
+        {"prism, 3", Shape::Prism, 3.0f},            {"prism, 7", Shape::Prism, 7.0f},
+        {"vesica, cusped", Shape::Vesica, 0.0f},     {"vesica, half round", Shape::Vesica, 0.5f},
+        {"vesica, capsule", Shape::Vesica, 1.0f},
+    };
+    const simd_float3 scales[] = {
+        {2.0f, 2.0f, 2.0f},  // uniform
+        {3.0f, 5.0f, 2.0f},  // taller than wide
+        {5.0f, 1.5f, 4.0f},  // wider than tall
+    };
+    const simd_float3 eye = {0.0f, 0.0f, 14.0f};
+
+    for (const Case& c : cases) {
+        for (const simd_float3& scale : scales) {
+            INFO("case: " << std::string(c.label));
+            INFO("scale: (" << scale.x << ", " << scale.y << ", " << scale.z << ")");
+            SceneDocument doc;
+            Node node;
+            node.id = 1;
+            node.shape = c.shape;
+            node.shape_param = c.param;
+            node.scale = scale;
+            doc.add(node);
+
+            std::vector<LineVertex> lines;
+            append_node_wireframe(lines, node, kColorSelected, eye);
+            REQUIRE_FALSE(lines.empty());
+
+            float worst = 0.0f;
+            for (const LineVertex& v : lines) {
+                const auto d = evaluate_scene_sdf(doc, simd_float3{v.pos.x, v.pos.y, v.pos.z});
+                REQUIRE(d.has_value());
+                worst = std::fmax(worst, std::fabs(*d));
+            }
+            INFO("worst |sdf| at a wireframe vertex: " << worst);
+            CHECK(worst < 2e-3f);
+        }
     }
 }
