@@ -438,6 +438,14 @@ TEST_CASE("metal: CreateView after Destroy is refused", "[rhi][metal]") {
   rhitest::CheckCreateViewAfterDestroyIsRefused(*d);
 }
 
+TEST_CASE("metal: frames advance and pace", "[rhi][metal][gpu]") {
+  auto d = MakeMetal();
+  rhitest::CheckFramesAdvanceAndPace(*d);
+}
+TEST_CASE("metal: skipped frames still retire", "[rhi][metal]") {
+  auto d = MakeMetal();
+  rhitest::CheckSkippedFramesStillRetire(*d);
+}
 TEST_CASE("metal: sliced views honour their range", "[rhi][metal]") {
   auto d = MakeMetal();
   rhitest::CheckSlicedViewsHonourTheirRange(*d);

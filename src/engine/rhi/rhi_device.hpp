@@ -52,6 +52,17 @@ struct DeviceDesc {
   // Wraps the device in the validation decorator. Off in release/profiling
   // builds so validation cannot skew CPU measurements; on in tests and debug.
   bool enable_validation = false;
+
+  // How many frames may be outstanding at once. Lives HERE rather than on the
+  // swapchain because the frame model works headless -- transient allocation
+  // and deferred deletion are keyed on frame retirement whether or not
+  // anything is being presented. A swapchain reads it back from the device
+  // rather than carrying its own copy, so the two cannot disagree.
+  //
+  // Metal's maximumDrawableCount accepts only 2 or 3, so a swapchain will
+  // refuse anything outside that range at creation.
+  uint32_t frames_in_flight = 3;
+
   std::string label;
 };
 
@@ -115,6 +126,34 @@ class IRhiDevice {
   // indistinguishable from "everything retired" and makes any test of it pass
   // vacuously. Each backend states its answer deliberately.
   virtual size_t InFlightCount() = 0;
+
+  // --- Frame model ---
+  //
+  // A frame is the unit of GPU-timeline lifetime: transient allocations are
+  // recycled and deferred deletions are freed when the frame that last
+  // referenced them retires.
+  //
+  // BeginFrame BLOCKS until fewer than `frames_in_flight` frames are
+  // outstanding, and that is deliberately where the pacing lives. Blocking at
+  // swapchain acquire instead would stall the CPU *late* -- after input has
+  // been sampled and the whole update has run -- which is the difference
+  // between one frame of input latency and three.
+  //
+  // Frame indices start at 1, so LastRetiredFrame() == 0 means "nothing has
+  // retired yet" and is not confusable with frame 0.
+  virtual uint64_t BeginFrame() = 0;
+
+  // Closes the frame. Every frame that begins must end, including one that
+  // rendered nothing -- a frame with no submitted work retires immediately,
+  // because otherwise the Nth skipped frame exhausts the pacing budget and
+  // deadlocks. Skipped frames are normal: a minimized window produces them.
+  virtual void EndFrame() = 0;
+
+  // The most recently begun frame, and the newest frame known to have fully
+  // retired on the GPU. Outstanding frames are the difference.
+  virtual uint64_t CurrentFrame() const = 0;
+  virtual uint64_t LastRetiredFrame() const = 0;
+  virtual uint32_t FramesInFlight() const = 0;
 
   // --- Validation ---
   // All 14 of the engine's existing Dawn validation sites assert "nothing went

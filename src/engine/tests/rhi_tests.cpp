@@ -7,6 +7,10 @@
 // The same conformance list runs against Metal in badlands_rhi_metal_tests --
 // see src/engine/tests/rhi_conformance.hpp for why that sharing matters.
 
+#include <atomic>
+#include <chrono>
+#include <thread>
+
 #include <catch_amalgamated.hpp>
 
 #include "engine/tests/rhi_conformance.hpp"
@@ -96,6 +100,85 @@ TEST_CASE("Null: out-of-range views are refused", "[rhi]") {
 TEST_CASE("Null: submissions retire", "[rhi]") {
   auto d = MakeNull();
   rhitest::CheckSubmissionsRetire(*d);
+}
+TEST_CASE("Null: frames advance and pace", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckFramesAdvanceAndPace(*d);
+}
+TEST_CASE("Null: skipped frames still retire", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckSkippedFramesStillRetire(*d);
+}
+
+// --- Pacing, proven deterministically under manual retirement ---------------
+//
+// This is what Null's manual retirement mode is FOR. Immediate mode retires at
+// EndFrame, and Metal with trivial work usually retires before the next frame
+// begins, so neither can prove that frames overlap or that BeginFrame blocks.
+// Driving retirement by hand makes the GPU timeline a thing the test controls,
+// with no GPU and no scheduling luck.
+
+TEST_CASE("Null: frames overlap up to the budget under manual retirement",
+          "[rhi]") {
+  auto d = CreateDevice({.backend = BackendKind::Null,
+                         .frames_in_flight = 3,
+                         .label = "pacing"});
+  REQUIRE(d);
+  badlands::rhi::null::SetRetirementMode(*d,
+                                         badlands::rhi::null::RetirementMode::Manual);
+
+  // Three frames begun and ended, none retired: all three are outstanding.
+  for (int i = 0; i < 3; ++i) {
+    d->BeginFrame();
+    d->EndFrame();
+  }
+  CHECK(d->CurrentFrame() == 3);
+  CHECK(d->LastRetiredFrame() == 0);
+  CHECK(d->CurrentFrame() - d->LastRetiredFrame() == 3);
+
+  // Retiring one lets exactly one more through.
+  CHECK(badlands::rhi::null::RetireOldestFrame(*d));
+  CHECK(d->LastRetiredFrame() == 1);
+  d->BeginFrame();
+  d->EndFrame();
+  CHECK(d->CurrentFrame() - d->LastRetiredFrame() == 3);
+}
+
+TEST_CASE("Null: BeginFrame blocks until a frame retires", "[rhi]") {
+  // The pacing guarantee itself. A budget that is never enforced looks
+  // identical to one that is, until the GPU is a frame behind and the CPU has
+  // overwritten a buffer it is still reading.
+  auto d = CreateDevice({.backend = BackendKind::Null,
+                         .frames_in_flight = 2,
+                         .label = "blocking"});
+  REQUIRE(d);
+  badlands::rhi::null::SetRetirementMode(*d,
+                                         badlands::rhi::null::RetirementMode::Manual);
+
+  d->BeginFrame();
+  d->EndFrame();
+  d->BeginFrame();
+  d->EndFrame();
+  REQUIRE(d->CurrentFrame() - d->LastRetiredFrame() == 2);
+
+  std::atomic<bool> returned{false};
+  std::thread waiter([&] {
+    d->BeginFrame();  // budget is full -- must block
+    returned.store(true, std::memory_order_release);
+  });
+
+  // Generous margin. The assertion is one-sided: if BeginFrame wrongly did not
+  // block, `returned` is true here and the test fails. A slow machine only
+  // makes it more likely to still be blocked, never less.
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  const bool still_blocked = !returned.load(std::memory_order_acquire);
+
+  badlands::rhi::null::RetireOldestFrame(*d);
+  waiter.join();
+
+  CHECK(still_blocked);
+  CHECK(returned.load(std::memory_order_acquire));
+  d->EndFrame();
 }
 TEST_CASE("Null: compute pipeline reports its workgroup size", "[rhi]") {
   auto d = MakeNull();

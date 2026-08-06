@@ -1,8 +1,11 @@
 #include "engine/rhi/null/null_rhi.hpp"
 
 #include <algorithm>
+#include <condition_variable>
 #include <cstring>
+#include <deque>
 #include <map>
+#include <mutex>
 #include <tuple>
 
 #include <spdlog/spdlog.h>
@@ -445,7 +448,8 @@ const RecordedCommand* CommandLog::Find(RecordedCommand::Kind kind,
 
 class NullDevice final : public IRhiDevice {
  public:
-  explicit NullDevice(std::string label) : label_(std::move(label)) {}
+  NullDevice(std::string label, uint32_t frames_in_flight)
+      : label_(std::move(label)), frames_in_flight_(frames_in_flight) {}
 
   BackendKind GetBackend() const override { return BackendKind::Null; }
 
@@ -489,10 +493,56 @@ class NullDevice final : public IRhiDevice {
     log_.Record(
         {.kind = RecordedCommand::Kind::Submit, .object = &encoder});
   }
-  void WaitIdle() override {}
+  void WaitIdle() override { RetireAll(); }
   // Null executes on Submit, so nothing is ever in flight. This is a real
   // answer, not a stub -- which is why the base declares it pure.
   size_t InFlightCount() override { return 0; }
+
+  // --- Frame model ---
+  //
+  // Blocks exactly as Metal does, on the same contract. In Manual mode the
+  // test is the GPU: it calls RetireOldestFrame to let BeginFrame through. A
+  // test that begins more frames than it retires will hang, which is a test
+  // bug and what ctest timeouts are for -- the alternative, refusing instead
+  // of blocking, would make Null and Metal disagree about the contract
+  // (rule 6).
+  uint64_t BeginFrame() override {
+    std::unique_lock<std::mutex> lock(mutex_);
+    cv_.wait(lock, [this] {
+      return current_frame_ - last_retired_ < frames_in_flight_;
+    });
+    return ++current_frame_;
+  }
+
+  void EndFrame() override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ended_.push_back(current_frame_);
+    if (mode_ == RetirementMode::Immediate) RetireOldestLocked();
+  }
+
+  uint64_t CurrentFrame() const override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return current_frame_;
+  }
+  uint64_t LastRetiredFrame() const override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return last_retired_;
+  }
+  uint32_t FramesInFlight() const override { return frames_in_flight_; }
+
+  void SetMode(RetirementMode mode) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    mode_ = mode;
+    if (mode_ == RetirementMode::Immediate) {
+      while (RetireOldestLocked()) {
+      }
+    }
+  }
+
+  bool RetireOldest() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return RetireOldestLocked();
+  }
 
   // The Null backend never observes anything itself; the validation decorator
   // is what fills these in when it wraps a device. nullopt here means exactly
@@ -507,21 +557,86 @@ class NullDevice final : public IRhiDevice {
   CommandLog& Log() { return log_; }
 
  private:
+  // Retires the oldest ENDED frame. Frames retire in order, so the watermark
+  // only ever moves forward by one.
+  bool RetireOldestLocked() {
+    if (ended_.empty()) return false;
+    last_retired_ = ended_.front();
+    ended_.pop_front();
+    cv_.notify_all();
+    return true;
+  }
+
+  void RetireAll() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    while (RetireOldestLocked()) {
+    }
+  }
+
   std::string label_;
   CommandLog log_;
+
+  // Frame model. `mutable` because the observers are const but must lock.
+  mutable std::mutex mutex_;
+  std::condition_variable cv_;
+  uint32_t frames_in_flight_ = 3;
+  uint64_t current_frame_ = 0;
+  uint64_t last_retired_ = 0;
+  std::deque<uint64_t> ended_;  // ended but not yet retired, oldest first
+  RetirementMode mode_ = RetirementMode::Immediate;
 };
 
-std::unique_ptr<IRhiDevice> CreateNullDevice(const std::string& label) {
-  return std::make_unique<NullDevice>(label);
+std::unique_ptr<IRhiDevice> CreateNullDevice(const std::string& label,
+                                             uint32_t frames_in_flight) {
+  if (frames_in_flight == 0) {
+    spdlog::error("rhi/null: frames_in_flight must be at least 1");
+    return nullptr;
+  }
+  return std::make_unique<NullDevice>(label, frames_in_flight);
 }
 
-CommandLog* GetCommandLog(IRhiDevice& device) {
-  // Walk the decorator chain: a validated Null device is a ValidationDevice
-  // wrapping a NullDevice, and a direct cast would miss it.
+namespace {
+
+// Same decorator walk GetCommandLog does: a validated Null device is a
+// ValidationDevice wrapping a NullDevice, and a direct cast would miss it.
+NullDevice* FindNull(IRhiDevice& device) {
   for (IRhiDevice* d = &device; d != nullptr; d = d->Inner()) {
-    if (auto* nd = dynamic_cast<NullDevice*>(d)) return &nd->Log();
+    if (auto* nd = dynamic_cast<NullDevice*>(d)) return nd;
   }
   return nullptr;
+}
+
+}  // namespace
+
+CommandLog* GetCommandLog(IRhiDevice& device) {
+  auto* nd = FindNull(device);
+  return nd ? &nd->Log() : nullptr;
+}
+
+void SetRetirementMode(IRhiDevice& device, RetirementMode mode) {
+  auto* nd = FindNull(device);
+  if (!nd) {
+    spdlog::error(
+        "rhi/null: SetRetirementMode on a {} device -- retirement is only "
+        "controllable on Null",
+        ToString(device.GetBackend()));
+    return;
+  }
+  nd->SetMode(mode);
+}
+
+bool RetireOldestFrame(IRhiDevice& device) {
+  auto* nd = FindNull(device);
+  if (!nd) {
+    spdlog::error(
+        "rhi/null: RetireOldestFrame on a {} device -- retirement is only "
+        "controllable on Null",
+        ToString(device.GetBackend()));
+    return false;
+  }
+  if (nd->RetireOldest()) return true;
+  spdlog::error("rhi/null: RetireOldestFrame with no frame outstanding");
+  return false;
 }
 
 }  // namespace badlands::rhi::null

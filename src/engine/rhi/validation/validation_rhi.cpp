@@ -844,6 +844,35 @@ class ValidationDevice final : public IRhiDevice {
 
   size_t InFlightCount() override { return inner_->InFlightCount(); }
 
+  uint64_t BeginFrame() override {
+    if (in_frame_) {
+      // Refused, not just reported: a second BeginFrame consumes another slot
+      // from the pacing budget that no EndFrame will ever return, so the
+      // deadlock lands several frames later with nothing pointing here.
+      ctx_.recorder.Report(fmt::format(
+          "BeginFrame: frame {} is already open -- EndFrame it first",
+          inner_->CurrentFrame()));
+      return inner_->CurrentFrame();
+    }
+    in_frame_ = true;
+    return inner_->BeginFrame();
+  }
+
+  void EndFrame() override {
+    if (!in_frame_) {
+      ctx_.recorder.Report("EndFrame: no frame is open");
+      return;
+    }
+    in_frame_ = false;
+    inner_->EndFrame();
+  }
+
+  uint64_t CurrentFrame() const override { return inner_->CurrentFrame(); }
+  uint64_t LastRetiredFrame() const override {
+    return inner_->LastRetiredFrame();
+  }
+  uint32_t FramesInFlight() const override { return inner_->FramesInFlight(); }
+
   void BeginValidationScope() override { ctx_.recorder.BeginScope(); }
   std::optional<ValidationReport> EndValidationScope() override {
     return ctx_.recorder.EndScope();
@@ -853,6 +882,7 @@ class ValidationDevice final : public IRhiDevice {
  private:
   std::unique_ptr<IRhiDevice> inner_;
   Context ctx_;
+  bool in_frame_ = false;
 };
 
 }  // namespace

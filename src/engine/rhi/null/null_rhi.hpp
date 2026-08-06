@@ -90,11 +90,35 @@ class CommandLog {
 
 // Creates a Null device. `CreateDevice(DeviceDesc{.backend = Null})` is the
 // normal entry point; both return the same thing.
-std::unique_ptr<IRhiDevice> CreateNullDevice(const std::string& label = {});
+std::unique_ptr<IRhiDevice> CreateNullDevice(const std::string& label = {},
+                                             uint32_t frames_in_flight = 3);
 
 // The command log for a Null device, or nullptr for any other backend. Tests
 // use this instead of downcasting; it also means a test written against the
 // log degrades to a clear nullptr rather than a bad cast when pointed at Metal.
 CommandLog* GetCommandLog(IRhiDevice& device);
+
+// --- Frame retirement control -----------------------------------------------
+//
+// Null executes on Submit, so left alone it retires every frame the instant it
+// ends -- which would make every test of deferred deletion, transient
+// allocation and frame pacing pass VACUOUSLY. That is the same trap
+// InFlightCount fell into: a backend that never implements retirement is
+// indistinguishable from one where everything has already retired.
+//
+// Manual mode makes the GPU timeline something a test drives by hand, with no
+// GPU and no timing noise, so those assertions become a specification the DX12
+// backend must satisfy rather than an accident of Metal's scheduling.
+enum class RetirementMode : uint8_t {
+  Immediate,  // frames retire as they end -- the default
+  Manual,     // frames retire only via RetireOldestFrame
+};
+
+// No-ops (after logging) on a non-Null device.
+void SetRetirementMode(IRhiDevice& device, RetirementMode mode);
+
+// Retires the oldest outstanding frame, unblocking a BeginFrame that is
+// waiting on it. Returns false (after logging) if nothing is outstanding.
+bool RetireOldestFrame(IRhiDevice& device);
 
 }  // namespace badlands::rhi::null

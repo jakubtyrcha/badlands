@@ -532,6 +532,74 @@ inline FullBindingSet MakeFullBindingSet(IRhiDevice& d, IComputePipeline* pipe,
   return s;
 }
 
+// Frames advance, retire, and never exceed the pacing budget.
+//
+// Deliberately does NOT assert that frames overlap, because no backend can
+// promise it here: Null-Immediate retires at EndFrame by construction, and
+// Metal with trivial per-frame work usually completes before the next
+// BeginFrame, so the assertion would pass or fail on scheduling luck. Overlap
+// is proven where it can be proven deterministically -- under Null's manual
+// retirement, which is what that mode exists for. See the pacing tests in
+// rhi_tests.cpp.
+inline void CheckFramesAdvanceAndPace(IRhiDevice& device) {
+  const uint32_t limit = device.FramesInFlight();
+  REQUIRE(limit >= 1);
+  // Relative to where the device already is: the shared list runs every check
+  // against ONE device, so an absolute frame count would only hold when this
+  // case happens to run first.
+  const uint64_t base = device.CurrentFrame();
+
+  uint64_t peak_outstanding = 0;
+  std::vector<uint64_t> outstanding_per_frame;
+  constexpr int kFrames = 12;
+  for (int i = 0; i < kFrames; ++i) {
+    const uint64_t frame = device.BeginFrame();
+    CHECK(frame == base + uint64_t(i) + 1);
+
+    const uint64_t outstanding = device.CurrentFrame() - device.LastRetiredFrame();
+    outstanding_per_frame.push_back(outstanding);
+    peak_outstanding = std::max(peak_outstanding, outstanding);
+    // The pacing guarantee: BeginFrame must not have returned while `limit`
+    // frames were already outstanding.
+    CHECK(outstanding <= limit);
+
+    auto encoder = device.CreateCommandEncoder("frame");
+    REQUIRE(encoder);
+    encoder->Finish();
+    device.Submit(*encoder);
+    device.EndFrame();
+  }
+
+  // A table, not a visualiser -- the project's preference for showing data.
+  std::string table = "frame:outstanding ";
+  for (size_t i = 0; i < outstanding_per_frame.size(); ++i) {
+    table += std::to_string(i + 1) + ":" + std::to_string(outstanding_per_frame[i]) + " ";
+  }
+  INFO(table);
+  INFO("limit = " << limit << ", peak outstanding = " << peak_outstanding);
+
+  device.WaitIdle();
+  CHECK(device.CurrentFrame() == base + kFrames);
+  CHECK(device.LastRetiredFrame() == device.CurrentFrame());
+  CHECK(peak_outstanding >= 1);
+}
+
+// A frame that submits nothing still retires. A minimized or occluded window
+// produces one of these every tick, and if it never returns its slot to the
+// pacing budget the Nth such frame blocks in BeginFrame forever.
+inline void CheckSkippedFramesStillRetire(IRhiDevice& device) {
+  const uint32_t limit = device.FramesInFlight();
+  const uint64_t base = device.CurrentFrame();
+  // Deliberately more than the budget: without retirement this hangs.
+  const uint32_t count = limit * 3 + 2;
+  for (uint32_t i = 0; i < count; ++i) {
+    device.BeginFrame();
+    device.EndFrame();  // nothing submitted
+  }
+  CHECK(device.CurrentFrame() == base + count);
+  CHECK(device.LastRetiredFrame() == device.CurrentFrame());
+}
+
 // Submitted work must retire rather than accumulate.
 //
 // Honest about its own strength: the load-bearing part is that InFlightCount()
@@ -1218,6 +1286,8 @@ inline void RunAllConformanceChecks(IRhiDevice& device) {
   CheckOutOfRangeViewsAreRefused(device);
   CheckBindingTableRetainsItsResources(device);
   CheckSubmissionsRetire(device);
+  CheckFramesAdvanceAndPace(device);
+  CheckSkippedFramesStillRetire(device);
   CheckTextureCreationAndViews(device);
   CheckComputePipelineReportsWorkgroupSize(device);
   CheckReflectionLookupByName(device);

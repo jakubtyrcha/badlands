@@ -206,11 +206,11 @@ std::unique_ptr<IRhiDevice> CreateDevice(const DeviceDesc& desc) {
 
   switch (desc.backend) {
     case BackendKind::Null:
-      device = null::CreateNullDevice(desc.label);
+      device = null::CreateNullDevice(desc.label, desc.frames_in_flight);
       break;
     case BackendKind::Metal:
 #if defined(BADLANDS_RHI_METAL)
-      device = metal::CreateMetalDevice(desc.label);
+      device = metal::CreateMetalDevice(desc.label, desc.frames_in_flight);
 #else
       spdlog::error("rhi: Metal backend not compiled in");
       return nullptr;

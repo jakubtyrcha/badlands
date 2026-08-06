@@ -21,8 +21,10 @@
 #import <Metal/Metal.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <tuple>
@@ -792,8 +794,18 @@ MTLTextureUsage ToMtlUsage(TextureUsage u) {
 
 class MetalDevice final : public IRhiDevice {
  public:
-  MetalDevice(id<MTLDevice> dev, id<MTLCommandQueue> queue, std::string label)
-      : device_(dev), queue_(queue), label_(std::move(label)) {}
+  MetalDevice(id<MTLDevice> dev, id<MTLCommandQueue> queue, std::string label,
+              uint32_t frames_in_flight)
+      : device_(dev), queue_(queue), label_(std::move(label)),
+        frames_in_flight_(frames_in_flight),
+        frame_sem_(dispatch_semaphore_create(frames_in_flight)) {}
+
+  ~MetalDevice() override {
+    // Completion handlers capture the address of last_retired_ and the
+    // semaphore, so none may outlive this object. waitUntilCompleted returns
+    // only after a buffer's completion handlers have run.
+    WaitIdle();
+  }
 
   BackendKind GetBackend() const override { return BackendKind::Metal; }
 
@@ -977,6 +989,23 @@ class MetalDevice final : public IRhiDevice {
     PruneRetired();
 
     id<MTLCommandBuffer> cmd = me->CommandBuffer();
+
+    // The handler MUST be attached before commit -- Metal asserts
+    // "Completed handler provided after commit call" otherwise, which is why
+    // the frame cannot simply hang one handler off its last buffer in
+    // EndFrame. Instead every buffer of the frame carries one, and the frame
+    // retires when its last outstanding buffer completes.
+    if (in_frame_) {
+      const uint64_t frame = current_frame_;
+      {
+        std::lock_guard<std::mutex> lock(frame_mutex_);
+        ++frames_[frame].pending;
+      }
+      [cmd addCompletedHandler:^(id<MTLCommandBuffer>) {
+        OnBufferComplete(frame);
+      }];
+    }
+
     [cmd commit];
     in_flight_.push_back(cmd);
   }
@@ -993,6 +1022,43 @@ class MetalDevice final : public IRhiDevice {
     PruneRetired();
     return in_flight_.size();
   }
+
+  // --- Frame model ---
+
+  uint64_t BeginFrame() override {
+    // Blocks here, at the TOP of the frame, rather than at nextDrawable.
+    dispatch_semaphore_wait(frame_sem_, DISPATCH_TIME_FOREVER);
+    ++current_frame_;
+    in_frame_ = true;
+    return current_frame_;
+  }
+
+  void EndFrame() override {
+    const uint64_t frame = current_frame_;
+    in_frame_ = false;
+
+    bool retire_now = false;
+    {
+      std::lock_guard<std::mutex> lock(frame_mutex_);
+      auto& st = frames_[frame];
+      st.ended = true;
+      // A frame that submitted nothing -- a skipped frame, which a minimized
+      // or occluded window produces every tick -- has no completion handler
+      // to retire it. Retire it here, or the semaphore count is never
+      // returned and the Nth skipped frame blocks forever in BeginFrame.
+      if (st.pending == 0) {
+        frames_.erase(frame);
+        retire_now = true;
+      }
+    }
+    if (retire_now) Retire(frame);
+  }
+
+  uint64_t CurrentFrame() const override { return current_frame_; }
+  uint64_t LastRetiredFrame() const override {
+    return last_retired_.load(std::memory_order_acquire);
+  }
+  uint32_t FramesInFlight() const override { return frames_in_flight_; }
 
   // The decorator owns validation; a bare Metal device observes nothing, so
   // nullopt means "nothing checked" rather than "clean".
@@ -1016,6 +1082,34 @@ class MetalDevice final : public IRhiDevice {
                   err ? long(err.code) : 0L);
   }
 
+  // Runs on a Metal-owned thread. `this` outlives it because ~MetalDevice
+  // waits idle, and waitUntilCompleted returns only after handlers have run.
+  void OnBufferComplete(uint64_t frame) {
+    bool retire_now = false;
+    {
+      std::lock_guard<std::mutex> lock(frame_mutex_);
+      auto it = frames_.find(frame);
+      if (it == frames_.end()) return;  // already retired
+      if (--it->second.pending == 0 && it->second.ended) {
+        frames_.erase(it);
+        retire_now = true;
+      }
+    }
+    if (retire_now) Retire(frame);
+  }
+
+  // Monotonic: a frame that retires never un-retires, and out-of-order
+  // completion (which one queue does not produce, but a second one would)
+  // must not move the watermark backwards.
+  void Retire(uint64_t frame) {
+    uint64_t seen = last_retired_.load(std::memory_order_relaxed);
+    while (frame > seen && !last_retired_.compare_exchange_weak(
+                               seen, frame, std::memory_order_release,
+                               std::memory_order_relaxed)) {
+    }
+    dispatch_semaphore_signal(frame_sem_);
+  }
+
   void PruneRetired() {
     in_flight_.erase(
         std::remove_if(in_flight_.begin(), in_flight_.end(),
@@ -1037,11 +1131,33 @@ class MetalDevice final : public IRhiDevice {
   // references alive until it completes -- see the GPU-timeline note in
   // src/engine/rhi/CLAUDE.md for why a DX12 backend must do that itself.
   std::vector<id<MTLCommandBuffer>> in_flight_;
+
+  // Frame model. `frame_sem_` starts at frames_in_flight_ and is what
+  // BeginFrame blocks on. `frames_` tracks, per open frame, how many of its
+  // submitted command buffers are still outstanding and whether EndFrame has
+  // been called -- a frame retires when both reach zero/true.
+  struct FrameState {
+    uint32_t pending = 0;  // submitted buffers not yet completed
+    bool ended = false;
+  };
+
+  uint32_t frames_in_flight_ = 3;
+  dispatch_semaphore_t frame_sem_ = nil;
+  uint64_t current_frame_ = 0;
+  bool in_frame_ = false;
+  std::atomic<uint64_t> last_retired_{0};  // written from a Metal thread
+  std::mutex frame_mutex_;                 // guards frames_
+  std::map<uint64_t, FrameState> frames_;
 };
 
 }  // namespace
 
-std::unique_ptr<IRhiDevice> CreateMetalDevice(const std::string& label) {
+std::unique_ptr<IRhiDevice> CreateMetalDevice(const std::string& label,
+                                              uint32_t frames_in_flight) {
+  if (frames_in_flight == 0) {
+    spdlog::error("rhi/metal: frames_in_flight must be at least 1");
+    return nullptr;
+  }
   id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
   if (!dev) {
     spdlog::error("rhi/metal: no Metal device available");
@@ -1054,7 +1170,7 @@ std::unique_ptr<IRhiDevice> CreateMetalDevice(const std::string& label) {
   }
   spdlog::info("rhi/metal: {} ({})", dev.name.UTF8String,
                label.empty() ? "unlabelled" : label.c_str());
-  return std::make_unique<MetalDevice>(dev, queue, label);
+  return std::make_unique<MetalDevice>(dev, queue, label, frames_in_flight);
 }
 
 }  // namespace badlands::rhi::metal
