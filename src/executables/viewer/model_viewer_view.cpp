@@ -111,10 +111,10 @@ TexturedMeshResult MakeImpostorQuad() {
   TexturedMeshResult out;
   out.mesh.geometry_type = GeometryType::kTexturedMesh;
   out.mesh.vertices = {
-      0, 0, 0,  0, 0,  0, 0, 1,  1, 0, 0,
-      0, 0, 0,  1, 0,  0, 0, 1,  1, 0, 0,
-      0, 0, 0,  0, 1,  0, 0, 1,  1, 0, 0,
-      0, 0, 0,  1, 1,  0, 0, 1,  1, 0, 0,
+      0, 0, 0,  0, 0,  0, 0, 1,  1, 0, 0, 1,
+      0, 0, 0,  1, 0,  0, 0, 1,  1, 0, 0, 1,
+      0, 0, 0,  0, 1,  0, 0, 1,  1, 0, 0, 1,
+      0, 0, 0,  1, 1,  0, 0, 1,  1, 0, 0, 1,
   };
   out.mesh.vertex_count = 4;
   out.mesh.indices = {0, 1, 2, 2, 1, 3};

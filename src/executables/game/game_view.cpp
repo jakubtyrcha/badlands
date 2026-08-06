@@ -250,7 +250,7 @@ TexturedMeshResult BuildLakeMesh(const std::vector<glm::vec3>& tris) {
   TexturedMeshResult result;
   result.mesh.geometry_type = GeometryType::kTexturedMesh;
   const glm::vec3 normal(0.0f, 1.0f, 0.0f);
-  const glm::vec3 tangent(1.0f, 0.0f, 0.0f);
+  const glm::vec4 tangent(1.0f, 0.0f, 0.0f, kDefaultTangentHandedness);
   auto& v = result.mesh.vertices;
   v.reserve(tris.size() * kTexturedMeshFloatsPerVertex);
   for (const glm::vec3& p : tris) {

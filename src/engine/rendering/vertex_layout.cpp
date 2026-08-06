@@ -111,8 +111,9 @@ VertexLayoutInfo GetVertexLayoutInfo(VertexLayout layout) {
     }
 
     case VertexLayout::kTexturedMesh: {
-      // pos(vec3) + uv(vec2) + normal(vec3) + tangent(vec3) = 11 floats = 44
-      // bytes
+      // pos(vec3) + uv(vec2) + normal(vec3) + tangent(vec4) = 12 floats = 48
+      // bytes. Tangent w carries bitangent handedness -- see
+      // kTexturedMeshFloatsPerVertex in textured_mesh_builders.hpp.
       info.attributes.resize(4);
 
       info.attributes[0].format = wgpu::VertexFormat::Float32x3;
@@ -127,11 +128,11 @@ VertexLayoutInfo GetVertexLayoutInfo(VertexLayout layout) {
       info.attributes[2].offset = sizeof(float) * 5;
       info.attributes[2].shaderLocation = 2;
 
-      info.attributes[3].format = wgpu::VertexFormat::Float32x3;
+      info.attributes[3].format = wgpu::VertexFormat::Float32x4;
       info.attributes[3].offset = sizeof(float) * 8;
       info.attributes[3].shaderLocation = 3;
 
-      info.stride = sizeof(float) * 11;
+      info.stride = sizeof(float) * 12;
       break;
     }
 

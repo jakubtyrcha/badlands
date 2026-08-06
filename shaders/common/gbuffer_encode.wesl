@@ -55,12 +55,16 @@ fn packVoxelFoliageGBuffer(worldNormal: vec3<f32>, albedo: vec3<f32>,
 // samples (2D, cubemap, and/or tint-multiplied — sampling differs by caller;
 // the assembly below does not), so this is shared by normalmapped.wesl's 2D
 // fs_main and instanced_gbuffer.wesl's fs_main.
-fn packNormalMappedGBuffer(worldNormal: vec3<f32>, worldTangent: vec3<f32>,
+fn packNormalMappedGBuffer(worldNormal: vec3<f32>, worldTangent: vec4<f32>,
                            albedo: vec3<f32>, normalMap: vec3<f32>, arm: vec4<f32>) -> GBufferOutput {
     // Reconstruct TBN matrix from interpolated vectors
     let N = normalize(worldNormal);
-    let T = normalize(worldTangent - N * dot(worldTangent, N)); // Gram-Schmidt
-    let B = cross(N, T);
+    let T = normalize(worldTangent.xyz - N * dot(worldTangent.xyz, N)); // Gram-Schmidt
+    // worldTangent.w is the bitangent handedness (+1/-1). A mirrored UV island
+    // parameterises left-handed, and without the sign its normal map's V
+    // response comes out inverted -- bumps lit from the wrong side. Negating T
+    // instead would not fix it, only move the inversion onto U.
+    let B = worldTangent.w * cross(N, T);
     let TBN = mat3x3<f32>(T, B, N);
 
     let roughness = arm.g;

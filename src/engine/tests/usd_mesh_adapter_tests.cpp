@@ -30,8 +30,9 @@ UsdMeshData MakeQuad() {
                     1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f};
   mesh.normals = {0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,
                   0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f};
-  mesh.tangents = {1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
-                   1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
+  // xyzw: +X tangent, right-handed (w = +1) on every vertex.
+  mesh.tangents = {1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f, 1.0f,
+                   1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f, 1.0f};
   mesh.uvs = {0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f};
   mesh.indices = {0, 1, 2, 0, 2, 3};
   return mesh;
@@ -246,9 +247,10 @@ TEST_CASE("a degenerate tangent yields a finite vector, never NaN",
           "[usd][adapter]") {
   UsdMeshData mesh = MakeQuad();
   // Tydra's solver emits a zero tangent for any triangle with zero UV area.
-  mesh.tangents[3] = 0.0f;
+  // Vertex 1's xyz, leaving its w intact.
   mesh.tangents[4] = 0.0f;
   mesh.tangents[5] = 0.0f;
+  mesh.tangents[6] = 0.0f;
 
   const auto models = BuildImportedModels(
       MakeScene(std::move(mesh), false, 1.0f), DefaultBinding());
@@ -260,6 +262,34 @@ TEST_CASE("a degenerate tangent yields a finite vector, never NaN",
   for (size_t c = 8; c < 11; ++c) {
     CHECK(std::isfinite(v[1 * kStride + c]));
   }
+}
+
+TEST_CASE("tangent handedness reaches the vertex buffer", "[usd][adapter]") {
+  UsdMeshData mesh = MakeQuad();
+  mesh.tangents[3] = -1.0f;  // vertex 0's w: a mirrored UV island
+
+  const auto models = BuildImportedModels(
+      MakeScene(std::move(mesh), false, 1.0f), DefaultBinding());
+  REQUIRE(models.size() == 1);
+
+  const auto& v = models[0].mesh.mesh.vertices;
+  // Float 11 is the handedness the shader multiplies into cross(N, T). This is
+  // the whole reason the vertex is 12 floats rather than 11 -- dropping it
+  // inverted the normal map's V response on mirrored islands.
+  CHECK(v[0 * kStride + 11] == Catch::Approx(-1.0f));
+  CHECK(v[1 * kStride + 11] == Catch::Approx(1.0f));
+}
+
+TEST_CASE("a mirroring transform flips tangent handedness", "[usd][adapter]") {
+  UsdMeshData mesh = MakeQuad();
+  mesh.transform = {-1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+
+  const auto models = BuildImportedModels(
+      MakeScene(std::move(mesh), false, 1.0f), DefaultBinding());
+  const auto& v = models[0].mesh.mesh.vertices;
+  // A mirror reverses the frame's chirality, so a right-handed source basis
+  // becomes left-handed once placed.
+  CHECK(v[0 * kStride + 11] == Catch::Approx(-1.0f));
 }
 
 TEST_CASE("a failed load converts to nothing", "[usd][adapter]") {

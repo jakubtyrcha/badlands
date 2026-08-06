@@ -54,7 +54,7 @@ std::vector<ImportedModel> BuildImportedModels(
     // say "this one is absent", so a partial mesh would ship zeroed floats.
     if (src.normals.size() != vertex_count * 3 ||
         src.uvs.size() != vertex_count * 2 ||
-        src.tangents.size() != vertex_count * 3) {
+        src.tangents.size() != vertex_count * 4) {
       spdlog::warn("BuildImportedModels: mesh '{}' is missing normals, UVs or"
                    " tangents -- skipping",
                    src.name);
@@ -105,8 +105,15 @@ std::vector<ImportedModel> BuildImportedModels(
       // NaN is not.
       glm::vec3 normal = SafeNormalize(normal_xform * Vec3At(src.normals, i),
                                        glm::vec3(0.0f, 0.0f, 1.0f));
-      glm::vec3 tangent = SafeNormalize(tangent_xform * Vec3At(src.tangents, i),
-                                        glm::vec3(1.0f, 0.0f, 0.0f));
+      const glm::vec3 tangent_xyz{src.tangents[i * 4 + 0], src.tangents[i * 4 + 1],
+                                  src.tangents[i * 4 + 2]};
+      glm::vec3 tangent =
+          SafeNormalize(tangent_xform * tangent_xyz, glm::vec3(1.0f, 0.0f, 0.0f));
+      // Handedness describes the UV parameterisation, so a placement transform
+      // leaves it alone -- except a MIRRORING one, which reverses the frame's
+      // chirality and so flips it.
+      float handedness = src.tangents[i * 4 + 3] < 0.0f ? -1.0f : 1.0f;
+      if (mirrored) handedness = -handedness;
 
       if (scene.z_up) {
         position = ZUpToYUp(position);
@@ -133,6 +140,7 @@ std::vector<ImportedModel> BuildImportedModels(
       v[8] = tangent.x;
       v[9] = tangent.y;
       v[10] = tangent.z;
+      v[11] = handedness;
     }
 
     model.mesh.local_bounds = ComputeLocalAabb(mesh);

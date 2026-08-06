@@ -14,8 +14,20 @@
 namespace badlands {
 
 // Vertex layout constants
+//
+// The tangent is a VEC4: xyz is the tangent direction, w is the bitangent
+// handedness (+1 or -1) that the shader multiplies into cross(N, T). Three
+// components cannot express it -- negating T to flip the bitangent inverts the
+// normal map's U response instead of its V, which is equally wrong. USD and
+// glTF both author mirrored UV islands with w = -1, so a 3-component tangent
+// silently mis-lights every mirrored island on an imported model.
 inline constexpr size_t kTexturedMeshFloatsPerVertex =
-    11;  // pos(3)+uv(2)+normal(3)+tangent(3)
+    12;  // pos(3)+uv(2)+normal(3)+tangent(4)
+
+// The handedness every procedurally generated mesh uses. They are all built
+// with a consistent right-handed UV parameterisation, so none of them needs
+// the -1 case; it exists for imported geometry.
+inline constexpr float kDefaultTangentHandedness = 1.0f;
 inline constexpr size_t kCubeMapMeshFloatsPerVertex =
     9;  // pos(3)+normal(3)+tangent(3)
 

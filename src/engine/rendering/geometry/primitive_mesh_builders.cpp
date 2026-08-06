@@ -26,7 +26,7 @@ TexturedMeshResult Finish(std::vector<float>&& vertices, const Aabb& bounds) {
 TexturedMeshResult GenerateCube(glm::vec3 half_extents) {
   struct Face {
     glm::vec3 normal;
-    glm::vec3 tangent;
+    glm::vec4 tangent;
     glm::vec3 corners[4];  // CCW viewed from outside
   };
 
@@ -34,32 +34,32 @@ TexturedMeshResult GenerateCube(glm::vec3 half_extents) {
   const Face faces[6] = {
       // +Y (top)
       {glm::vec3(0, 1, 0),
-       glm::vec3(1, 0, 0),
+       glm::vec4(1, 0, 0, kDefaultTangentHandedness),
        {glm::vec3(-he.x, he.y, -he.z), glm::vec3(-he.x, he.y, he.z),
         glm::vec3(he.x, he.y, he.z), glm::vec3(he.x, he.y, -he.z)}},
       // +X
       {glm::vec3(1, 0, 0),
-       glm::vec3(0, 0, -1),
+       glm::vec4(0, 0, -1, kDefaultTangentHandedness),
        {glm::vec3(he.x, he.y, he.z), glm::vec3(he.x, -he.y, he.z),
         glm::vec3(he.x, -he.y, -he.z), glm::vec3(he.x, he.y, -he.z)}},
       // -X
       {glm::vec3(-1, 0, 0),
-       glm::vec3(0, 0, 1),
+       glm::vec4(0, 0, 1, kDefaultTangentHandedness),
        {glm::vec3(-he.x, he.y, -he.z), glm::vec3(-he.x, -he.y, -he.z),
         glm::vec3(-he.x, -he.y, he.z), glm::vec3(-he.x, he.y, he.z)}},
       // +Z
       {glm::vec3(0, 0, 1),
-       glm::vec3(1, 0, 0),
+       glm::vec4(1, 0, 0, kDefaultTangentHandedness),
        {glm::vec3(-he.x, he.y, he.z), glm::vec3(-he.x, -he.y, he.z),
         glm::vec3(he.x, -he.y, he.z), glm::vec3(he.x, he.y, he.z)}},
       // -Z
       {glm::vec3(0, 0, -1),
-       glm::vec3(-1, 0, 0),
+       glm::vec4(-1, 0, 0, kDefaultTangentHandedness),
        {glm::vec3(he.x, he.y, -he.z), glm::vec3(he.x, -he.y, -he.z),
         glm::vec3(-he.x, -he.y, -he.z), glm::vec3(-he.x, he.y, -he.z)}},
       // -Y (bottom)
       {glm::vec3(0, -1, 0),
-       glm::vec3(1, 0, 0),
+       glm::vec4(1, 0, 0, kDefaultTangentHandedness),
        {glm::vec3(-he.x, -he.y, -he.z), glm::vec3(he.x, -he.y, -he.z),
         glm::vec3(he.x, -he.y, he.z), glm::vec3(-he.x, -he.y, he.z)}},
   };
@@ -102,7 +102,8 @@ TexturedMeshResult GenerateCylinder(float radius, float height, int segments) {
     glm::vec3 t0(radius * c0, height, radius * s0);
     glm::vec3 t1(radius * c1, height, radius * s1);
     glm::vec3 n0(c0, 0.0f, s0), n1(c1, 0.0f, s1);
-    glm::vec3 tan0(-s0, 0.0f, c0), tan1(-s1, 0.0f, c1);
+    glm::vec4 tan0(-s0, 0.0f, c0, kDefaultTangentHandedness),
+        tan1(-s1, 0.0f, c1, kDefaultTangentHandedness);
 
     // Side (two triangles), smooth radial normals, tangent along circumference.
     // Wound so the geometric (front-face) normal matches the outward radial
@@ -115,15 +116,15 @@ TexturedMeshResult GenerateCylinder(float radius, float height, int segments) {
     PushVertex(verts, t1, {u1, 1.0f}, n1, tan1);
 
     // Top cap fan, normal +Y (wound CCW seen from above / outside).
-    PushVertex(verts, t0, cap_uv(t0), glm::vec3(0, 1, 0), glm::vec3(1, 0, 0));
-    PushVertex(verts, top_center, glm::vec2(0.5f, 0.5f), glm::vec3(0, 1, 0), glm::vec3(1, 0, 0));
-    PushVertex(verts, t1, cap_uv(t1), glm::vec3(0, 1, 0), glm::vec3(1, 0, 0));
+    PushVertex(verts, t0, cap_uv(t0), glm::vec3(0, 1, 0), glm::vec4(1, 0, 0, kDefaultTangentHandedness));
+    PushVertex(verts, top_center, glm::vec2(0.5f, 0.5f), glm::vec3(0, 1, 0), glm::vec4(1, 0, 0, kDefaultTangentHandedness));
+    PushVertex(verts, t1, cap_uv(t1), glm::vec3(0, 1, 0), glm::vec4(1, 0, 0, kDefaultTangentHandedness));
 
     // Bottom cap fan, normal -Y (wound CCW seen from below / outside).
-    PushVertex(verts, b1, cap_uv(b1), glm::vec3(0, -1, 0), glm::vec3(1, 0, 0));
+    PushVertex(verts, b1, cap_uv(b1), glm::vec3(0, -1, 0), glm::vec4(1, 0, 0, kDefaultTangentHandedness));
     PushVertex(verts, bottom_center, glm::vec2(0.5f, 0.5f), glm::vec3(0, -1, 0),
-              glm::vec3(1, 0, 0));
-    PushVertex(verts, b0, cap_uv(b0), glm::vec3(0, -1, 0), glm::vec3(1, 0, 0));
+              glm::vec4(1, 0, 0, kDefaultTangentHandedness));
+    PushVertex(verts, b0, cap_uv(b0), glm::vec3(0, -1, 0), glm::vec4(1, 0, 0, kDefaultTangentHandedness));
   }
 
   return Finish(std::move(verts), Aabb::FromMinMax(glm::vec3(-radius, 0.0f, -radius),
@@ -152,7 +153,7 @@ TexturedMeshResult GenerateCone(float radius, float height, int segments) {
     glm::vec3 edge = b1 - b0;
     glm::vec3 n = glm::length(edge) > 1e-8f ? glm::normalize(glm::cross(apex - b0, edge))
                                             : glm::vec3(0, 1, 0);
-    glm::vec3 tan = glm::length(edge) > 1e-8f ? glm::normalize(edge) : glm::vec3(1, 0, 0);
+    const glm::vec4 tan(glm::length(edge) > 1e-8f ? glm::normalize(edge) : glm::vec3(1, 0, 0), kDefaultTangentHandedness);
 
     // Side: base0 -> apex -> base1. Wound so the geometric (front-face) normal
     // matches the outward shading normal `n`, so the outer surface survives the
@@ -162,9 +163,9 @@ TexturedMeshResult GenerateCone(float radius, float height, int segments) {
     PushVertex(verts, b1, {u1, 0.0f}, n, tan);
 
     // Base cap (downward), matching GenerateCylinder's bottom cap.
-    PushVertex(verts, b1, cap_uv(b1), glm::vec3(0, -1, 0), glm::vec3(1, 0, 0));
-    PushVertex(verts, base_center, glm::vec2(0.5f, 0.5f), glm::vec3(0, -1, 0), glm::vec3(1, 0, 0));
-    PushVertex(verts, b0, cap_uv(b0), glm::vec3(0, -1, 0), glm::vec3(1, 0, 0));
+    PushVertex(verts, b1, cap_uv(b1), glm::vec3(0, -1, 0), glm::vec4(1, 0, 0, kDefaultTangentHandedness));
+    PushVertex(verts, base_center, glm::vec2(0.5f, 0.5f), glm::vec3(0, -1, 0), glm::vec4(1, 0, 0, kDefaultTangentHandedness));
+    PushVertex(verts, b0, cap_uv(b0), glm::vec3(0, -1, 0), glm::vec4(1, 0, 0, kDefaultTangentHandedness));
   }
 
   return Finish(std::move(verts), Aabb::FromMinMax(glm::vec3(-radius, 0.0f, -radius),
@@ -190,7 +191,7 @@ TexturedMeshResult GenerateGableRoof(glm::vec3 size) {
   auto quad = [&verts](const glm::vec3& a, const glm::vec3& b, const glm::vec3& c,
                        const glm::vec3& d) {
     glm::vec3 n = glm::normalize(glm::cross(b - a, c - a));
-    glm::vec3 tan = glm::normalize(b - a);
+    const glm::vec4 tan(glm::normalize(b - a), kDefaultTangentHandedness);
     const glm::vec2 uv[4] = {{0.0f, 1.0f}, {1.0f, 1.0f}, {1.0f, 0.0f}, {0.0f, 0.0f}};
     const glm::vec3 v[4] = {a, b, c, d};
     const int tri[6] = {0, 1, 2, 0, 2, 3};
@@ -206,7 +207,7 @@ TexturedMeshResult GenerateGableRoof(glm::vec3 size) {
   // each end a proper (non-degenerate) triangle UV instead.
   auto tri_face = [&verts](const glm::vec3& a, const glm::vec3& b, const glm::vec3& c) {
     glm::vec3 n = glm::normalize(glm::cross(b - a, c - a));
-    glm::vec3 tan = glm::normalize(b - a);
+    const glm::vec4 tan(glm::normalize(b - a), kDefaultTangentHandedness);
     const glm::vec2 uv[3] = {{0.0f, 0.0f}, {1.0f, 0.0f}, {0.5f, 1.0f}};
     const glm::vec3 v[3] = {a, b, c};
     for (int i = 0; i < 3; ++i) {
@@ -265,7 +266,8 @@ TexturedMeshResult GenerateCapsule(float radius, float cylinder_height, int segm
       auto c = vert(y1, r1, ny1, j + 1);
       auto d = vert(y0, r0, ny0, j + 1);
       for (const auto& v : {a, b, c, a, c, d}) {
-        PushVertex(verts, std::get<0>(v), std::get<1>(v), std::get<2>(v), std::get<3>(v));
+        PushVertex(verts, std::get<0>(v), std::get<1>(v), std::get<2>(v),
+                   glm::vec4(std::get<3>(v), kDefaultTangentHandedness));
       }
     }
   }

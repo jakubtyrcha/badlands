@@ -385,13 +385,13 @@ std::array<std::pair<uint32_t, uint32_t>, kInstCount> ExpectedPixels() {
   return px;
 }
 
-// One kTexturedMesh quad (pos3+uv2+normal3+tangent3), z=0, +Z normal.
+// One kTexturedMesh quad (pos3+uv2+normal3+tangent4), z=0, +Z normal.
 std::vector<float> QuadVertices() {
   return {
-      -1, -1, 0, 0, 0, 0, 0, 1, 1, 0, 0,  //
-      1,  -1, 0, 1, 0, 0, 0, 1, 1, 0, 0,  //
-      1,  1,  0, 1, 1, 0, 0, 1, 1, 0, 0,  //
-      -1, 1,  0, 0, 1, 0, 0, 1, 1, 0, 0,  //
+      -1, -1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1,  //
+      1,  -1, 0, 1, 0, 0, 0, 1, 1, 0, 0, 1,  //
+      1,  1,  0, 1, 1, 0, 0, 1, 1, 0, 0, 1,  //
+      -1, 1,  0, 0, 1, 0, 0, 1, 1, 0, 0, 1,  //
   };
 }
 
@@ -1450,13 +1450,13 @@ std::pair<uint32_t, uint32_t> WorldXyToPixel(glm::vec2 xy) {
           uint32_t((1.0f - (clip_y * 0.5f + 0.5f)) * float(kInstTarget))};
 }
 
-// A quad (pos3+uv2+normal3+tangent3, +Z normal) of the given half-extent.
+// A quad (pos3+uv2+normal3+tangent4, +Z normal) of the given half-extent.
 std::vector<float> QuadVerticesSized(float h) {
   return {
-      -h, -h, 0, 0, 0, 0, 0, 1, 1, 0, 0,  //
-      h,  -h, 0, 1, 0, 0, 0, 1, 1, 0, 0,  //
-      h,  h,  0, 1, 1, 0, 0, 1, 1, 0, 0,  //
-      -h, h,  0, 0, 1, 0, 0, 1, 1, 0, 0,  //
+      -h, -h, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1,  //
+      h,  -h, 0, 1, 0, 0, 0, 1, 1, 0, 0, 1,  //
+      h,  h,  0, 1, 1, 0, 0, 1, 1, 0, 0, 1,  //
+      -h, h,  0, 0, 1, 0, 0, 1, 1, 0, 0, 1,  //
   };
 }
 
@@ -1467,10 +1467,10 @@ std::vector<float> QuadVerticesSized(float h) {
 // per-instance world transform.
 std::vector<float> QuadVerticesOffset(float h, glm::vec2 offset) {
   return {
-      offset.x - h, offset.y - h, 0, 0, 0, 0, 0, 1, 1, 0, 0,  //
-      offset.x + h, offset.y - h, 0, 1, 0, 0, 0, 1, 1, 0, 0,  //
-      offset.x + h, offset.y + h, 0, 1, 1, 0, 0, 1, 1, 0, 0,  //
-      offset.x - h, offset.y + h, 0, 0, 1, 0, 0, 1, 1, 0, 0,  //
+      offset.x - h, offset.y - h, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1,  //
+      offset.x + h, offset.y - h, 0, 1, 0, 0, 0, 1, 1, 0, 0, 1,  //
+      offset.x + h, offset.y + h, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1,  //
+      offset.x - h, offset.y + h, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1,  //
   };
 }
 
@@ -3904,15 +3904,16 @@ std::vector<float> BuildTetVertices(float brightness) {
   const std::array<glm::vec3, 4> pos = {kTetNearP0, kTetNearP1, kTetNearP2,
                                         kTetFarApex};
   std::vector<float> verts;
-  verts.reserve(4 * 11);
+  verts.reserve(4 * kTexturedMeshFloatsPerVertex);
   for (const glm::vec3& p : pos) {
     // The normal/tangent values are never read by this test (the G-buffer
     // readback only asserts material.a/.g/.r, which packVoxelFoliageGBuffer
     // derives from params/tint, not the normal) -- any finite unit vectors
     // are fine.
-    const float v[11] = {p.x,  p.y,  p.z,  brightness, 0.0f, 0.0f,
-                         0.0f, 1.0f, 1.0f, 0.0f,       0.0f};
-    verts.insert(verts.end(), v, v + 11);
+    const float v[kTexturedMeshFloatsPerVertex] = {
+        p.x,  p.y,  p.z,  brightness, 0.0f, 0.0f,
+        0.0f, 1.0f, 1.0f, 0.0f,       0.0f, 1.0f};
+    verts.insert(verts.end(), v, v + kTexturedMeshFloatsPerVertex);
   }
   return verts;
 }

@@ -120,10 +120,10 @@ TEST_CASE("SplatLeafCards: hand-built single card occupies exactly the expected 
   const float x0 = 0.02f, x1 = 0.03f;  // width 0.01 (< d=0.05 -> nu=1)
   const float y0 = 0.0f, y1 = 0.43f;   // height 0.43 (-> nv=9, 3 samples/cell)
   const float z = 0.02f;               // flat card; not a cell_size multiple
-  PushVertex(leaf_mesh.vertices, {x0, y1, z}, {0, 1}, {0, 0, 1}, {1, 0, 0});  // v0 top-left
-  PushVertex(leaf_mesh.vertices, {x0, y0, z}, {0, 0}, {0, 0, 1}, {1, 0, 0});  // v1 bottom-left
-  PushVertex(leaf_mesh.vertices, {x1, y0, z}, {1, 0}, {0, 0, 1}, {1, 0, 0});  // v2 bottom-right
-  PushVertex(leaf_mesh.vertices, {x1, y1, z}, {1, 1}, {0, 0, 1}, {1, 0, 0});  // v3 top-right
+  PushVertex(leaf_mesh.vertices, {x0, y1, z}, {0, 1}, {0, 0, 1}, {1, 0, 0, 1});  // v0 top-left
+  PushVertex(leaf_mesh.vertices, {x0, y0, z}, {0, 0}, {0, 0, 1}, {1, 0, 0, 1});  // v1 bottom-left
+  PushVertex(leaf_mesh.vertices, {x1, y0, z}, {1, 0}, {0, 0, 1}, {1, 0, 0, 1});  // v2 bottom-right
+  PushVertex(leaf_mesh.vertices, {x1, y1, z}, {1, 1}, {0, 0, 1}, {1, 0, 0, 1});  // v3 top-right
   leaf_mesh.vertex_count = 4;
   leaf_mesh.indices = {0, 1, 2, 0, 2, 3};
 
@@ -203,10 +203,10 @@ TEST_CASE("SplatLeafCards: fails loudly (empty grid) past the 512-cells-per-axis
   StaticTexturedMeshComponent leaf_mesh;
   const float hw = 39.0f;  // width 78 -> 78/0.15 = 520 cells, > 512
   const float z = 0.02f;   // flat card; not a cell_size multiple (see the hand-built-card test)
-  PushVertex(leaf_mesh.vertices, {-hw, 0.1f, z}, {0, 1}, {0, 0, 1}, {1, 0, 0});
-  PushVertex(leaf_mesh.vertices, {-hw, 0.0f, z}, {0, 0}, {0, 0, 1}, {1, 0, 0});
-  PushVertex(leaf_mesh.vertices, {hw, 0.0f, z}, {1, 0}, {0, 0, 1}, {1, 0, 0});
-  PushVertex(leaf_mesh.vertices, {hw, 0.1f, z}, {1, 1}, {0, 0, 1}, {1, 0, 0});
+  PushVertex(leaf_mesh.vertices, {-hw, 0.1f, z}, {0, 1}, {0, 0, 1}, {1, 0, 0, 1});
+  PushVertex(leaf_mesh.vertices, {-hw, 0.0f, z}, {0, 0}, {0, 0, 1}, {1, 0, 0, 1});
+  PushVertex(leaf_mesh.vertices, {hw, 0.0f, z}, {1, 0}, {0, 0, 1}, {1, 0, 0, 1});
+  PushVertex(leaf_mesh.vertices, {hw, 0.1f, z}, {1, 1}, {0, 0, 1}, {1, 0, 0, 1});
   leaf_mesh.vertex_count = 4;
   leaf_mesh.indices = {0, 1, 2, 0, 2, 3};
 
@@ -227,10 +227,10 @@ TEST_CASE("SplatLeafCards: >512-axis guard fires even when another axis is degen
   StaticTexturedMeshComponent leaf_mesh;
   const float hw = 39.0f;  // width 78 -> 78/0.15 = 520 cells, > 512
   const float z = 0.0f;    // exactly a cell_size multiple -> dims.z degenerates to 0
-  PushVertex(leaf_mesh.vertices, {-hw, 0.1f, z}, {0, 1}, {0, 0, 1}, {1, 0, 0});
-  PushVertex(leaf_mesh.vertices, {-hw, 0.0f, z}, {0, 0}, {0, 0, 1}, {1, 0, 0});
-  PushVertex(leaf_mesh.vertices, {hw, 0.0f, z}, {1, 0}, {0, 0, 1}, {1, 0, 0});
-  PushVertex(leaf_mesh.vertices, {hw, 0.1f, z}, {1, 1}, {0, 0, 1}, {1, 0, 0});
+  PushVertex(leaf_mesh.vertices, {-hw, 0.1f, z}, {0, 1}, {0, 0, 1}, {1, 0, 0, 1});
+  PushVertex(leaf_mesh.vertices, {-hw, 0.0f, z}, {0, 0}, {0, 0, 1}, {1, 0, 0, 1});
+  PushVertex(leaf_mesh.vertices, {hw, 0.0f, z}, {1, 0}, {0, 0, 1}, {1, 0, 0, 1});
+  PushVertex(leaf_mesh.vertices, {hw, 0.1f, z}, {1, 1}, {0, 0, 1}, {1, 0, 0, 1});
   leaf_mesh.vertex_count = 4;
   leaf_mesh.indices = {0, 1, 2, 0, 2, 3};
 
@@ -407,10 +407,10 @@ TEST_CASE("SplatLeafCards: fails loudly (empty grid) when a vertex coordinate "
   StaticTexturedMeshComponent leaf_mesh;
   constexpr float kHuge = 1e30f;
   const float z = 0.02f;  // flat card; not a cell_size multiple
-  PushVertex(leaf_mesh.vertices, {0.0f, 0.1f, z}, {0, 1}, {0, 0, 1}, {1, 0, 0});
-  PushVertex(leaf_mesh.vertices, {0.0f, 0.0f, z}, {0, 0}, {0, 0, 1}, {1, 0, 0});
-  PushVertex(leaf_mesh.vertices, {kHuge, 0.0f, z}, {1, 0}, {0, 0, 1}, {1, 0, 0});
-  PushVertex(leaf_mesh.vertices, {kHuge, 0.1f, z}, {1, 1}, {0, 0, 1}, {1, 0, 0});
+  PushVertex(leaf_mesh.vertices, {0.0f, 0.1f, z}, {0, 1}, {0, 0, 1}, {1, 0, 0, 1});
+  PushVertex(leaf_mesh.vertices, {0.0f, 0.0f, z}, {0, 0}, {0, 0, 1}, {1, 0, 0, 1});
+  PushVertex(leaf_mesh.vertices, {kHuge, 0.0f, z}, {1, 0}, {0, 0, 1}, {1, 0, 0, 1});
+  PushVertex(leaf_mesh.vertices, {kHuge, 0.1f, z}, {1, 1}, {0, 0, 1}, {1, 0, 0, 1});
   leaf_mesh.vertex_count = 4;
   leaf_mesh.indices = {0, 1, 2, 0, 2, 3};
 
@@ -443,10 +443,10 @@ TEST_CASE("SplatLeafCards: fails loudly (empty grid) when cell_size is NaN") {
   // here exactly like this.
   StaticTexturedMeshComponent leaf_mesh;
   const float z = 0.02f;
-  PushVertex(leaf_mesh.vertices, {0.0f, 0.1f, z}, {0, 1}, {0, 0, 1}, {1, 0, 0});
-  PushVertex(leaf_mesh.vertices, {0.0f, 0.0f, z}, {0, 0}, {0, 0, 1}, {1, 0, 0});
-  PushVertex(leaf_mesh.vertices, {0.03f, 0.0f, z}, {1, 0}, {0, 0, 1}, {1, 0, 0});
-  PushVertex(leaf_mesh.vertices, {0.03f, 0.1f, z}, {1, 1}, {0, 0, 1}, {1, 0, 0});
+  PushVertex(leaf_mesh.vertices, {0.0f, 0.1f, z}, {0, 1}, {0, 0, 1}, {1, 0, 0, 1});
+  PushVertex(leaf_mesh.vertices, {0.0f, 0.0f, z}, {0, 0}, {0, 0, 1}, {1, 0, 0, 1});
+  PushVertex(leaf_mesh.vertices, {0.03f, 0.0f, z}, {1, 0}, {0, 0, 1}, {1, 0, 0, 1});
+  PushVertex(leaf_mesh.vertices, {0.03f, 0.1f, z}, {1, 1}, {0, 0, 1}, {1, 0, 0, 1});
   leaf_mesh.vertex_count = 4;
   leaf_mesh.indices = {0, 1, 2, 0, 2, 3};
 
@@ -482,10 +482,10 @@ TEST_CASE("SplatLeafCards: fails loudly (empty grid) when an entire axis is "
   // `>= INT_MIN` too, not only `<= 512.0f`.
   StaticTexturedMeshComponent leaf_mesh;
   const float nan = std::numeric_limits<float>::quiet_NaN();
-  PushVertex(leaf_mesh.vertices, {nan, 0.1f, 0.02f}, {0, 1}, {0, 0, 1}, {1, 0, 0});
-  PushVertex(leaf_mesh.vertices, {nan, 0.0f, 0.02f}, {0, 0}, {0, 0, 1}, {1, 0, 0});
-  PushVertex(leaf_mesh.vertices, {nan, 0.0f, 0.03f}, {1, 0}, {0, 0, 1}, {1, 0, 0});
-  PushVertex(leaf_mesh.vertices, {nan, 0.1f, 0.03f}, {1, 1}, {0, 0, 1}, {1, 0, 0});
+  PushVertex(leaf_mesh.vertices, {nan, 0.1f, 0.02f}, {0, 1}, {0, 0, 1}, {1, 0, 0, 1});
+  PushVertex(leaf_mesh.vertices, {nan, 0.0f, 0.02f}, {0, 0}, {0, 0, 1}, {1, 0, 0, 1});
+  PushVertex(leaf_mesh.vertices, {nan, 0.0f, 0.03f}, {1, 0}, {0, 0, 1}, {1, 0, 0, 1});
+  PushVertex(leaf_mesh.vertices, {nan, 0.1f, 0.03f}, {1, 1}, {0, 0, 1}, {1, 0, 0, 1});
   leaf_mesh.vertex_count = 4;
   leaf_mesh.indices = {0, 1, 2, 0, 2, 3};
 

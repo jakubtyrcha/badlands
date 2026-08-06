@@ -13,7 +13,7 @@
 //                When disabled, uses 2D texture sampling
 // - shadow_pass: When enabled, outputs depth only (for shadow map generation)
 //
-// Vertex layout: pos(3) + uv(2) + normal(3) + tangent(3)
+// Vertex layout: pos(3) + uv(2) + normal(3) + tangent(4)
 //
 // Textures:
 // - Albedo: RGB color (2D or cubemap)
@@ -60,14 +60,14 @@ struct NormalmappedUniforms {
 @group(1) @binding(0) var<uniform> object: NormalmappedUniforms;
 
 // Vertex input differs based on mode:
-// - flat_2d mode: pos(3) + uv(2) + normal(3) + tangent(3) at locations 0,1,2,3
+// - flat_2d mode: pos(3) + uv(2) + normal(3) + tangent(4) at locations 0,1,2,3
 // - sphere_mode:  pos(3) + normal(3) + tangent(3) at locations 0,1,2 (no UV needed)
 @if(!sphere_mode)
 struct VertexInput {
     @location(0) pos: vec3<f32>,
     @location(1) uv: vec2<f32>,
     @location(2) normal: vec3<f32>,
-    @location(3) tangent: vec3<f32>,
+    @location(3) tangent: vec4<f32>,
 }
 @if(sphere_mode)
 struct VertexInput {
@@ -82,7 +82,7 @@ struct VertexOutputGBuffer {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) worldNormal: vec3<f32>,
-    @location(2) worldTangent: vec3<f32>,
+    @location(2) worldTangent: vec4<f32>,
 }
 
 // GBuffer pass vertex output - sphere mode
@@ -91,7 +91,7 @@ struct VertexOutputGBuffer {
     @builtin(position) position: vec4<f32>,
     @location(0) direction: vec3<f32>,
     @location(1) worldNormal: vec3<f32>,
-    @location(2) worldTangent: vec3<f32>,
+    @location(2) worldTangent: vec4<f32>,
 }
 
 // Shadow pass vertex output (position only)
@@ -112,7 +112,8 @@ fn vs_main(input: VertexInput) -> VertexOutputGBuffer {
 
     // Transform normal and tangent to world space
     output.worldNormal = normalize((object.modelMatrix * vec4<f32>(input.normal, 0.0)).xyz);
-    output.worldTangent = normalize((object.modelMatrix * vec4<f32>(input.tangent, 0.0)).xyz);
+    output.worldTangent = vec4<f32>(normalize(
+        (object.modelMatrix * vec4<f32>(input.tangent.xyz, 0.0)).xyz), input.tangent.w);
     output.uv = input.uv;
 
     return output;
@@ -132,7 +133,10 @@ fn vs_main(input: VertexInput) -> VertexOutputGBuffer {
 
     // For sphere, normal is same as direction (in local space)
     output.worldNormal = normalize((object.modelMatrix * vec4<f32>(dir, 0.0)).xyz);
-    output.worldTangent = normalize((object.modelMatrix * vec4<f32>(input.tangent, 0.0)).xyz);
+    // kCubeMapMesh keeps a 3-component tangent (it has no UVs to mirror, so no
+    // handedness to carry) -- hence the constant 1.0 rather than input.tangent.w.
+    output.worldTangent = vec4<f32>(
+        normalize((object.modelMatrix * vec4<f32>(input.tangent, 0.0)).xyz), 1.0);
     output.direction = dir;
 
     return output;
@@ -186,8 +190,8 @@ fn fs_main(input: VertexOutputGBuffer) -> GBufferOutput {
 
     // Reconstruct TBN matrix from interpolated vectors
     let N = normalize(input.worldNormal);
-    let T = normalize(input.worldTangent - N * dot(input.worldTangent, N));
-    let B = cross(N, T);
+    let T = normalize(input.worldTangent.xyz - N * dot(input.worldTangent.xyz, N));
+    let B = input.worldTangent.w * cross(N, T);
     let TBN = mat3x3<f32>(T, B, N);
 
     // Sample cubemap textures

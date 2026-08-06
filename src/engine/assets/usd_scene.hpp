@@ -49,7 +49,10 @@ struct UsdMeshData {
   std::vector<float> positions;   // xyz triples, SOURCE units and SOURCE axis
   std::vector<float> normals;     // xyz triples
   std::vector<float> uvs;         // uv pairs
-  std::vector<float> tangents;    // xyz triples
+  // xyzw QUADS, not triples: w is the bitangent handedness (+1/-1) that the
+  // shader multiplies into cross(N, T). Mirrored UV islands author -1, and
+  // dropping it inverts their normal map's V response.
+  std::vector<float> tangents;
   std::vector<uint32_t> indices;  // triangle list, indexes the arrays above
 
   // USD's `orientation`. false means the winding is reversed relative to what

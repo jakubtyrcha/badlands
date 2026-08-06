@@ -38,9 +38,9 @@ std::vector<float> CopyFloatAttribute(const tydra::VertexAttribute& attr,
   // untouched instead of recomputing it. Rejecting it would silently throw
   // away the tangents on exactly the meshes that shipped good ones.
   //
-  // The w handedness is dropped: the engine's vertex layout is tangent(3) and
-  // every procedural mesh here already relies on the implied convention.
-  if (attr.format == tydra::VertexAttributeFormat::Half4 && components == 3) {
+  // `components == 4` asks for the handedness to be kept; see CopyTangents.
+  if (attr.format == tydra::VertexAttributeFormat::Half4 &&
+      (components == 3 || components == 4)) {
     // Same guard the float path applies below, and it is not redundant:
     // vertex_count() divides by elementSize * format_size, so an elementSize
     // of 2 still passes the count check while the indexing below reads
@@ -59,10 +59,11 @@ std::vector<float> CopyFloatAttribute(const tydra::VertexAttribute& attr,
     }
     const auto* halves =
         reinterpret_cast<const tinyusdz::value::half*>(attr.get_data().data());
-    std::vector<float> out(vertex_count * 3);
+    std::vector<float> out(vertex_count * components);
     for (size_t i = 0; i < vertex_count; ++i) {
-      for (size_t c = 0; c < 3; ++c) {
-        out[i * 3 + c] = tinyusdz::value::half_to_float(halves[i * 4 + c]);
+      for (size_t c = 0; c < components; ++c) {
+        out[i * components + c] =
+            tinyusdz::value::half_to_float(halves[i * 4 + c]);
       }
     }
     return out;
@@ -92,6 +93,33 @@ std::vector<float> CopyFloatAttribute(const tydra::VertexAttribute& attr,
 
   std::vector<float> out(vertex_count * components);
   std::memcpy(out.data(), attr.get_data().data(), out.size() * sizeof(float));
+  return out;
+}
+
+// Copies tangents as xyzw quads, whatever the source format.
+//
+// Two shapes reach us. A Blender-authored `tangents` primvar arrives as half4
+// and already carries handedness in w, which CopyFloatAttribute decodes when
+// asked for 4 components. A Tydra-COMPUTED tangent is Vec3, and Tydra's solver
+// only ever produces a right-handed frame -- so +1 is the correct w, not a
+// guess.
+std::vector<float> CopyTangents(const tydra::VertexAttribute& attr,
+                                size_t vertex_count, const std::string& mesh) {
+  if (attr.format == tydra::VertexAttributeFormat::Half4) {
+    return CopyFloatAttribute(attr, 4, vertex_count, "tangents", mesh);
+  }
+
+  const std::vector<float> xyz =
+      CopyFloatAttribute(attr, 3, vertex_count, "tangents", mesh);
+  if (xyz.empty()) return {};
+
+  std::vector<float> out(vertex_count * 4);
+  for (size_t i = 0; i < vertex_count; ++i) {
+    out[i * 4 + 0] = xyz[i * 3 + 0];
+    out[i * 4 + 1] = xyz[i * 3 + 1];
+    out[i * 4 + 2] = xyz[i * 3 + 2];
+    out[i * 4 + 3] = 1.0f;
+  }
   return out;
 }
 
@@ -257,8 +285,7 @@ UsdSceneData LoadUsdScene(const std::string& path) {
     mesh.indices = indices;
     mesh.normals = CopyFloatAttribute(src.normals, 3, vertex_count, "normals",
                                       src.prim_name);
-    mesh.tangents = CopyFloatAttribute(src.tangents, 3, vertex_count, "tangents",
-                                       src.prim_name);
+    mesh.tangents = CopyTangents(src.tangents, vertex_count, src.prim_name);
 
     // Slot 0 is the primary UV set (`st` by default); higher slots are
     // multi-texturing we have no material path for.

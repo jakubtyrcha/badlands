@@ -4,13 +4,42 @@
 
 #include <glm/gtc/matrix_transform.hpp>
 
+#include <spdlog/spdlog.h>
+
+#include "engine/rendering/geometry/textured_mesh_builders.hpp"
 #include "engine/scene/scene_attachment.hpp"
 
 namespace badlands {
+namespace {
+
+// Catches a generator whose vertex writes and its declared stride disagree.
+//
+// This is the safety net for the tangent(3) -> tangent(4) widening: the stride
+// lives in a named constant, so every size/offset computation adapted on its
+// own, but any code that pushed floats POSITIONALLY kept emitting the old count
+// into a wider buffer. That shears the whole mesh -- every vertex after the
+// first reads its attributes from its neighbour's floats -- and nothing else
+// reports it, because the buffer is still a valid buffer.
+void CheckVertexStride(const char* name,
+                       const StaticTexturedMeshComponent& mesh) {
+  if (mesh.geometry_type != GeometryType::kTexturedMesh) return;
+  const size_t expected =
+      static_cast<size_t>(mesh.vertex_count) * kTexturedMeshFloatsPerVertex;
+  if (mesh.vertices.size() == expected) return;
+
+  spdlog::error("AddMeshEntity('{}'): {} floats for {} vertices -- expected {}"
+                " ({} per vertex). The mesh generator and the vertex layout"
+                " disagree; the mesh will render sheared.",
+                name, mesh.vertices.size(), mesh.vertex_count, expected,
+                kTexturedMeshFloatsPerVertex);
+}
+
+}  // namespace
 
 NodeHandle AddMeshEntity(SceneGraph& scene, const char* name,
                          TexturedMeshResult&& mesh, const DeferredMaterial& mat,
                          const glm::mat4& transform) {
+  CheckVertexStride(name, mesh.mesh);
   NodeHandle node = scene.CreateNode(name);
   scene.SetLocalTransform(node, Trs::FromMatrix(transform));
 

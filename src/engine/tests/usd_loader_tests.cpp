@@ -68,10 +68,16 @@ TEST_CASE("every shipped prop loads with the attributes the adapter needs",
       // would be a buffer overrun there rather than a cosmetic gap.
       CHECK(mesh.normals.size() == mesh.vertex_count() * 3);
       CHECK(mesh.uvs.size() == mesh.vertex_count() * 2);
-      // Tangents: authored as half4 by these Blender exports, decoded to
-      // float3 by the loader. Their presence is what makes normal mapping
-      // possible, so it is pinned rather than treated as a bonus.
-      CHECK(mesh.tangents.size() == mesh.vertex_count() * 3);
+      // Tangents are xyzw: w is the bitangent handedness the shader needs.
+      // Their presence is what makes normal mapping possible, so it is pinned
+      // rather than treated as a bonus.
+      CHECK(mesh.tangents.size() == mesh.vertex_count() * 4);
+      // Handedness must be a clean sign, not an interpolated or absent value --
+      // the shader multiplies it straight into cross(N, T).
+      for (size_t i = 0; i < mesh.vertex_count(); ++i) {
+        const float w = mesh.tangents[i * 4 + 3];
+        REQUIRE((w == 1.0f || w == -1.0f));
+      }
       // Indices address only vertices that exist.
       for (uint32_t index : mesh.indices) {
         REQUIRE(index < mesh.vertex_count());

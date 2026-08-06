@@ -7,7 +7,7 @@
 namespace badlands {
 
 void PushVertex(std::vector<float>& out, const glm::vec3& pos, const glm::vec2& uv,
-                const glm::vec3& normal, const glm::vec3& tangent) {
+                const glm::vec3& normal, const glm::vec4& tangent) {
   out.push_back(pos.x);
   out.push_back(pos.y);
   out.push_back(pos.z);
@@ -19,6 +19,7 @@ void PushVertex(std::vector<float>& out, const glm::vec3& pos, const glm::vec2& 
   out.push_back(tangent.x);
   out.push_back(tangent.y);
   out.push_back(tangent.z);
+  out.push_back(tangent.w);
 }
 
 void AppendTransformedMesh(StaticTexturedMeshComponent& dst,
@@ -34,12 +35,18 @@ void AppendTransformedMesh(StaticTexturedMeshComponent& dst,
     glm::vec2 uv(src.vertices[i + 3], src.vertices[i + 4]);
     glm::vec3 normal(src.vertices[i + 5], src.vertices[i + 6], src.vertices[i + 7]);
     glm::vec3 tangent(src.vertices[i + 8], src.vertices[i + 9], src.vertices[i + 10]);
+    // Handedness rides along untouched: it describes the UV parameterisation,
+    // which a placement transform does not change. (A MIRRORING transform
+    // would, but AppendTransformedMesh's callers place primitives, not mirror
+    // them -- and a mirror would need the winding flipped here too.)
+    const float handedness = src.vertices[i + 11];
 
     glm::vec3 world_pos = glm::vec3(transform * pos);
     glm::vec3 world_normal = glm::normalize(normal_matrix * normal);
     glm::vec3 world_tangent = glm::normalize(linear * tangent);
 
-    PushVertex(dst.vertices, world_pos, uv, world_normal, world_tangent);
+    PushVertex(dst.vertices, world_pos, uv, world_normal,
+               glm::vec4(world_tangent, handedness));
     ++dst.vertex_count;
   }
 }
