@@ -313,7 +313,11 @@ void Renderer::set_gizmos(const GizmoFrame& placement, const GizmoFrame& shape, 
 
     // Only Placement has a grid: it is a reference plane belonging to where the
     // node sits, and Shape answers a question about size that no plane informs.
-    append_move_gizmo_grid(gizmo_grid_verts_, placement, 12);
+    // It dims with the rest of its own gizmo -- it is the largest element on
+    // screen, so it would otherwise stay loud while every handle around it
+    // receded.
+    append_move_gizmo_grid(gizmo_grid_verts_, placement, 12,
+                           rest_for(on_placement) / kGizmoHandleRestAlpha);
 
     // The tether goes down before the handles, so the handles draw over it.
     if (!gizmos_coalesce(placement, shape)) {

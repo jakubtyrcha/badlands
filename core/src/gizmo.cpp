@@ -134,6 +134,19 @@ std::optional<AxisPick> pick_axis_handle(const GizmoFrame& frame, const Ray& ray
     return best;
 }
 
+// Ray distance to the Shape gizmo's uniform centre handle, or nullopt when it
+// is outside tolerance. Returned as a DISTANCE rather than a bool because
+// pick_gizmos has to weigh it against a competing handle on the other gizmo,
+// which it cannot do with a yes/no.
+std::optional<float> uniform_pick_distance(const GizmoFrame& frame, const Ray& ray,
+                                            float pts_to_world_at_unit_depth) {
+    const float t = std::fmax(simd_dot(frame.origin - ray.origin, ray.dir), 0.0f);
+    const float dist = simd_length(frame.origin - (ray.origin + t * ray.dir));
+    const float tol = kUniformPickTolerancePts * simd_length(frame.origin - ray.origin) *
+                      pts_to_world_at_unit_depth;
+    return (dist <= tol) ? std::optional<float>{dist} : std::nullopt;
+}
+
 } // namespace
 
 GizmoHandle pick_gizmo_handle(const GizmoFrame& frame, const Ray& ray,
@@ -145,11 +158,7 @@ GizmoHandle pick_gizmo_handle(const GizmoFrame& frame, const Ray& ray,
         // The uniform centre is tested FIRST and the axes start outboard of it
         // (kScaleAxisInnerFrac), so the two never contend: aiming at the middle
         // always means uniform scale, which is the only reading a user has.
-        const float t = std::fmax(simd_dot(frame.origin - ray.origin, ray.dir), 0.0f);
-        const float dist = simd_length(frame.origin - (ray.origin + t * ray.dir));
-        const float tol = kUniformPickTolerancePts * simd_length(frame.origin - ray.origin) *
-                          pts_to_world_at_unit_depth;
-        if (dist <= tol) {
+        if (uniform_pick_distance(frame, ray, pts_to_world_at_unit_depth)) {
             return GizmoHandle::Uniform;
         }
         const std::optional<AxisPick> axis =
@@ -261,24 +270,41 @@ GizmoHandle pick_gizmo_handle(const GizmoFrame& frame, const Ray& ray,
 
 GizmoHit pick_gizmos(const GizmoFrame& placement, const GizmoFrame& shape, const Ray& ray,
                      float fov_y_radians, float viewport_h_pts) {
-    const GizmoHandle on_shape =
-        pick_gizmo_handle(shape, ray, fov_y_radians, viewport_h_pts, GizmoSlot::Shape);
-    const GizmoHandle on_placement =
-        pick_gizmo_handle(placement, ray, fov_y_radians, viewport_h_pts, GizmoSlot::Placement);
+    const float pts_to_world_at_unit_depth = 2.0f * std::tan(fov_y_radians * 0.5f) / viewport_h_pts;
 
-    // Innermost band first (see pick_gizmos' header comment for why fixed
-    // priority rather than a distance race across the two frames).
-    if (on_shape == GizmoHandle::Uniform) {
-        return GizmoHit{GizmoSlot::Shape, on_shape};
+    // The uniform centre and Placement's move axes are weighed by DISTANCE
+    // rather than by a fixed order, because the two gizmos do not share an
+    // origin once the pair is split -- and a screen-space contest cannot be
+    // settled by a rule about world-space radii. Look along the tether (lift a
+    // detail off its surface, then orbit to face the lift) and the two origins
+    // project onto each other while Placement's axes stay fully visible around
+    // them; giving the centre unconditional priority there swallowed handles
+    // that were drawn, lit on hover, and plainly under the cursor.
+    const std::optional<float> uniform_dist =
+        uniform_pick_distance(shape, ray, pts_to_world_at_unit_depth);
+    const std::optional<AxisPick> move_axis =
+        pick_axis_handle(placement, ray, pts_to_world_at_unit_depth, 0.0f, kMoveAxisOuterFrac,
+                         kAxisPickTolerancePts);
+
+    if (uniform_dist && (!move_axis || *uniform_dist <= move_axis->dist)) {
+        return GizmoHit{GizmoSlot::Shape, GizmoHandle::Uniform};
     }
-    if (gizmo_handle_is_axis(on_placement)) {
-        return GizmoHit{GizmoSlot::Placement, on_placement};
+    if (move_axis) {
+        return GizmoHit{GizmoSlot::Placement, move_axis->handle};
     }
-    if (gizmo_handle_is_axis(on_shape)) {
-        return GizmoHit{GizmoSlot::Shape, on_shape};
+    if (const std::optional<AxisPick> scale_axis =
+            pick_axis_handle(shape, ray, pts_to_world_at_unit_depth, kScaleAxisInnerFrac,
+                             kScaleAxisOuterFrac, kScaleAxisPickTolerancePts)) {
+        return GizmoHit{GizmoSlot::Shape, scale_axis->handle};
     }
-    if (on_placement != GizmoHandle::None) {
-        return GizmoHit{GizmoSlot::Placement, on_placement}; // a plane patch
+    // Whatever is left on Placement: a rotation ring or a plane patch, already
+    // resolved against each other by nearest-along-the-ray. Its axes were
+    // handled above, so an axis coming back here would mean the two paths
+    // disagree -- hence the guard rather than a bare return.
+    const GizmoHandle rest =
+        pick_gizmo_handle(placement, ray, fov_y_radians, viewport_h_pts, GizmoSlot::Placement);
+    if (rest != GizmoHandle::None && !gizmo_handle_is_axis(rest)) {
+        return GizmoHit{GizmoSlot::Placement, rest};
     }
     return GizmoHit{GizmoSlot::Placement, GizmoHandle::None};
 }

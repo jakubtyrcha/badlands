@@ -63,30 +63,51 @@ struct GizmoFrame {
 // --- radius bands ----------------------------------------------------------
 //
 // Both gizmos are live at once, and when their anchors coincide their handles
-// share an origin. Every handle therefore owns a disjoint band of radius, as a
-// fraction of half_extent, so the combined gizmo is exactly the union of the
-// two separate ones -- nothing overlaps, and neither gizmo restructures itself
-// as the pair merges or splits.
+// share an origin. Each handle is laid out in its own band of radius, as a
+// fraction of half_extent, so the combined gizmo reads as the union of the two
+// separate ones and neither restructures itself as the pair merges or splits.
 //
 //   0.00 .. 0.09   Shape: uniform scale (the centre disc)
 //   0.00 .. 0.60   Placement: move axes
-//   0.24 .. 0.50   Placement: move plane patches (off-axis, so no conflict)
+//   0.24 .. 0.50   Placement: move plane patches (off-axis, so never on a shaft)
 //   0.70 .. 1.00   Shape: scale axes
 //   1.15           Placement: rotation rings (a radius, not a range)
 //
-// The gap between the move and scale axis bands is deliberate: they lie on the
-// SAME three lines when coalesced, so without it a sloppy grab near 0.6 he
-// would flip between translating and scaling.
+// These are the DRAWN extents, and they are not the whole story for picking:
+// every handle also carries a screen-space grab tolerance (8-14 pts), which the
+// fractions below know nothing about. Since he is kGizmoScreenFraction of the
+// viewport height, the 0.10 he gap between the move and scale bands is only
+// ~0.024 * viewport_h points -- around 12 pts on a 500 pt viewport, i.e. less
+// than the two tolerances that meet there. So the bands DO overlap in practice
+// and the "dead zone" the gap suggests does not exist.
+//
+// That is fine, but only because pick_gizmos resolves the overlap explicitly
+// rather than relying on the geometry to keep the handles apart: move axes beat
+// scale axes, and the centre beats a move axis only when it is genuinely
+// nearer. Widening the gaps enough to separate the tolerances would make the
+// gizmo far larger than the model it sits on, which is a worse trade.
+// The one thing the ordering does NOT have to arbitrate is the uniform centre
+// against the scale axes, which the drawn radii really do keep apart.
+//
+// The same arithmetic applies to the 0.15 he between the scale axes and the
+// rings: below roughly a 390 pt viewport the scale tolerance reaches the ring,
+// and since scale axes are resolved first a ring grab near one of the three
+// axis directions goes to scale instead. Accepted rather than fixed -- the fix
+// is a bigger gizmo, and it only bites in a window small enough that the whole
+// manipulator already fills half the viewport.
 inline constexpr float kMoveAxisOuterFrac  = 0.60f;  // pick clamp
 inline constexpr float kMoveAxisShaftFrac  = 0.55f;  // drawn shaft end, and where its tip dot sits
 inline constexpr float kScaleAxisInnerFrac = 0.70f;
 inline constexpr float kScaleAxisShaftFrac = 0.94f;  // drawn shaft end, and where its box tip sits
 inline constexpr float kScaleAxisOuterFrac = 1.00f;  // pick clamp
 inline constexpr float kRotateRingFrac     = 1.15f;  // ring radius, drawn and picked
+// Ordering asserts, on the DRAWN extents only -- the grab tolerances are in
+// points and cannot be compared against fractions of he here (see the note
+// above). They pin the layout's intent, not a guarantee of non-overlap.
 static_assert(kMoveAxisOuterFrac < kScaleAxisInnerFrac,
-              "the move and scale axis bands share three lines and must not overlap");
+              "move axes must be drawn inboard of scale axes: they share three lines");
 static_assert(kScaleAxisOuterFrac < kRotateRingFrac,
-              "the rings must sit outboard of every axis, or a ring grab could land on a shaft");
+              "the rings must be drawn outboard of every axis");
 static_assert(kMoveAxisShaftFrac <= kMoveAxisOuterFrac &&
                   kScaleAxisShaftFrac <= kScaleAxisOuterFrac,
               "a drawn shaft must stay inside its own pickable band (drawn = hit)");
@@ -210,14 +231,18 @@ GizmoHandle pick_gizmo_handle(const GizmoFrame& frame, const Ray& ray,
 // call; the single-slot version above exists for the pieces it is built from
 // and for tests.
 //
-// Resolution is by radius band, innermost first: Shape's uniform centre, then
-// Placement's move axes, then Shape's scale axes, then Placement's planes.
-// Fixed priority rather than a distance comparison across the two, because the
-// bands are disjoint by construction (see the band table above) -- so when the
-// gizmos are coalesced a ray can essentially only satisfy one, and when they
-// are apart at most one is anywhere near the cursor. The order matters only for
-// the grazing cases, where "the innermost thing you could plausibly have meant"
-// is the reading a user has.
+// Resolution runs innermost band outwards -- Shape's uniform centre, then
+// Placement's move axes, then Shape's scale axes, then Placement's rings and
+// planes -- with ONE distance comparison at the front: the uniform centre only
+// beats a move axis if it is genuinely closer to the ray.
+//
+// That comparison is not decoration. The bands are disjoint in radius from
+// their own origin, but the two gizmos stop sharing an origin the moment the
+// pair splits, and a screen-space contest cannot be settled by a rule about
+// world-space radii. Sight down the tether -- lift a detail off its surface,
+// then orbit to face the lift -- and the two origins project onto each other
+// while Placement's axes stay fully visible around them. Fixed priority there
+// swallowed handles that were drawn, lit on hover, and under the cursor.
 GizmoHit pick_gizmos(const GizmoFrame& placement, const GizmoFrame& shape, const Ray& ray,
                      float fov_y_radians, float viewport_h_pts);
 

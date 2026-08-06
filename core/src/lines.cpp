@@ -82,7 +82,8 @@ void append_sphere_outline(std::vector<LineVertex>& out, const simd_float4x4& wo
     }
 }
 
-void append_move_gizmo_grid(std::vector<LineVertex>& out, const GizmoFrame& frame, int divisions) {
+void append_move_gizmo_grid(std::vector<LineVertex>& out, const GizmoFrame& frame, int divisions,
+                            float alpha_scale) {
     const simd_float3 origin = frame.origin;
     const float he = frame.half_extent;
     const float step = 2.0f * he / static_cast<float>(divisions);
@@ -95,7 +96,7 @@ void append_move_gizmo_grid(std::vector<LineVertex>& out, const GizmoFrame& fram
                                        ((kGizmoGridFadeEnd - kGizmoGridFadeBegin) * he),
                                    0.0f, 1.0f);
         const float smooth = t * t * (3.0f - 2.0f * t);
-        return kGizmoGridAlpha * (1.0f - smooth);
+        return kGizmoGridAlpha * alpha_scale * (1.0f - smooth);
     };
 
     auto push = [&](float a, float b, simd_float3 e1, simd_float3 e2) {

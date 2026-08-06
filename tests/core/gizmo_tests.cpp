@@ -755,3 +755,37 @@ TEST_CASE("pick_gizmos: a split pair is picked at whichever anchor the ray is ne
     CHECK(high.slot == GizmoSlot::Shape);
     CHECK(high.handle == GizmoHandle::Uniform);
 }
+
+TEST_CASE("pick_gizmos: a split pair does not let the uniform handle swallow the "
+          "placement gizmo it happens to line up behind") {
+    // Review finding: Shape's uniform centre had UNCONDITIONAL top priority,
+    // justified by "when the gizmos are apart at most one is near the cursor".
+    // That is a world-space claim licensing a screen-space decision, and it
+    // fails exactly when the tether points at the camera: lift a detail off its
+    // surface, then look along the lift, and the two origins project on top of
+    // each other while the Placement axes remain fully visible around them.
+    Camera cam;
+    cam.eye = {0.0f, 10.0f, 0.001f};
+    cam.target = {0.0f, 0.0f, 0.0f};
+    cam.up = {0.0f, 0.0f, -1.0f};
+    cam.fov_y_radians = 1.0472f;
+    cam.aspect = 800.0f / 500.0f;
+
+    Node node;
+    node.snapped = true;
+    node.snap_point = {0.0f, 0.0f, 0.0f};
+    node.snap_normal = {0.0f, 1.0f, 0.0f};
+    node.position = {0.0f, 2.0f, 0.0f}; // lifted along the normal, straight at the eye
+
+    const GizmoFrame placement = gizmo_frame_for_node(node, cam, GizmoSlot::Placement);
+    const GizmoFrame shape = gizmo_frame_for_node(node, cam, GizmoSlot::Shape);
+    REQUIRE_FALSE(gizmos_coalesce(placement, shape)); // genuinely split...
+
+    // ...yet aiming at a Placement move axis, well inside its own band and on
+    // drawn geometry, must still give that axis.
+    const simd_float3 target = placement.origin + 0.10f * placement.half_extent * placement.u;
+    const GizmoHit hit = pick_gizmos(placement, shape, ray_through(cam.eye, target),
+                                     cam.fov_y_radians, kTestViewportH);
+    CHECK(hit.slot == GizmoSlot::Placement);
+    CHECK(hit.handle == GizmoHandle::AxisU);
+}

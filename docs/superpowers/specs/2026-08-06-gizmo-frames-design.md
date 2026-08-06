@@ -23,6 +23,26 @@ the body, because each was a real mistake in the design:
    crosses the other two rings' planes as it travels and can cross one at very
    nearly ring radius — picking a ring the cursor was nowhere near, and then
    reading the drag's angle in the wrong plane entirely.
+5. **§5's dimming is per SLOT, not per band.** Hovering any handle dims the
+   whole other gizmo; the hovered gizmo keeps its own rest alpha throughout.
+   Per-band dimming would also fade a gizmo's own rings while you reach for its
+   move axes, which reads as the gizmo coming apart rather than as focus. The
+   spec's stated goal — making one handle findable among four concentric bands
+   — is met by the pair separating, since the competing bands belong to the
+   other gizmo.
+
+**Found by review, after the above** (`/code-review`, same day): the band table
+in §5 promised that giving Shape's uniform centre unconditional top priority
+was safe "because the bands are disjoint". That is a claim about world-space
+radii being used to settle a screen-space contest, and it fails as soon as the
+pair splits: sight down the tether and the two origins project onto each other
+while Placement's axes stay visible around them, so the centre swallowed
+handles that were drawn and under the cursor. The centre now has to be nearer
+than the competing move axis to win. The same review established that the
+bands' *pickable* extents overlap almost always, because the 8–14 pt grab
+tolerances are far wider than the gaps between the drawn radii — so the layout
+never provided the separation it claimed, and `pick_gizmos`' explicit ordering
+was doing that work all along. `gizmo.h` now says so.
 
 Approved 2026-08-06. Replaces the single tool-modal manipulator with two live
 gizmos — **Placement** (move + rotate) at the node's attachment point and

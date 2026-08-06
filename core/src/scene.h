@@ -17,7 +17,11 @@ struct Node {
     Shape shape = Shape::Cube;
     Op op = Op::Add;
     simd_float3 position = {0, 0, 0};
-    simd_quatf rotation = simd_quaternion(0.f, 0.f, 0.f, 1.f);  // identity; stays identity in MVP
+    // Unit quaternion, editable via the placement gizmo's rotation rings. The
+    // ring drag renormalizes on every update, which pack_scene relies on: it
+    // packs the CONJUGATE as the inverse, and those agree only for a unit
+    // quaternion.
+    simd_quatf rotation = simd_quaternion(0.f, 0.f, 0.f, 1.f);
     simd_float3 scale = {1, 1, 1};
     bool snapped = false;
     simd_float3 snap_point = {0, 0, 0};

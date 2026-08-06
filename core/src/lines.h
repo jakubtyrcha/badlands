@@ -138,7 +138,12 @@ std::vector<LineVertex> build_scene_lines(const SceneDocument& doc, int32_t sele
 // midpoint of a line passing near the origin would come out darker than its
 // ends. 2*(divisions+1) lines * segments * 2 verts = 624 verts at
 // divisions=12: past the 4KB setVertexBytes limit, hence the vertex buffer.
-void append_move_gizmo_grid(std::vector<LineVertex>& out, const GizmoFrame& frame, int divisions);
+// `alpha_scale` multiplies kGizmoGridAlpha, so the grid dims along with the
+// handles when the OTHER gizmo owns the hover. It is the largest thing this
+// gizmo draws, so leaving it at full strength while everything around it fell
+// back would have defeated the dimming entirely.
+void append_move_gizmo_grid(std::vector<LineVertex>& out, const GizmoFrame& frame, int divisions,
+                            float alpha_scale);
 //
 // Handles (TRIANGLE primitives): each handle line is expanded into a
 // camera-facing quad of half-width kGizmoHandleHalfWidthFrac * he (Metal has

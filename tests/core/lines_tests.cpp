@@ -307,7 +307,7 @@ TEST_CASE("append_move_gizmo_grid: n={0,1,0}, he=2, divisions=12 — coplanar, r
     const GizmoFrame f = make_gizmo_frame(simd_float3{0.0f, 0.0f, 0.0f}, simd_float3{0.0f, 1.0f, 0.0f}, 2.0f);
     const float he = f.half_extent;
     std::vector<LineVertex> out;
-    append_move_gizmo_grid(out, f, 12);
+    append_move_gizmo_grid(out, f, 12, 1.0f);
 
     // 26 grid lines (2*(divisions+1), center lines included — the positive-
     // only axis handles no longer cover their negative halves), each split
@@ -373,7 +373,7 @@ TEST_CASE("append_move_gizmo_grid: the grid follows grid_normal, not n") {
     f.half_extent = 2.0f;
 
     std::vector<LineVertex> out;
-    append_move_gizmo_grid(out, f, 12);
+    append_move_gizmo_grid(out, f, 12, 1.0f);
     REQUIRE(out.size() == 26 * kGizmoGridSegmentsPerLine * 2);
 
     for (size_t i = 0; i < out.size(); ++i) {
