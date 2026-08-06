@@ -732,6 +732,11 @@ class NullDevice final : public IRhiDevice {
   }
   RenderPipelinePtr CreateRenderPipeline(
       const RenderPipelineDesc& d) override {
+    // The SAME shared check Metal makes. Null runs no shaders and could not
+    // care less what the blend states say -- but "which pipelines can exist"
+    // is a contract, and a backend that accepts what another refuses is the
+    // divergence rule 6 exists to stop.
+    if (!ValidateBlendStates(d)) return nullptr;  // logged there
     return std::make_shared<NullRenderPipeline>(d);
   }
   ComputePipelinePtr CreateComputePipeline(

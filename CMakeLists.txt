@@ -1344,6 +1344,7 @@ if(APPLE)
     )
     target_include_directories(badlands_rhi_metal_tests PRIVATE
         ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+        ${CMAKE_SOURCE_DIR}/third_party/glm
         ${CMAKE_SOURCE_DIR}/src/engine/tests
     )
     target_link_libraries(badlands_rhi_metal_tests PRIVATE badlands_rhi)

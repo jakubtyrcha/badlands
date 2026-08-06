@@ -9,7 +9,11 @@
 // Shaders here are hand-written MSL rather than Slang output: the Slang layer
 // is a later step, and this suite should not wait on it to prove the backend.
 
+#include <algorithm>
+#include <cmath>
+
 #include <catch_amalgamated.hpp>
+#include <glm/glm.hpp>
 
 #include "engine/rhi/metal/metal_rhi.hpp"
 #include "engine/tests/rhi_conformance.hpp"
@@ -531,6 +535,14 @@ TEST_CASE("metal: the feature query answers", "[rhi]") {
   auto d = MakeMetal();
   rhitest::CheckFeatureQueryAnswers(*d);
 }
+TEST_CASE("metal: a mismatched blend state count is refused", "[rhi]") {
+  auto d = MakeMetal();
+  rhitest::CheckMismatchedBlendStateCountIsRefused(*d);
+}
+TEST_CASE("metal: an opaque pipeline needs no blend state", "[rhi]") {
+  auto d = MakeMetal();
+  rhitest::CheckOpaquePipelineNeedsNoBlendState(*d);
+}
 
 TEST_CASE("metal: an indirect dispatch really runs the count in the buffer",
           "[rhi][metal]") {
@@ -948,4 +960,340 @@ TEST_CASE("metal: a submission keeps its resources alive after the caller drops 
   REQUIRE(readback->Read(0, out));
   CHECK(out[0] == 0xA5);
   CHECK(out[63] == 0xA5);
+}
+
+// --- Blending ---------------------------------------------------------------
+//
+// Blend state is the one piece of pipeline state whose correctness is invisible
+// to every other test in this suite: a backend that swapped src and dst, or
+// wired alpha from the colour component, still renders a plausible image. So
+// every enumerator the RHI exposes is compared against a CPU evaluation of the
+// blend equation -- the oracle pattern that pinned the splat count.
+//
+// Rule 4 is why this is exhaustive rather than representative: a factor that is
+// accepted and mismapped is exactly the "advertised but unimplemented" trap,
+// and the only way the enum stays honest is that nothing in it is untested.
+
+namespace {
+
+// Chosen so every channel is an exact multiple of 1/255 (51, 102, 153, 204),
+// so quantisation is not a source of disagreement -- and so no channel is 0 or
+// 1, where a swapped factor would coincidentally produce the right answer.
+// Alphas differ from each other AND from 1, which is what makes DstAlpha and
+// the separate-alpha case distinguishable at all.
+constexpr glm::vec4 kSrc{0.8f, 0.6f, 0.4f, 0.6f};
+constexpr glm::vec4 kDst{0.2f, 0.4f, 0.6f, 0.8f};
+
+// A constant colour from a uniform, over a fullscreen triangle.
+constexpr const char* kConstantColor = R"(
+#include <metal_stdlib>
+using namespace metal;
+struct VOut { float4 pos [[position]]; };
+vertex VOut vs_main(uint vid [[vertex_id]]) {
+  float2 uv = float2(float((vid << 1) & 2), float(vid & 2));
+  VOut o;
+  o.pos = float4(uv * 2.0 - 1.0, 0.0, 1.0);
+  return o;
+}
+fragment float4 fs_main(constant float4& color [[buffer(0)]]) { return color; }
+)";
+
+ShaderReflection ConstantColorReflection() {
+  ShaderReflection r;
+  r.bindings.push_back({.group = 0, .slot = 0, .name = "color",
+                        .kind = BindingKind::UniformBuffer,
+                        .location = {.space = 0, .index = 0}});
+  return r;
+}
+
+// The value a factor multiplies its operand by. Per-channel for the colour
+// component; the alpha component uses only .a.
+glm::vec4 FactorValue(BlendFactor f, glm::vec4 s, glm::vec4 d) {
+  switch (f) {
+    case BlendFactor::Zero: return glm::vec4(0.0f);
+    case BlendFactor::One: return glm::vec4(1.0f);
+    case BlendFactor::Src: return s;
+    case BlendFactor::OneMinusSrc: return glm::vec4(1.0f) - s;
+    case BlendFactor::SrcAlpha: return glm::vec4(s.a);
+    case BlendFactor::OneMinusSrcAlpha: return glm::vec4(1.0f - s.a);
+    // RGB saturates against the destination's remaining alpha; the ALPHA
+    // channel of this factor is defined as 1, not as the saturated value.
+    case BlendFactor::SrcAlphaSaturated: {
+      const float k = std::min(s.a, 1.0f - d.a);
+      return glm::vec4(k, k, k, 1.0f);
+    }
+    case BlendFactor::Dst: return d;
+    case BlendFactor::OneMinusDst: return glm::vec4(1.0f) - d;
+    case BlendFactor::DstAlpha: return glm::vec4(d.a);
+    case BlendFactor::OneMinusDstAlpha: return glm::vec4(1.0f - d.a);
+  }
+  return glm::vec4(1.0f);
+}
+
+// `a` and `b` are already factored, EXCEPT for Min/Max -- see below.
+float Combine(BlendOp op, float factored_s, float factored_d, float raw_s,
+              float raw_d) {
+  switch (op) {
+    case BlendOp::Add: return factored_s + factored_d;
+    case BlendOp::Subtract: return factored_s - factored_d;
+    case BlendOp::ReverseSubtract: return factored_d - factored_s;
+    // Min and Max IGNORE the factors entirely, on Metal and on D3D12 alike.
+    // Modelling that here rather than in a comment is the only way the test
+    // can tell a backend that honours it from one that does not.
+    case BlendOp::Min: return std::min(raw_s, raw_d);
+    case BlendOp::Max: return std::max(raw_s, raw_d);
+  }
+  return factored_s + factored_d;
+}
+
+glm::vec4 CpuBlend(const BlendState& b, glm::vec4 s, glm::vec4 d) {
+  if (!b.enabled) return s;
+  const glm::vec4 cs = FactorValue(b.color.src, s, d);
+  const glm::vec4 cd = FactorValue(b.color.dst, s, d);
+  const glm::vec4 as = FactorValue(b.alpha.src, s, d);
+  const glm::vec4 ad = FactorValue(b.alpha.dst, s, d);
+  glm::vec4 out;
+  for (int i = 0; i < 3; ++i) {
+    out[i] = Combine(b.color.op, s[i] * cs[i], d[i] * cd[i], s[i], d[i]);
+  }
+  out.a = Combine(b.alpha.op, s.a * as.a, d.a * ad.a, s.a, d.a);
+  return glm::clamp(out, 0.0f, 1.0f);  // Unorm target
+}
+
+struct Texel { uint8_t r, g, b, a; };
+
+// Draws kDst opaque, then kSrc through `blend`, into an RGBA8Unorm target.
+// `use_blend_states` false omits the vector entirely, which is the path every
+// existing pipeline in the engine takes.
+Texel RenderBlended(IRhiDevice& dev, const BlendState& blend,
+                    bool use_blend_states = true) {
+  constexpr uint32_t kW = 4, kH = 4;
+  auto module = dev.CreateShaderModule(kConstantColor,
+                                       ConstantColorReflection(), "const_color");
+  REQUIRE(module);
+
+  RenderPipelineDesc base{.vertex_shader = module.get(),
+                          .vertex_entry = "vs_main",
+                          .fragment_shader = module.get(),
+                          .fragment_entry = "fs_main",
+                          .color_formats = {Format::RGBA8Unorm},
+                          .cull_mode = CullMode::None};
+  RenderPipelineDesc opaque_desc = base;
+  opaque_desc.label = "blend_dst";
+  RenderPipelineDesc blend_desc = base;
+  blend_desc.label = "blend_src";
+  if (use_blend_states) blend_desc.blend_states = {blend};
+
+  auto opaque_pipe = dev.CreateRenderPipeline(opaque_desc);
+  auto blend_pipe = dev.CreateRenderPipeline(blend_desc);
+  REQUIRE(opaque_pipe);
+  REQUIRE(blend_pipe);
+
+  auto make_color_buf = [&](glm::vec4 c, const char* label) {
+    auto b = dev.CreateBuffer({.size = sizeof(glm::vec4),
+                               .usage = BufferUsage::Uniform |
+                                        BufferUsage::CopyDst,
+                               .label = label});
+    REQUIRE(b);
+    b->Write(0, {reinterpret_cast<const uint8_t*>(&c), sizeof(c)});
+    return b;
+  };
+  auto dst_buf = make_color_buf(kDst, "dst_color");
+  auto src_buf = make_color_buf(kSrc, "src_color");
+
+  auto make_table = [&](IRenderPipeline* p, IBuffer* buf, const char* label) {
+    auto t = dev.CreateBindingTable(
+        {.render_pipeline = p,
+         .entries = {{.slot = 0, .kind = BindingKind::UniformBuffer,
+                      .buffer = buf}},
+         .label = label});
+    REQUIRE(t);
+    return t;
+  };
+  auto dst_table = make_table(opaque_pipe.get(), dst_buf.get(), "dst_table");
+  auto src_table = make_table(blend_pipe.get(), src_buf.get(), "src_table");
+
+  auto target = dev.CreateTexture({.width = kW, .height = kH,
+                                   .format = Format::RGBA8Unorm,
+                                   .usage = TextureUsage::RenderTarget |
+                                            TextureUsage::CopySrc,
+                                   .label = "blend_target"});
+  auto readback = dev.CreateBuffer({.size = kW * kH * 4,
+                                    .usage = BufferUsage::CopyDst |
+                                             BufferUsage::MapRead,
+                                    .label = "blend_readback"});
+  REQUIRE(target);
+  REQUIRE(readback);
+
+  auto encoder = dev.CreateCommandEncoder("blend");
+  encoder->Transition(dst_buf.get(), ResourceState::ShaderRead);
+  encoder->Transition(src_buf.get(), ResourceState::ShaderRead);
+  encoder->Transition(target.get(), ResourceState::RenderTarget);
+  RenderPassDesc rp;
+  rp.label = "blend";
+  rp.color_attachments.push_back({.view = target->GetDefaultView(),
+                                  .load_op = LoadOp::Clear,
+                                  .store_op = StoreOp::Store,
+                                  .clear_color = {0, 0, 0, 0}});
+  auto* pass = encoder->BeginRenderPass(rp);
+  REQUIRE(pass != nullptr);
+  pass->SetViewport(0, 0, float(kW), float(kH));
+  // Destination first, unblended, so what follows blends against a known
+  // framebuffer rather than against a clear colour chosen for convenience.
+  pass->SetPipeline(opaque_pipe.get());
+  pass->SetBindingTable(0, dst_table.get());
+  pass->Draw(3);
+  pass->SetPipeline(blend_pipe.get());
+  pass->SetBindingTable(0, src_table.get());
+  pass->Draw(3);
+  pass->End();
+
+  encoder->Transition(target.get(), ResourceState::CopySrc);
+  encoder->Transition(readback.get(), ResourceState::CopyDst);
+  encoder->CopyTextureToBuffer(target.get(), 0, 0, readback.get(), 0);
+  encoder->Finish();
+  dev.Submit(*encoder);
+  dev.WaitIdle();
+
+  std::vector<uint8_t> px(kW * kH * 4, 0);
+  REQUIRE(readback->Read(0, px));
+  return {px[0], px[1], px[2], px[3]};
+}
+
+Texel Quantise(glm::vec4 c) {
+  auto q = [](float v) {
+    return uint8_t(std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f));
+  };
+  return {q(c.r), q(c.g), q(c.b), q(c.a)};
+}
+
+// +/- 1 LSB: the GPU blends in float and rounds once, and reproducing its exact
+// rounding mode is not what this test is about.
+void CheckTexel(Texel got, Texel want, const std::string& what) {
+  INFO(what << ": got (" << int(got.r) << "," << int(got.g) << ","
+            << int(got.b) << "," << int(got.a) << ") want (" << int(want.r)
+            << "," << int(want.g) << "," << int(want.b) << "," << int(want.a)
+            << ")");
+  CHECK(std::abs(int(got.r) - int(want.r)) <= 1);
+  CHECK(std::abs(int(got.g) - int(want.g)) <= 1);
+  CHECK(std::abs(int(got.b) - int(want.b)) <= 1);
+  CHECK(std::abs(int(got.a) - int(want.a)) <= 1);
+}
+
+constexpr BlendFactor kAllFactors[] = {
+    BlendFactor::Zero,        BlendFactor::One,
+    BlendFactor::Src,         BlendFactor::OneMinusSrc,
+    BlendFactor::SrcAlpha,    BlendFactor::OneMinusSrcAlpha,
+    BlendFactor::SrcAlphaSaturated,
+    BlendFactor::Dst,         BlendFactor::OneMinusDst,
+    BlendFactor::DstAlpha,    BlendFactor::OneMinusDstAlpha,
+};
+
+constexpr BlendOp kAllOps[] = {BlendOp::Add, BlendOp::Subtract,
+                               BlendOp::ReverseSubtract, BlendOp::Min,
+                               BlendOp::Max};
+
+}  // namespace
+
+TEST_CASE("metal: every blend factor matches the CPU blend equation",
+          "[rhi][metal][gpu]") {
+  auto d = MakeMetal(/*validation=*/false);
+  REQUIRE(d);
+  for (BlendFactor f : kAllFactors) {
+    // Once on the source side, once on the destination side. A backend that
+    // maps a factor correctly in one direction and not the other is a real
+    // failure mode, and testing only one side cannot see it.
+    for (bool on_src : {true, false}) {
+      BlendState b{.enabled = true};
+      b.color = {.src = on_src ? f : BlendFactor::One,
+                 .dst = on_src ? BlendFactor::One : f,
+                 .op = BlendOp::Add};
+      b.alpha = b.color;
+      CheckTexel(RenderBlended(*d, b), Quantise(CpuBlend(b, kSrc, kDst)),
+                 std::string(ToString(f)) + (on_src ? " as src" : " as dst"));
+    }
+  }
+}
+
+TEST_CASE("metal: every blend op matches the CPU blend equation",
+          "[rhi][metal][gpu]") {
+  auto d = MakeMetal(/*validation=*/false);
+  REQUIRE(d);
+  for (BlendOp op : kAllOps) {
+    BlendState b{.enabled = true};
+    b.color = {.src = BlendFactor::SrcAlpha,
+               .dst = BlendFactor::OneMinusSrcAlpha, .op = op};
+    b.alpha = b.color;
+    CheckTexel(RenderBlended(*d, b), Quantise(CpuBlend(b, kSrc, kDst)),
+               ToString(op));
+  }
+}
+
+TEST_CASE("metal: colour and alpha blend independently", "[rhi][metal][gpu]") {
+  // rgb takes the DESTINATION, alpha takes the SOURCE. A backend that wires the
+  // alpha component from the colour component produces kDst.a here instead of
+  // kSrc.a -- and the two differ, which is why the constants were chosen that
+  // way.
+  auto d = MakeMetal(/*validation=*/false);
+  REQUIRE(d);
+  BlendState b{.enabled = true};
+  b.color = {.src = BlendFactor::Zero, .dst = BlendFactor::One,
+             .op = BlendOp::Add};
+  b.alpha = {.src = BlendFactor::One, .dst = BlendFactor::Zero,
+             .op = BlendOp::Add};
+
+  const Texel got = RenderBlended(*d, b);
+  CheckTexel(got, Quantise(glm::vec4(kDst.r, kDst.g, kDst.b, kSrc.a)),
+             "separate components");
+  // Spelled out, so the intent survives a change to the constants.
+  CHECK(std::abs(int(got.a) - int(Quantise(kSrc).a)) <= 1);
+  CHECK(std::abs(int(got.a) - int(Quantise(kDst).a)) > 1);
+}
+
+TEST_CASE("metal: Min and Max ignore their factors", "[rhi][metal][gpu]") {
+  // Factors of Zero on both sides. If they were applied, the result would be
+  // min/max(0, 0) == 0; because they are ignored, it is min/max(src, dst).
+  // Neither is 0, so the two answers cannot be confused.
+  auto d = MakeMetal(/*validation=*/false);
+  REQUIRE(d);
+  for (BlendOp op : {BlendOp::Min, BlendOp::Max}) {
+    BlendState b{.enabled = true};
+    b.color = {.src = BlendFactor::Zero, .dst = BlendFactor::Zero, .op = op};
+    b.alpha = b.color;
+
+    const Texel got = RenderBlended(*d, b);
+    CheckTexel(got, Quantise(CpuBlend(b, kSrc, kDst)), ToString(op));
+    CHECK(got.r > 0);  // the factors-were-applied answer
+  }
+}
+
+TEST_CASE("metal: a disabled blend state is bit-identical to none at all",
+          "[rhi][metal][gpu]") {
+  // The regression that matters most: every pipeline in the engine takes the
+  // no-blend-state path, so if `enabled = false` diverged from it the damage
+  // would be everywhere and silent.
+  auto d = MakeMetal(/*validation=*/false);
+  REQUIRE(d);
+  // The factors are those of real alpha blending, and only `enabled` says not
+  // to use them. Leaving them at BlendState{}'s defaults would make this case
+  // VACUOUS: src=One, dst=Zero, op=Add is the pass-through equation, so a
+  // backend that ignored `enabled` entirely would produce identical pixels and
+  // this test would pass while proving nothing. (It did, until a red proof
+  // failed to go red.)
+  BlendState disabled = AlphaBlend();
+  disabled.enabled = false;
+
+  const Texel none = RenderBlended(*d, BlendState{}, /*use_blend_states=*/false);
+  const Texel disabled_px = RenderBlended(*d, disabled);
+
+  INFO("none=(" << int(none.r) << "," << int(none.g) << "," << int(none.b)
+                << "," << int(none.a) << ") disabled=(" << int(disabled_px.r)
+                << "," << int(disabled_px.g) << "," << int(disabled_px.b) << ","
+                << int(disabled_px.a) << ")");
+  CHECK(none.r == disabled_px.r);
+  CHECK(none.g == disabled_px.g);
+  CHECK(none.b == disabled_px.b);
+  CHECK(none.a == disabled_px.a);
+  // ...and both are the source, untouched by the destination underneath.
+  CheckTexel(none, Quantise(kSrc), "opaque overwrite");
 }
