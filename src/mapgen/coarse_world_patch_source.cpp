@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "mapgen/biomes.hpp"
+#include "mapgen/cubic_sample.hpp"
 #include "mapgen/patch_io.hpp"
 #include "mapgen/river_clip.hpp"
 #include "mapgen/river_io.hpp"
@@ -32,24 +33,6 @@ constexpr float kMinRiverBranchM = 32.0f;
 // weight) list, weights summing to 1.
 using Tap = std::pair<int, double>;
 
-// Mitchell-Netravali cubic family, ported from tools/protogen/window.cpp's
-// Cubic(). (B, C) = (0, 0.5) is Catmull-Rom -- interpolating (its weight is
-// exactly 1 at an integer sample offset and 0 at every other integer), mild
-// overshoot.
-double CubicWeight(double x, double B, double C) {
-  x = std::fabs(x);
-  const double x2 = x * x, x3 = x2 * x;
-  if (x < 1.0)
-    return ((12 - 9 * B - 6 * C) * x3 + (-18 + 12 * B + 6 * C) * x2 +
-            (6 - 2 * B)) /
-           6.0;
-  if (x < 2.0)
-    return ((-B - 6 * C) * x3 + (6 * B + 30 * C) * x2 + (-12 * B - 48 * C) * x +
-            (8 * B + 24 * C)) /
-           6.0;
-  return 0.0;
-}
-
 // CATMULL-ROM (B=0, C=0.5), NOT LANCZOS-3 -- the default kernel, and its
 // reasoning is ported verbatim from tools/protogen/window.cpp (measured
 // there): Lanczos-3 does not reproduce a linear ramp -- its weights sum to 1
@@ -62,8 +45,10 @@ double CubicWeight(double x, double B, double C) {
 // linear ramp to machine epsilon; Catmull-Rom is the interpolating member of
 // the Mitchell-Netravali family and roughly halves Lanczos's overshoot at
 // the same support.
-constexpr int kCubicSupport = 2;  // taps per side
-double CatmullRom(double x) { return CubicWeight(x, 0.0, 0.5); }
+//
+// The kernel itself (CubicWeight/CatmullRom/kCubicSupport) lives in
+// mapgen/cubic_sample.hpp, shared with the relief filter's point sampler --
+// two copies of the weights would let the raster and point paths drift.
 
 // Builds one output texel's cubic taps directly from WORLD METRES, unlike
 // tools/protogen/window.cpp's BuildTaps, which built one shared src_n/out_n

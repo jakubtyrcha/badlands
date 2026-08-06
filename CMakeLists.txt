@@ -705,7 +705,8 @@ add_library(badlands_patch_providers STATIC
     src/mapgen/patch_io.cpp
     src/mapgen/synthetic_patch_source.cpp
     src/mapgen/file_patch_source.cpp
-    src/mapgen/coarse_world_patch_source.cpp)
+    src/mapgen/coarse_world_patch_source.cpp
+    src/mapgen/cubic_sample.cpp)
 target_link_libraries(badlands_patch_providers PUBLIC badlands_patch_lib)
 
 # badlands_mapview_view: everything the map tool needs to fetch a patch and
@@ -1790,6 +1791,20 @@ target_include_directories(badlands_patch_tests PRIVATE
 )
 target_link_libraries(badlands_patch_tests PRIVATE badlands_patch_providers)
 add_test(NAME badlands_patch_tests COMMAND badlands_patch_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_relief_tests: the stage-2 relief chain -- Catmull-Rom point
+# sampling with analytic gradients (cubic_sample.hpp) and the per-point
+# erosion detail filter (relief_filter.hpp). Same hard rule as
+# badlands_patch_tests: fixtures are hand-written, never simulated.
+add_executable(badlands_relief_tests
+    src/mapgen/relief_filter_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_relief_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_link_libraries(badlands_relief_tests PRIVATE badlands_patch_providers)
+add_test(NAME badlands_relief_tests COMMAND badlands_relief_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_lake_surface_tests: pure-CPU tests for the per-lake water surface and
 # its buried skirt -- the overlap that keeps a later wave displacement from
