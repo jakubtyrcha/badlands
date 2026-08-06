@@ -76,7 +76,7 @@ void check_float3_close(const simd_float3 actual, const simd_float3 expected, co
 // same two literals rather than hardcoded, so the test stays correct if the
 // camera setup ever changes.
 
-TEST_CASE("Editor: PlaneUV drag moves an unsnapped node within the camera-orthogonal plane") {
+TEST_CASE("Editor: PlaneUV drag moves a free node within its own world-fixed u-v plane") {
     Editor* editor = Editor::create();
     editor->setViewportSize(800.0f, 500.0f, 2.0f);
 
@@ -85,8 +85,8 @@ TEST_CASE("Editor: PlaneUV drag moves an unsnapped node within the camera-orthog
     const simd_float3 camera_forward = simd_normalize(target - eye);
 
     // Empty scene: the center-ray raycast misses everything, so this spawn
-    // lands unsnapped at eye + dir*kUnsnappedSpawnDistance (scene.h) — the
-    // gizmo frame for an unsnapped node is {node.position, -camera_forward}.
+    // lands unsnapped at eye + dir*kUnsnappedSpawnDistance (scene.h). A free
+    // node's frame is its own local axes -- world X/Y/Z at identity rotation.
     const SpawnResult spawned = editor->spawn(Shape::Cube, Op::Add, 400.0f, 250.0f);
     REQUIRE(spawned.node_id != kInvalidNode);
     REQUIRE(spawned.snapped == false);
@@ -95,6 +95,12 @@ TEST_CASE("Editor: PlaneUV drag moves an unsnapped node within the camera-orthog
     const GizmoFrame f = frame_for(editor, spawned.node_id, false);
     const float he = f.half_extent;
     const simd_float3 before = to_simd(editor->nodePosition(spawned.node_id));
+
+    // The plane this drag runs in is world XY, and stays world XY whatever the
+    // camera does. It used to be the camera-orthogonal plane, which is the
+    // behaviour this rework reverses.
+    check_float3_close(f.n, simd_float3{0.0f, 0.0f, 1.0f}, 1e-5f);
+    REQUIRE(std::fabs(simd_dot(f.n, camera_forward)) > 0.1f); // genuinely not the camera plane
 
     // Grab the u-v patch center (derived from the shared bounds, not a
     // literal -- those bounds moved once already), pull it 0.3he along u.
@@ -109,10 +115,10 @@ TEST_CASE("Editor: PlaneUV drag moves an unsnapped node within the camera-orthog
     const simd_float3 delta = after - before;
 
     check_float3_close(delta, 0.3f * he * f.u, 5e-3f);
-    // Both the drag-start hit and every subsequent hit lie on the same
-    // stored plane (normal == -camera_forward), so the delta between any two
-    // of them is exactly in-plane, i.e. orthogonal to camera_forward.
-    CHECK(std::fabs(simd_dot(delta, camera_forward)) < 1e-4f);
+    // Both the drag-start hit and every subsequent hit lie on the same stored
+    // plane, so the delta between any two of them is exactly in-plane --
+    // orthogonal to the plane's normal, which is now the frame's n.
+    CHECK(std::fabs(simd_dot(delta, f.n)) < 1e-4f);
 
     SUBCASE("a second updateDrag after endDrag does nothing") {
         editor->updateDrag(200.0f, 450.0f);
@@ -419,8 +425,15 @@ TEST_CASE("Editor: projectSelectedAnchor tracks the node through a drag") {
     REQUIRE(spawned.snapped == false);
     editor->setGizmoVisible(true); // the VM does this in modify mode with a selection
 
-    // Pull along +u, which projects screen-LEFT for this camera (u == -camera
-    // right for an unsnapped frame): the anchor must follow below x=400.
+    const ScreenPoint before = editor->projectSelectedAnchor();
+    REQUIRE(before.visible);
+
+    // Pull along +u. Which way that projects is a property of the camera and
+    // the frame, not something worth pinning here -- the claim is that the
+    // anchor FOLLOWS, so the expected direction is derived from the drag's own
+    // screen displacement rather than hardcoded. (It was hardcoded to
+    // screen-left, which held only while a free node's u was the camera's own
+    // right vector.)
     const GizmoFrame f = frame_for(editor, spawned.node_id, false);
     const ClickPoint p1 = click_at(f.origin + 0.8f * f.half_extent * f.u);
     const ClickPoint p2 = click_at(f.origin + 1.2f * f.half_extent * f.u);
@@ -428,9 +441,11 @@ TEST_CASE("Editor: projectSelectedAnchor tracks the node through a drag") {
     editor->updateDrag(p2.x, p2.y);
     editor->endDrag();
 
-    const ScreenPoint anchor = editor->projectSelectedAnchor();
-    CHECK(anchor.visible);
-    CHECK(anchor.x < 400.0f); // anchor moved the same direction as the drag
+    const ScreenPoint after = editor->projectSelectedAnchor();
+    CHECK(after.visible);
+    REQUIRE(std::fabs(p2.x - p1.x) > 1.0f); // the drag has a real horizontal component
+    CHECK(after.x != doctest::Approx(before.x));
+    CHECK((after.x - before.x) * (p2.x - p1.x) > 0.0f); // same screen direction as the drag
 }
 
 // --- Editor: scale tool ------------------------------------------------------

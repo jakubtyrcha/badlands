@@ -116,18 +116,26 @@ void append_move_gizmo_grid(std::vector<LineVertex>& out, const GizmoFrame& fram
     // Each line is emitted as kGizmoGridSegmentsPerLine disjoint segments
     // rather than one long one: the fade is radial, so a 2-vertex line would
     // interpolate it linearly and wash out the falloff (see lines.h).
+    // The grid spans frame.grid_normal's plane, NOT the u-v drag plane: for an
+    // attached node those are the same plane, but for a free one the grid is a
+    // world-horizontal reference (see GizmoFrame in gizmo.h). Derived through
+    // tangent_basis so the attached case reproduces (u, v) exactly -- it is the
+    // same call gizmo_frame_for_node made to build them.
+    simd_float3 a_dir, b_dir;
+    tangent_basis(frame.grid_normal, a_dir, b_dir);
+
     const int segs = kGizmoGridSegmentsPerLine;
     for (int i = 0; i <= divisions; ++i) {
         const float offset = -he + static_cast<float>(i) * step;
         for (int s = 0; s < segs; ++s) {
             const float t0 = -he + 2.0f * he * static_cast<float>(s) / static_cast<float>(segs);
             const float t1 = -he + 2.0f * he * static_cast<float>(s + 1) / static_cast<float>(segs);
-            // Along u (offset along v): coordinates are (t, offset) in (u, v).
-            push(t0, offset, frame.u, frame.v);
-            push(t1, offset, frame.u, frame.v);
-            // Along v (offset along u): coordinates are (offset, t).
-            push(offset, t0, frame.u, frame.v);
-            push(offset, t1, frame.u, frame.v);
+            // Along a (offset along b): coordinates are (t, offset) in (a, b).
+            push(t0, offset, a_dir, b_dir);
+            push(t1, offset, a_dir, b_dir);
+            // Along b (offset along a): coordinates are (offset, t).
+            push(offset, t0, a_dir, b_dir);
+            push(offset, t1, a_dir, b_dir);
         }
     }
 }

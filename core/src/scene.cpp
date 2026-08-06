@@ -49,7 +49,12 @@ Node SceneDocument::make_node(Shape shape, Op op) {
 int32_t SceneDocument::spawn_snapped(Shape shape, Op op, simd_float3 hit, simd_float3 unit_normal,
                                       int32_t parent_id) {
     Node node = make_node(shape, op);
-    node.position = hit + unit_normal * 0.5f;
+    // Centred ON the surface, not resting on it. A detail added to a face is
+    // meant to be half-embedded -- that is what an Add node unions into, and a
+    // Subtract node carves from. It also puts the node's centre exactly on its
+    // snap point, so the placement and shape gizmos coincide until the detail
+    // is deliberately lifted off.
+    node.position = hit;
     node.snapped = true;
     node.snap_point = hit;
     node.snap_normal = unit_normal;
@@ -69,9 +74,9 @@ void SceneDocument::remove_node(int32_t id) {
     std::erase_if(nodes_, [id](const Node& node) { return node.id == id; });
 
     // Fix up survivors that were snapped onto the just-removed node: leaving
-    // snap_parent pointing at a dead id would be a dangling reference (drag
-    // math -- drag_plane_for_node -- keys off `snapped`, so clearing it here
-    // makes the plane fall back to camera-facing, same as an unsnapped node).
+    // snap_parent pointing at a dead id would be a dangling reference. The
+    // gizmo frame keys off `snapped`, so clearing it here drops the orphan back
+    // to its own local axes, exactly like a node that was never snapped.
     for (Node& node : nodes_) {
         if (node.snap_parent == id) {
             node.snapped = false;

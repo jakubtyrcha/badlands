@@ -31,19 +31,32 @@ inline constexpr float kGizmoPatchOuter = 0.50f;
 inline constexpr float kGizmoPatchCenter = 0.5f * (kGizmoPatchInner + kGizmoPatchOuter);
 
 // A gizmo's frame. (u, v, n) is orthonormal and right-handed (u x v == n) for
-// both kinds; what differs is where it comes from.
+// both kinds; what differs is where it comes from. NOTHING here depends on the
+// camera except half_extent -- a manipulator whose axes swim as you orbit
+// cannot build muscle memory, which is the whole point of this frame rework.
 //
-// Move: origin/n follow drag_plane_for_node (snapped -> snap frame, unsnapped
-// -> camera-facing), because a move handle drags along a surface.
+// Move, attached: {snap_point, snap_normal} plus its tangent basis, because a
+// move handle on a detail drags along the surface the detail sits on.
 //
-// Scale: the node's own local axes -- world X/Y/Z while Node::rotation stays
-// identity (scene.h) -- centred on the node. A camera-facing basis would be
-// meaningless here: a scale handle has to map onto a scale COMPONENT, and
-// u/v/n then land on scale.x/y/z directly. It also makes the colours correct
-// for free, since kColorAxisU/V/N already alias the world-axis palette.
+// Move, free / Scale: the node's own local axes (simd_act of Node::rotation on
+// world X/Y/Z), centred on the node. For Scale this is forced -- a scale handle
+// has to map onto a scale COMPONENT, so u/v/n must land on scale.x/y/z. For a
+// free Move it is a choice, reversing the original move-gizmo ruling that let
+// an unsnapped node's axes follow the camera. Either way the colours come out
+// right for free, since kColorAxisU/V/N already alias the world-axis palette
+// and these reduce to world X/Y/Z at identity rotation.
+//
+// grid_normal is the normal of the plane the GRID is drawn in, and is
+// deliberately independent of n. For an attached node the two agree: the
+// tangent plane is both the surface you slide on and the u-v drag plane. For a
+// free node the grid is world-horizontal (grid_normal = +Y) -- a local echo of
+// the ground plate, which is more use than the vertical wall the u-v plane
+// would give. So the grid is a REFERENCE plane, not a drag-plane affordance as
+// it was originally specified. Scale draws no grid and leaves this at n.
 struct GizmoFrame {
     simd_float3 origin;
     simd_float3 n, u, v;
+    simd_float3 grid_normal;
     float half_extent;
 };
 

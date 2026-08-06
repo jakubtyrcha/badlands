@@ -32,20 +32,30 @@ float gizmo_half_extent(simd_float3 origin, const Camera& camera) {
 GizmoFrame gizmo_frame_for_node(const Node& node, const Camera& camera, GizmoKind kind) {
     GizmoFrame f;
 
-    if (kind == GizmoKind::Scale) {
-        // The node's own local axes, centred on the node. See GizmoFrame's
-        // header comment for why a camera-facing basis would be wrong here.
-        // Right-handed by construction: X x Y == Z.
-        f.origin = node.position;
-        f.u = simd_float3{1.0f, 0.0f, 0.0f};
-        f.v = simd_float3{0.0f, 1.0f, 0.0f};
-        f.n = simd_float3{0.0f, 0.0f, 1.0f};
-    } else {
-        const simd_float3 forward = simd_normalize(camera.target - camera.eye);
-        const DragPlane dp = drag_plane_for_node(node, forward);
-        f.origin = dp.point;
-        f.n = dp.normal;
+    if (kind == GizmoKind::Move && node.snapped) {
+        // The surface the detail was placed on. Fixed in world space, so
+        // "pull it out along the normal" means the same thing from every
+        // camera angle.
+        f.origin = node.snap_point;
+        f.n = node.snap_normal;
         tangent_basis(f.n, f.u, f.v);
+        // Both readings of the grid coincide here: the tangent plane IS the
+        // surface and IS the u-v drag plane.
+        f.grid_normal = f.n;
+    } else {
+        // The node's own local axes. Right-handed by construction (a rotation
+        // preserves X x Y == Z), and exactly world X/Y/Z while the node's
+        // rotation is identity -- which is what makes this a no-op for every
+        // scene built before rotation existed.
+        f.origin = node.position;
+        f.u = simd_act(node.rotation, simd_float3{1.0f, 0.0f, 0.0f});
+        f.v = simd_act(node.rotation, simd_float3{0.0f, 1.0f, 0.0f});
+        f.n = simd_act(node.rotation, simd_float3{0.0f, 0.0f, 1.0f});
+        // Scale draws no grid, so its value is inert -- set to n rather than
+        // left unset, so there is no "meaningless unless" state to reason
+        // about. A free Move node gets a world-horizontal reference plane
+        // instead of the u-v plane; see GizmoFrame's header comment.
+        f.grid_normal = (kind == GizmoKind::Move) ? simd_float3{0.0f, 1.0f, 0.0f} : f.n;
     }
 
     f.half_extent = gizmo_half_extent(f.origin, camera);

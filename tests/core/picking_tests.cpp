@@ -533,33 +533,10 @@ TEST_CASE("ray_plane: literals from the task brief") {
     }
 }
 
-// --- drag_plane_for_node ----------------------------------------------------
-
-TEST_CASE("drag_plane_for_node: snapped node ignores camera_forward, uses its snap fields") {
-    Node node;
-    node.snapped = true;
-    node.snap_point = {1.0f, 2.0f, 3.0f};
-    node.snap_normal = {0.0f, 0.0f, 1.0f};
-    node.position = {99.0f, 99.0f, 99.0f}; // must be ignored: snapped wins over position
-
-    for (const simd_float3 camera_forward :
-         {simd_float3{0.0f, 0.0f, -1.0f}, simd_float3{1.0f, 0.0f, 0.0f}, simd_normalize(simd_float3{1.0f, 1.0f, 1.0f})}) {
-        CAPTURE(camera_forward.x);
-        const DragPlane dp = drag_plane_for_node(node, camera_forward);
-        check_float3_approx(dp.point, simd_float3{1.0f, 2.0f, 3.0f});
-        check_float3_approx(dp.normal, simd_float3{0.0f, 0.0f, 1.0f});
-    }
-}
-
-TEST_CASE("drag_plane_for_node: unsnapped node uses its position and -camera_forward") {
-    Node node;
-    node.snapped = false;
-    node.position = {5.0f, 6.0f, 7.0f};
-
-    const DragPlane dp = drag_plane_for_node(node, simd_float3{0.0f, 0.0f, -1.0f});
-    check_float3_approx(dp.point, simd_float3{5.0f, 6.0f, 7.0f});
-    check_float3_approx(dp.normal, simd_float3{0.0f, 0.0f, 1.0f}); // -camera_forward
-}
+// drag_plane_for_node's two cases moved to gizmo_tests.cpp when the function
+// was folded into gizmo_frame_for_node -- the behaviour they pinned (snapped ->
+// the snap frame, free -> the node's own) is now a property of the frame, and
+// the camera no longer takes part in either.
 
 // --- Editor integration: scene built entirely through spawn() -------------
 

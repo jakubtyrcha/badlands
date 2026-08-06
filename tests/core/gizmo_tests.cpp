@@ -83,26 +83,27 @@ TEST_CASE("tangent_basis: degenerate zero normal falls back to {0,1,0} instead o
 
 // --- gizmo_frame_for_node ---------------------------------------------------
 
-TEST_CASE("gizmo_frame_for_node: snapped node uses the snap frame; unsnapped faces the camera; "
-          "half_extent is screen-constant") {
+TEST_CASE("gizmo_frame_for_node: snapped Move uses the snap frame; everything else uses the "
+          "node's own axes; half_extent is screen-constant") {
     const Camera cam = test_camera();
-    const simd_float3 forward = simd_normalize(cam.target - cam.eye);
 
     Node node;
     node.position = {0.5f, 1.0f, -0.25f};
 
-    SUBCASE("unsnapped: origin = position, n = -camera_forward") {
+    SUBCASE("free Move: origin = position, basis = the node's local axes") {
         const GizmoFrame f = gizmo_frame_for_node(node, cam, GizmoKind::Move);
         check_float3_approx(f.origin, node.position);
-        check_float3_approx(f.n, -forward);
-
-        simd_float3 u, v;
-        tangent_basis(-forward, u, v);
-        check_float3_approx(f.u, u);
-        check_float3_approx(f.v, v);
+        // Identity rotation, so the local axes are world X/Y/Z. This used to be
+        // a camera-facing basis (-camera_forward and its tangent basis), which
+        // is exactly the behaviour being reversed here.
+        check_float3_approx(f.u, simd_float3{1.0f, 0.0f, 0.0f});
+        check_float3_approx(f.v, simd_float3{0.0f, 1.0f, 0.0f});
+        check_float3_approx(f.n, simd_float3{0.0f, 0.0f, 1.0f});
+        // ...and its grid is world-horizontal, not the u-v plane.
+        check_float3_approx(f.grid_normal, simd_float3{0.0f, 1.0f, 0.0f});
     }
 
-    SUBCASE("snapped: origin = snap_point, n = snap_normal") {
+    SUBCASE("snapped Move: origin = snap_point, n = snap_normal, grid = the tangent plane") {
         node.snapped = true;
         node.snap_point = {1.0f, 0.0f, 1.0f};
         node.snap_normal = simd_normalize(simd_float3{0.0f, 1.0f, 0.2f});
@@ -110,6 +111,24 @@ TEST_CASE("gizmo_frame_for_node: snapped node uses the snap frame; unsnapped fac
         const GizmoFrame f = gizmo_frame_for_node(node, cam, GizmoKind::Move);
         check_float3_approx(f.origin, node.snap_point);
         check_float3_approx(f.n, node.snap_normal);
+        check_float3_approx(f.grid_normal, node.snap_normal);
+
+        simd_float3 u, v;
+        tangent_basis(node.snap_normal, u, v);
+        check_float3_approx(f.u, u);
+        check_float3_approx(f.v, v);
+    }
+
+    SUBCASE("Scale ignores snapping entirely: always the node's centre and own axes") {
+        node.snapped = true;
+        node.snap_point = {1.0f, 0.0f, 1.0f};
+        node.snap_normal = simd_normalize(simd_float3{0.0f, 1.0f, 0.2f});
+
+        const GizmoFrame f = gizmo_frame_for_node(node, cam, GizmoKind::Scale);
+        check_float3_approx(f.origin, node.position); // NOT snap_point
+        check_float3_approx(f.u, simd_float3{1.0f, 0.0f, 0.0f});
+        check_float3_approx(f.v, simd_float3{0.0f, 1.0f, 0.0f});
+        check_float3_approx(f.n, simd_float3{0.0f, 0.0f, 1.0f});
     }
 
     SUBCASE("half_extent = kGizmoScreenFraction * d * 2*tan(fov/2)") {
@@ -118,6 +137,69 @@ TEST_CASE("gizmo_frame_for_node: snapped node uses the snap frame; unsnapped fac
         const float expected = kGizmoScreenFraction * d * 2.0f * std::tan(cam.fov_y_radians * 0.5f);
         CHECK(f.half_extent == doctest::Approx(expected));
         CHECK(f.half_extent > 0.0f);
+    }
+}
+
+TEST_CASE("gizmo_frame_for_node: the basis does not depend on the camera") {
+    // THE regression test for this rework. A manipulator whose axes swim as you
+    // orbit cannot build muscle memory, and an unsnapped node's basis used to
+    // be derived straight from camera_forward. Only half_extent (screen-constant
+    // sizing) is allowed to vary with the camera, so it is asserted to differ
+    // rather than merely left unchecked -- otherwise a frame that ignored the
+    // camera completely would pass this case for the wrong reason.
+    Camera a = test_camera();
+    Camera b = test_camera();
+    b.eye = {-7.0f, -4.0f, -2.0f}; // a wholly different pose, far side of the scene
+    b.target = {0.5f, 1.0f, -0.25f};
+
+    Node free_node;
+    free_node.position = {0.5f, 1.0f, -0.25f};
+
+    Node snapped = free_node;
+    snapped.snapped = true;
+    snapped.snap_point = {1.0f, 0.0f, 1.0f};
+    snapped.snap_normal = simd_normalize(simd_float3{0.3f, 1.0f, 0.2f});
+
+    for (const Node& node : {free_node, snapped}) {
+        for (const GizmoKind kind : {GizmoKind::Move, GizmoKind::Scale}) {
+            INFO("snapped: " << node.snapped << ", scale kind: " << (kind == GizmoKind::Scale));
+            const GizmoFrame fa = gizmo_frame_for_node(node, a, kind);
+            const GizmoFrame fb = gizmo_frame_for_node(node, b, kind);
+            check_float3_approx(fa.origin, fb.origin);
+            check_float3_approx(fa.u, fb.u);
+            check_float3_approx(fa.v, fb.v);
+            check_float3_approx(fa.n, fb.n);
+            check_float3_approx(fa.grid_normal, fb.grid_normal);
+            CHECK(fa.half_extent != doctest::Approx(fb.half_extent)); // sizing still tracks depth
+        }
+    }
+}
+
+TEST_CASE("gizmo_frame_for_node: the node's own axes follow its rotation") {
+    const Camera cam = test_camera();
+
+    Node node;
+    node.position = {0.0f, 0.0f, 0.0f};
+    // A quarter turn about +Y takes local X to world -Z and local Z to world X.
+    node.rotation = simd_quaternion(static_cast<float>(M_PI_2), simd_float3{0.0f, 1.0f, 0.0f});
+
+    for (const GizmoKind kind : {GizmoKind::Move, GizmoKind::Scale}) {
+        INFO("scale kind: " << (kind == GizmoKind::Scale));
+        const GizmoFrame f = gizmo_frame_for_node(node, cam, kind);
+        check_float3_approx(f.u, simd_float3{0.0f, 0.0f, -1.0f});
+        check_float3_approx(f.v, simd_float3{0.0f, 1.0f, 0.0f});
+        check_float3_approx(f.n, simd_float3{1.0f, 0.0f, 0.0f});
+        // Still right-handed after the turn, which is what the drag and draw
+        // paths both assume.
+        check_float3_approx(simd_cross(f.u, f.v), f.n);
+    }
+
+    SUBCASE("but a snapped Move frame follows the SURFACE, not the node's spin") {
+        node.snapped = true;
+        node.snap_point = {0.0f, 0.0f, 0.0f};
+        node.snap_normal = {0.0f, 1.0f, 0.0f};
+        const GizmoFrame f = gizmo_frame_for_node(node, cam, GizmoKind::Move);
+        check_float3_approx(f.n, node.snap_normal);
     }
 }
 
