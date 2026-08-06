@@ -486,6 +486,19 @@ TEST_CASE("metal: wild buffer offsets are refused", "[rhi]") {
   auto d = MakeMetal();
   rhitest::CheckWildBufferOffsetsAreRefused(*d);
 }
+
+TEST_CASE("metal: an unaligned base offset is refused", "[rhi]") {
+  auto d = MakeMetal();
+  rhitest::CheckUnalignedBaseOffsetIsRefused(*d);
+}
+TEST_CASE("metal: a base offset past the buffer is refused", "[rhi]") {
+  auto d = MakeMetal();
+  rhitest::CheckBaseOffsetPastTheBufferIsRefused(*d);
+}
+TEST_CASE("metal: an unimplemented buffer_size is refused", "[rhi]") {
+  auto d = MakeMetal();
+  rhitest::CheckUnimplementedBufferSizeIsRefused(*d);
+}
 TEST_CASE("metal: WaitIdle does not retire the open frame", "[rhi]") {
   auto d = MakeMetal();
   rhitest::CheckWaitIdleDoesNotRetireTheOpenFrame(*d);
@@ -599,6 +612,47 @@ kernel void cs_main(constant uint* src [[buffer(0)]],
 
   CHECK(run_with(0) == kFirst);
   CHECK(run_with(uint32_t(align)) == kSecond);
+}
+
+TEST_CASE("metal: a short dynamic-offset span is refused", "[rhi][metal]") {
+  // The decorator catches this too, but it compiles out of a release build.
+  // Binding at base offsets instead would leave every dynamic binding pointing
+  // at frame 0's data forever, with nothing logged anywhere.
+  auto d = MakeMetal(/*validation=*/false);
+  REQUIRE(d);
+  auto pipe = rhitest::MakeTestPipeline(*d);
+  REQUIRE(pipe);
+  auto ubo = d->CreateBuffer({.size = 1024, .usage = BufferUsage::Uniform});
+  auto ssbo = d->CreateBuffer({.size = 1024, .usage = BufferUsage::Storage});
+  auto tex = d->CreateTexture({.width = 4, .height = 4,
+                               .format = Format::RGBA8Unorm,
+                               .usage = TextureUsage::Sampled});
+  auto samp = d->CreateSampler({});
+  auto table = d->CreateBindingTable(
+      {.compute_pipeline = pipe.get(),
+       .entries = {{.slot = 0, .kind = BindingKind::UniformBuffer,
+                    .buffer = ubo.get(), .dynamic_offset = true},
+                   {.slot = 1, .kind = BindingKind::StorageBuffer,
+                    .buffer = ssbo.get()},
+                   {.slot = 2, .kind = BindingKind::SampledTexture,
+                    .texture_view = tex->GetDefaultView()},
+                   {.slot = 3, .kind = BindingKind::Sampler,
+                    .sampler = samp.get()}},
+       .label = "shortspan"});
+  REQUIRE(table);
+
+  const std::string log = rhitest::CaptureLog([&] {
+    auto encoder = d->CreateCommandEncoder("short");
+    auto* pass = encoder->BeginComputePass("cp");
+    pass->SetPipeline(pipe.get());
+    pass->SetBindingTable(0, table.get());  // declares one, supplies none
+    pass->End();
+    encoder->Finish();
+    d->Submit(*encoder);
+    d->WaitIdle();
+  });
+  INFO(log);
+  CHECK(log.find("binding nothing rather than guessing") != std::string::npos);
 }
 
 TEST_CASE("metal: a deferred handle is really released rather than stranded",

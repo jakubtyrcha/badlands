@@ -148,6 +148,19 @@ TEST_CASE("Null: wild buffer offsets are refused", "[rhi]") {
   auto d = MakeNull();
   rhitest::CheckWildBufferOffsetsAreRefused(*d);
 }
+
+TEST_CASE("Null: an unaligned base offset is refused", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckUnalignedBaseOffsetIsRefused(*d);
+}
+TEST_CASE("Null: a base offset past the buffer is refused", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckBaseOffsetPastTheBufferIsRefused(*d);
+}
+TEST_CASE("Null: an unimplemented buffer_size is refused", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckUnimplementedBufferSizeIsRefused(*d);
+}
 TEST_CASE("Null: WaitIdle does not retire the open frame", "[rhi]") {
   auto d = MakeNull();
   rhitest::CheckWaitIdleDoesNotRetireTheOpenFrame(*d);

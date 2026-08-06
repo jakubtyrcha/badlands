@@ -910,6 +910,12 @@ struct DynamicSet {
   TexturePtr tex;
   SamplerPtr samp;
   BindingTablePtr table;
+
+  void TransitionAll(ICommandEncoder& e) const {
+    e.Transition(ubo.get(), ResourceState::ShaderRead);
+    e.Transition(ssbo.get(), ResourceState::ShaderWrite);
+    e.Transition(tex.get(), ResourceState::ShaderRead);
+  }
 };
 
 DynamicSet MakeDynamicSet(IRhiDevice& d) {
@@ -1008,6 +1014,35 @@ TEST_CASE("validation: a dynamic offset past the buffer is refused",
   REQUIRE(observed.has_value());
   INFO(*observed);
   CHECK(observed->find("would bind at") != std::string::npos);
+}
+
+TEST_CASE("validation: a refused bind also refuses the dispatch",
+          "[rhi][validation]") {
+  // Refusing the BIND alone leaves whatever was bound at that group in place,
+  // so the dispatch reads the PREVIOUS table's resources -- a different wrong
+  // answer than the release build gives, which is the worst kind.
+  auto device = MakeValidated();
+  auto s = MakeDynamicSet(*device);
+  REQUIRE(s.table);
+  const uint32_t bad[1] = {1};  // unaligned: the bind will be refused
+
+  auto observed = Observe(*device, [&] {
+    auto encoder = device->CreateCommandEncoder("e");
+    s.TransitionAll(*encoder);
+    auto* pass = encoder->BeginComputePass("cp");
+    pass->SetPipeline(s.pipe.get());
+    pass->SetBindingTable(0, s.table.get(), bad);
+    pass->Dispatch(1);
+    pass->End();
+    encoder->Finish();
+  });
+  REQUIRE(observed.has_value());
+  INFO(*observed);
+  CHECK(observed->find("wrong resources") != std::string::npos);
+
+  auto* log = badlands::rhi::null::GetCommandLog(*device);
+  REQUIRE(log != nullptr);
+  CHECK(log->Count(badlands::rhi::null::RecordedCommand::Kind::Dispatch) == 0);
 }
 
 TEST_CASE("validation: a correct dynamic offset reports nothing",

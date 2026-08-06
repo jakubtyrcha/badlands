@@ -660,7 +660,7 @@ class NullDevice final : public IRhiDevice {
     return std::make_shared<NullComputePipeline>(d);
   }
   BindingTablePtr CreateBindingTable(const BindingTableDesc& d) override {
-    auto resolved = ResolveBindingTable(d);
+    auto resolved = ResolveBindingTable(d, MinBufferOffsetAlignment());
     if (!resolved) return nullptr;  // ResolveBindingTable logged why
     return std::make_shared<NullBindingTable>(std::move(*resolved), d.group,
                                               d.label, retire_);

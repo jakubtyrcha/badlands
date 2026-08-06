@@ -181,7 +181,7 @@ std::vector<uint32_t> DynamicEntryOrder(const std::vector<BindingEntry>& entries
 // index space, D3D12 splits srv/uav), so resolving here stays correct for a
 // DX12 backend without a second implementation.
 std::optional<ResolvedBindingTable> ResolveBindingTable(
-    const BindingTableDesc& desc);
+    const BindingTableDesc& desc, uint64_t min_buffer_offset_alignment);
 
 // Turns a requested view range into a concrete one: fills in the "0 = all
 // remaining" counts and bounds-checks the result against the texture.

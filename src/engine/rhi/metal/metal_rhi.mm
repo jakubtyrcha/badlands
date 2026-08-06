@@ -806,6 +806,19 @@ void ApplyTableGraphics(id<MTLRenderCommandEncoder> enc,
                         std::span<const uint32_t> dynamic_offsets) {
   const auto& entries = table.Entries();
   const auto& indices = table.Indices();
+  // Refused, not silently bound at the base offsets. Falling back would make
+  // every dynamic binding point at frame 0's data forever -- the camera never
+  // moves and the terrain never updates -- with no diagnostic on any code
+  // path, because the decorator that would have caught it compiles out of a
+  // release build (rule 12).
+  if (dynamic_offsets.size() != table.DynamicEntries().size()) {
+    spdlog::error(
+        "rhi/metal: binding table '{}' declares {} dynamic offset(s) but {} "
+        "were supplied -- binding nothing rather than guessing",
+        table.GetLabel(), table.DynamicEntries().size(),
+        dynamic_offsets.size());
+    return;
+  }
   for (size_t i = 0; i < entries.size(); ++i) {
     const BindingEntry& e = entries[i];
     const uint32_t index = indices[i];
@@ -843,6 +856,19 @@ void ApplyTableCompute(id<MTLComputeCommandEncoder> enc,
                        std::span<const uint32_t> dynamic_offsets) {
   const auto& entries = table.Entries();
   const auto& indices = table.Indices();
+  // Refused, not silently bound at the base offsets. Falling back would make
+  // every dynamic binding point at frame 0's data forever -- the camera never
+  // moves and the terrain never updates -- with no diagnostic on any code
+  // path, because the decorator that would have caught it compiles out of a
+  // release build (rule 12).
+  if (dynamic_offsets.size() != table.DynamicEntries().size()) {
+    spdlog::error(
+        "rhi/metal: binding table '{}' declares {} dynamic offset(s) but {} "
+        "were supplied -- binding nothing rather than guessing",
+        table.GetLabel(), table.DynamicEntries().size(),
+        dynamic_offsets.size());
+    return;
+  }
   for (size_t i = 0; i < entries.size(); ++i) {
     const BindingEntry& e = entries[i];
     const uint32_t index = indices[i];
@@ -1321,7 +1347,7 @@ class MetalDevice final : public IRhiDevice {
   }
 
   BindingTablePtr CreateBindingTable(const BindingTableDesc& d) override {
-    auto resolved = ResolveBindingTable(d);
+    auto resolved = ResolveBindingTable(d, MinBufferOffsetAlignment());
     if (!resolved) return nullptr;  // ResolveBindingTable logged why
     return std::make_shared<MetalBindingTable>(std::move(*resolved), d.group,
                                                d.label, retire_);

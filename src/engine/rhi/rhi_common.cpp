@@ -107,7 +107,7 @@ std::vector<uint32_t> DynamicEntryOrder(
 }
 
 std::optional<ResolvedBindingTable> ResolveBindingTable(
-    const BindingTableDesc& d) {
+    const BindingTableDesc& d, uint64_t min_buffer_offset_alignment) {
   const ShaderReflection* refl = ReflectionOf(d);
   if (!refl) {
     spdlog::error(
@@ -179,6 +179,40 @@ std::optional<ResolvedBindingTable> ResolveBindingTable(
           "shared_ptr-owned, so the table cannot retain it",
           d.label, i, e.slot, owner->GetLabel());
       return std::nullopt;
+    }
+
+    // The BASE offset, checked here because it is fixed for the table's life
+    // (rule 13). Nothing checked it before: the validation layer only ever
+    // looked at the dynamic part, so `buffer_offset = 16` plus a correctly
+    // aligned dynamic offset produced a final address that satisfied neither.
+    if (e.buffer) {
+      const uint64_t size = e.buffer->GetSize();
+      if (e.buffer_offset % min_buffer_offset_alignment != 0) {
+        spdlog::error(
+            "rhi: binding table '{}' entry {}: slot {} buffer_offset {} is "
+            "not a multiple of the backend's {}-byte alignment",
+            d.label, i, e.slot, e.buffer_offset, min_buffer_offset_alignment);
+        return std::nullopt;
+      }
+      if (e.buffer_offset > size) {
+        spdlog::error(
+            "rhi: binding table '{}' entry {}: slot {} buffer_offset {} is "
+            "past the end of buffer '{}' ({} bytes)",
+            d.label, i, e.slot, e.buffer_offset, e.buffer->GetLabel(), size);
+        return std::nullopt;
+      }
+      // buffer_size is ACCEPTED AND IGNORED by every backend -- Metal's
+      // setBuffer takes no length -- so a caller setting it would believe in a
+      // bound it does not have. Refuse it rather than silently drop it
+      // (rule 4); implementing it means a real bounds-checked view, not a
+      // field the encoder never reads.
+      if (e.buffer_size != 0) {
+        spdlog::error(
+            "rhi: binding table '{}' entry {}: slot {} sets buffer_size {}, "
+            "which no backend implements -- leave it 0 until it does",
+            d.label, i, e.slot, e.buffer_size);
+        return std::nullopt;
+      }
     }
 
     // A dynamic offset re-points a BUFFER binding. There is nothing to

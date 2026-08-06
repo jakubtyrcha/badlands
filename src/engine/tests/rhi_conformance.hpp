@@ -1174,6 +1174,75 @@ inline void CheckFrameAllocatorSurvivesGrowthFailure(IRhiDevice& device) {
   device.WaitIdle();
 }
 
+// NOT in RunAllConformanceChecks: like the other creation-time refusals these
+// provoke validation reports on purpose, and the aggregate asserts a clean
+// scope. Each suite calls them as its own TEST_CASE instead.
+//
+// The base offset is fixed for the table's life, so it is checked when the
+// table is built. Only the DYNAMIC part was ever checked, so an unaligned
+// base plus a correctly aligned dynamic offset produced a final address that
+// satisfied neither.
+inline void CheckUnalignedBaseOffsetIsRefused(IRhiDevice& device) {
+  auto pipe = MakeTestPipeline(device);
+  REQUIRE(pipe);
+  auto ubo = device.CreateBuffer(
+      {.size = 1024, .usage = BufferUsage::Uniform, .label = "u"});
+
+  BindingTablePtr table;
+  const std::string log = CaptureLog([&] {
+    table = device.CreateBindingTable(
+        {.compute_pipeline = pipe.get(),
+         .entries = {{.slot = 0, .kind = BindingKind::UniformBuffer,
+                      .buffer = ubo.get(), .buffer_offset = 1}},
+         .label = "unaligned_base"});
+  });
+  INFO(log);
+  CHECK(table == nullptr);
+  CHECK(log.find("not a multiple") != std::string::npos);
+}
+
+inline void CheckBaseOffsetPastTheBufferIsRefused(IRhiDevice& device) {
+  auto pipe = MakeTestPipeline(device);
+  REQUIRE(pipe);
+  auto ubo = device.CreateBuffer(
+      {.size = 256, .usage = BufferUsage::Uniform, .label = "small"});
+  const uint64_t align = device.MinBufferOffsetAlignment();
+
+  BindingTablePtr table;
+  const std::string log = CaptureLog([&] {
+    table = device.CreateBindingTable(
+        {.compute_pipeline = pipe.get(),
+         .entries = {{.slot = 0, .kind = BindingKind::UniformBuffer,
+                      .buffer = ubo.get(),
+                      .buffer_offset = align * 100}},
+         .label = "past_end"});
+  });
+  INFO(log);
+  CHECK(table == nullptr);
+  CHECK(log.find("past the end") != std::string::npos);
+}
+
+// buffer_size is read by no backend, so accepting it would be a bound the
+// caller believes in and does not have (rule 4).
+inline void CheckUnimplementedBufferSizeIsRefused(IRhiDevice& device) {
+  auto pipe = MakeTestPipeline(device);
+  REQUIRE(pipe);
+  auto ubo = device.CreateBuffer(
+      {.size = 1024, .usage = BufferUsage::Uniform, .label = "u"});
+
+  BindingTablePtr table;
+  const std::string log = CaptureLog([&] {
+    table = device.CreateBindingTable(
+        {.compute_pipeline = pipe.get(),
+         .entries = {{.slot = 0, .kind = BindingKind::UniformBuffer,
+                      .buffer = ubo.get(), .buffer_size = 64}},
+         .label = "sized"});
+  });
+  INFO(log);
+  CHECK(table == nullptr);
+  CHECK(log.find("no backend implements") != std::string::npos);
+}
+
 // Submitted work must retire rather than accumulate.
 //
 // Honest about its own strength: the load-bearing part is that InFlightCount()

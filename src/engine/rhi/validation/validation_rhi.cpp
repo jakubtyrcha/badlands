@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <optional>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -267,8 +268,13 @@ class ValidationRenderPass final : public IRenderPass {
     if (Ended("SetBindingTable")) return;
     CheckTableUsable(group, table);
     if (!CheckDynamicOffsets(*ctx_, table, dynamic_offsets)) {
-      return;  // refused: binding at a wrong offset renders wrong, silently
+      // Refusing the BIND alone is not enough: whatever was bound at this
+      // group before is still bound, so a draw would read the wrong
+      // resources rather than none. Remember it and refuse the draw too.
+      refused_groups_.insert(group);
+      return;
     }
+    refused_groups_.erase(group);
     inner_->SetBindingTable(group, Unwrap(table), dynamic_offsets);
   }
 
@@ -297,13 +303,15 @@ class ValidationRenderPass final : public IRenderPass {
   }
 
   void Draw(uint32_t vc, uint32_t ic, uint32_t fv, uint32_t fi) override {
-    if (Ended("Draw") || NoPipeline("Draw")) return;
+    if (Ended("Draw") || NoPipeline("Draw") ||
+        StaleBindings("Draw")) return;
     inner_->Draw(vc, ic, fv, fi);
   }
 
   void DrawIndexed(uint32_t ic, uint32_t inst, uint32_t fi, int32_t bv,
                    uint32_t finst) override {
-    if (Ended("DrawIndexed") || NoPipeline("DrawIndexed")) return;
+    if (Ended("DrawIndexed") || NoPipeline("DrawIndexed") ||
+        StaleBindings("DrawIndexed")) return;
     if (!index_bound_) {
       ctx_->recorder.Report("DrawIndexed: no index buffer bound");
       return;
@@ -317,7 +325,8 @@ class ValidationRenderPass final : public IRenderPass {
   }
 
   void DrawIndexedIndirect(IBuffer* args, uint64_t offset) override {
-    if (Ended("DrawIndexedIndirect") || NoPipeline("DrawIndexedIndirect")) return;
+    if (Ended("DrawIndexedIndirect") || NoPipeline("DrawIndexedIndirect") ||
+        StaleBindings("DrawIndexedIndirect")) return;
     // Refused, not reported-and-performed: the sibling DrawIndexed refuses on
     // the same condition, and this is the path the GPU-driven MVP actually
     // uses (rule 3).
@@ -372,6 +381,17 @@ class ValidationRenderPass final : public IRenderPass {
     return true;
   }
 
+  // True if any group's most recent bind was refused, in which case the draw
+  // would run against whatever was bound there before.
+  bool StaleBindings(const char* what) {
+    if (refused_groups_.empty()) return false;
+    ctx_->recorder.Report(fmt::format(
+        "{}: group {} still holds the table bound before a refused "
+        "SetBindingTable -- the draw would read the wrong resources",
+        what, *refused_groups_.begin()));
+    return true;
+  }
+
   // True if indices [first, first + count) lie inside the bound index buffer.
   //
   // Every step avoids addition on values that can be near their type's
@@ -398,6 +418,7 @@ class ValidationRenderPass final : public IRenderPass {
   StateTracker* states_;
   std::string label_;
   IRenderPipeline* pipeline_ = nullptr;
+  std::set<uint32_t> refused_groups_;
   IBuffer* index_buffer_ = nullptr;
   IndexFormat index_format_ = IndexFormat::Uint32;
   uint64_t index_offset_ = 0;
@@ -421,12 +442,15 @@ class ValidationComputePass final : public IComputePass {
     if (Ended("SetBindingTable")) return;
     CheckTableUsable(group, table);
     if (!CheckDynamicOffsets(*ctx_, table, dynamic_offsets)) {
+      // See the render pass: a stale table stays bound at this group.
+      refused_groups_.insert(group);
       return;
     }
+    refused_groups_.erase(group);
     inner_->SetBindingTable(group, Unwrap(table), dynamic_offsets);
   }
   void Dispatch(uint32_t x, uint32_t y, uint32_t z) override {
-    if (Ended("Dispatch")) return;
+    if (Ended("Dispatch") || StaleBindings("Dispatch")) return;
     if (!pipeline_) {
       ctx_->recorder.Report("Dispatch: no pipeline bound");
       return;
@@ -455,6 +479,15 @@ class ValidationComputePass final : public IComputePass {
                           "' has already ended");
     return true;
   }
+  // See the render pass: a refused bind leaves the previous table in place.
+  bool StaleBindings(const char* what) {
+    if (refused_groups_.empty()) return false;
+    ctx_->recorder.Report(fmt::format(
+        "{}: group {} still holds the table bound before a refused "
+        "SetBindingTable -- the dispatch would read the wrong resources",
+        what, *refused_groups_.begin()));
+    return true;
+  }
   void CheckTableUsable(uint32_t group, IBindingTable* table);
 
   IComputePass* inner_;
@@ -462,6 +495,7 @@ class ValidationComputePass final : public IComputePass {
   StateTracker* states_;
   std::string label_;
   IComputePipeline* pipeline_ = nullptr;
+  std::set<uint32_t> refused_groups_;
   bool ended_ = false;
 };
 
