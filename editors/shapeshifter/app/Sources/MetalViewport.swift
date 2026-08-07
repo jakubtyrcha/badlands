@@ -58,6 +58,17 @@ final class ViewportNSView: NSView {
         let scale = window?.backingScaleFactor ?? 2.0
         metalLayer.contentsScale = scale
         metalLayer.wantsExtendedDynamicRangeContent = true
+        // THE SINK COLOURSPACE, stated rather than inherited. The shaders write
+        // linear floating-point radiance into an RGBA16Float layer; without a
+        // colourspace saying so, the compositor reads those values in the
+        // display's own (gamma-encoded) space and the whole viewport comes out
+        // over-bright. Nothing downstream can detect this — the pixels are
+        // "correct" in a space nobody declared.
+        //
+        // Set here, not in the RHI: this is the app's presentation contract for
+        // its own surface, and `src/engine/rhi` has no business holding an
+        // opinion about how a caller's layer is displayed.
+        metalLayer.colorspace = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)
         onSizeChange?(bounds.width, bounds.height, scale)
     }
 
