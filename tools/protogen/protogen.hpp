@@ -473,7 +473,22 @@ struct Params {
   float dt_years = 200.0f;
 
   std::string out = "proto_out";
+  // Phase-0 STEP cadence. REINTERPRETED as a phase-1 CYCLE cadence (Task 7)
+  // once `cycles > 0`: the driver runs RunSweCycles in batches of this many
+  // cycles, dumping a phase-1 snapshot after each batch (and always after
+  // the last one, whatever `cycles % snapshot_every` is) -- the same
+  // "always land on the final one" guarantee RunSim's own step loop already
+  // gives phase 0. One field, two clocks, because both are "how often do I
+  // want to see this run" and a run only ever occupies one phase at a time.
   int snapshot_every = 250;
+  // Phase-1 cycle count (Task 7). 0 (the default) leaves phase 1 off
+  // entirely -- the driver only calls SweWarmStart/RunSweCycles when this is
+  // nonzero, which is what keeps a `--cycles 0` run's output byte-shaped
+  // exactly like it was before phase 1 existed (see main()'s own comment).
+  // Read by the driver alone; RunSweCycles takes its cycle count as an
+  // explicit argument rather than from here, so this field exists purely to
+  // fit the CLI's uniform "--flag sets a p.field" pattern.
+  int cycles = 0;
 };
 
 struct Grid {
@@ -617,15 +632,27 @@ struct Grid {
 // a copy that can drift from it.
 struct SimStats {
   double t_drops = 0, t_grid = 0, t_settle = 0;
+  // One-shot phase-0 -> phase-1 handoff (Task 5's SweWarmStart). NOT filled
+  // in by RunSweCycles -- SweWarmStart takes no SimStats*, it runs exactly
+  // once per run, so the driver (Task 7's main()) times it directly around
+  // the one call site instead.
+  double t_swe_warm_start = 0;
   // Phase-1 SWE cycle timers, one bucket per dispatch-list pass plus the
-  // per-cycle CFL/tripwire reduction. Unused (stays zero) until RunSweCycles
-  // is wired into the driver (Task 7); RunSweCycles itself already fills
-  // them in when given a non-null SimStats*, so a caller can time it today.
+  // per-cycle CFL/tripwire reduction. RunSweCycles fills them in when given
+  // a non-null SimStats*; wired into the driver as of Task 7.
   double t_swe_reduce = 0, t_swe_flux = 0, t_swe_depth = 0, t_swe_velocity = 0;
   // Morpho hook buckets (Task 6), same shape and same caveat: filled in by
   // RunSweCycles when given a non-null SimStats*, zero while `morfac` is 0
-  // (the hook does not run at all then -- see RunSweCycles).
-  double t_swe_sed_exchange = 0, t_swe_sed_advect = 0, t_swe_talus = 0;
+  // (the hook does not run at all then -- see RunSweCycles). Talus is TWO
+  // passes (TalusFlux, the per-cell demand; TalusApply, the gather) and, as
+  // of Task 7's perf instrumentation, gets two buckets rather than the one
+  // combined `t_swe_talus` Task 6 shipped with -- the split costs one more
+  // chrono call per cycle (cheap; this hook runs once per cycle, not once
+  // per substep, so it has none of the per-substep overhead concern
+  // RunSweCycles' own comment raises about the fluid passes) and is what
+  // lets the perf table name all FOUR morpho passes instead of three.
+  double t_swe_sed_exchange = 0, t_swe_sed_advect = 0;
+  double t_swe_talus_flux = 0, t_swe_talus_apply = 0;
 };
 
 // Definitions in protogen.cpp -- phase-0 land init, the whole-sim driver, and
@@ -749,6 +776,64 @@ SweRunResult RunSweCycles(Grid& g, const Params& p, int cycles,
 // Exported (not a private helper in protogen_swe.cpp) so a test can exercise
 // its clamp behaviour directly.
 float ClampMorfacBedDelta(float raw_delta_m, float depth_m, const Params& p);
+
+// -------------------------------------------- output boundary (Task 7) -----
+//
+// THE ONLY PLACE IN PROTOGEN A LAKE/RIVER DISTINCTION EXISTS. Phase 1's SWE
+// state makes none: `h` is a depth wherever the cell is wet, channel or
+// lake alike, exactly like the real shallow-water equations it approximates.
+// Everything downstream that wants "standing water" specifically -- the
+// `water.f32` raster, world.txt's `surface`/`lake_tag`, SoilCutoffs' dry-cell
+// filter -- needs a RULE to build that from, not a field the sim already
+// carries. This is that rule; see ClassifyBoundaryWater's own comment
+// (protogen.cpp) for the seed/grow algorithm.
+//
+// SEED thresholds. A cell only STARTS a lake region if it is both:
+//   DEEP    -- h > kLakeSeedDepthM. 1 m clears every ordinary channel depth
+//              this sim produces (SweWarmStart's Manning seeding and the
+//              fluid solver's own steady states both run in the decimetre
+//              range at production discharges -- see SweManningConvergence's
+//              own measured h) while sitting far under a real lake's depth
+//              (this codebase's own README records lakes over 300 m deep at
+//              16 km scale), so it does not accidentally seed a merely-deep
+//              flood pulse in an otherwise ordinary channel.
+//   SLOW    -- speed < kLakeSeedSpeedMPerS. A lake carries no through-flow
+//              (StillLakeInert proves the fluid solver holds a genuinely
+//              still lake to bit-exact stillness), while a channel needs
+//              real velocity to be a channel at all -- Manning speeds at
+//              ordinary production slopes/roughness run from a few cm/s to
+//              several m/s. 0.05 m/s sits comfortably below that whole range
+//              while staying well above any residual numerical creep a
+//              near-equilibrium lake might carry.
+// Both conditions matter independently: a deep-but-fast cell (a flood pulse
+// in a channel) and a shallow-but-slow one (a puddle) must each fail to
+// seed on their own -- BoundaryClassification (protogen_tests.cpp) pins
+// both.
+constexpr float kLakeSeedDepthM = 1.0f;
+constexpr float kLakeSeedSpeedMPerS = 0.05f;
+// GROWTH threshold, once a seed exists: a 4-connected flood fill over the
+// wet component, crossing into a neighbour only when its WATER SURFACE
+// (bed + h) is within this of the cell it came from. A lake's surface is
+// flat by construction, so two adjacent lake cells always pass however
+// different their bed elevation (a shallow margin next to the deep centre
+// included -- this is what makes the margins join the region without
+// needing a depth test of their own). A channel cannot: SweFlux's own
+// acceleration term (dt*g*A_over_L*dhead) needs a real head DIFFERENCE
+// between adjacent cells to drive flow at all, and at production cell
+// sizes that runs in the DECIMETRE range per cell -- an order of magnitude
+// or more above this CENTIMETRE bound -- so growth stops at the true
+// shoreline without ever asking "is this a channel", only "is the surface
+// still flat".
+constexpr float kLakeSurfaceContinuityM = 0.01f;
+
+// Returns a depth raster, `g.cells` long: `g.h[i]` where cell `i` was
+// classified as lake, 0 elsewhere. Deterministic (the underlying seed/grow
+// reachability is a pure function of the grid state, independent of
+// traversal order -- see the .cpp for the argument). For a phase-0-only
+// grid (h identically 0, since phase-0 never touches it) this returns all
+// zero, which is what keeps a `--cycles 0` run's `water.f32` byte-identical
+// to the old hardcoded-zero placeholder.
+std::vector<float> ClassifyBoundaryWater(const Grid& g, const Params& p);
 
 }  // namespace pg
 

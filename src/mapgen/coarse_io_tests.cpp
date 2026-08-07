@@ -50,6 +50,10 @@ TEST_CASE("coarse manifest round-trips exactly, including soil cutoffs",
   // text encode/decode, not merely a value that happens to print cleanly.
   m.soil_cut_mountain_m = 0.7345678f;
   m.soil_cut_hills_m = 3.14159274f;
+  // Phase-1 provenance (Task 7) -- also deliberately not round numbers.
+  m.morfac = 137.5f;
+  m.cycles = 4200;
+  m.substeps = 50;
 
   std::string err;
   REQUIRE(write_coarse_manifest(dir.str(), m, &err));
@@ -66,6 +70,26 @@ TEST_CASE("coarse manifest round-trips exactly, including soil cutoffs",
   CHECK(loaded->steps == m.steps);
   CHECK(loaded->soil_cut_mountain_m == m.soil_cut_mountain_m);
   CHECK(loaded->soil_cut_hills_m == m.soil_cut_hills_m);
+  CHECK(loaded->morfac == m.morfac);
+  CHECK(loaded->cycles == m.cycles);
+  CHECK(loaded->substeps == m.substeps);
+}
+
+TEST_CASE("phase-1 provenance (morfac/cycles/substeps) is optional, "
+          "absent means phase 1 did not run",
+          "[artifact]") {
+  TempDir dir("phase1-optional");
+  // An old-style manifest, predating Task 7 -- no morfac/cycles/substeps
+  // keys at all, the same shape a phase-0-only run (or an old dump) writes.
+  std::ofstream(dir.str() + "/world.txt")
+      << "resolution 128\nworld_size_m 2048\nseed 3\n";
+  std::string err;
+  const auto m = load_coarse_manifest(dir.str(), &err);
+  REQUIRE(m.has_value());
+  CHECK(err.empty());
+  CHECK(m->morfac == 0.0f);
+  CHECK(m->cycles == 0);
+  CHECK(m->substeps == 0);
 }
 
 TEST_CASE("an unknown key in world.txt is ignored so the writer can add fields",

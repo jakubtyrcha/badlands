@@ -3307,6 +3307,12 @@ void MorphoAdvectStepControl() {
 void MorphoKnobLiveness() {
   struct Knob { const char* name; void (*set)(Params&, int); };
   static const Knob knobs[] = {
+      // A fluid knob, not a morpho one, but it needs a row IN THIS harness
+      // (Task 7): it changes how finely the fluid clock inside one cycle is
+      // resolved, which the morpho hook only ever sees through `dt_morpho =
+      // swe_substeps * dt` -- KnobLiveness's own harness runs phase-0's
+      // RunSim, which never touches this at all.
+      {"swe_substeps", [](Params& p, int i) { p.swe_substeps = i ? 5 : 60; }},
       {"capacity_Kc_s", [](Params& p, int i) {
          p.capacity_Kc_s = i ? 0.02f : 0.5f; }},
       {"sus_settling_velocity", [](Params& p, int i) {
@@ -3357,6 +3363,141 @@ void MorphoKnobLiveness() {
     Check((std::string("morpho knob is live: ") + k.name).c_str(), differs,
           differs ? "output changes" : "NO EFFECT - masked or unused");
   }
+}
+
+// ===================== Task 7: driver, output boundary =====================
+
+// --- M19. `--cycles` is live: 0 vs N changes the landscape -----------------
+// Not a Params field RunSweCycles reads (it takes its cycle count as an
+// explicit argument -- see protogen.hpp's own comment on Params::cycles),
+// so it does not fit the MorphoKnobLiveness harness's "mutate a Params
+// field, run the SAME cycle count either way" shape. This is the direct
+// statement instead: the SAME warm-started starting state, run for 0 cycles
+// vs N, must NOT be the same landscape -- which is exactly the contract
+// main()'s `if (p.cycles > 0)` gate is supposed to guarantee.
+void CyclesKnobLiveness() {
+  auto run = [&](int cycles) {
+    Params p = MorphoBase(32, 16.f);
+    p.runoff_m_per_yr = 400.f;
+    p.morfac = 50.0f;
+    Grid g(p.res);
+    BuildChannel(g, p, 16.f, 12.f, 1.f, 3, 4.f, 8.f, /*x_tilt=*/0.01f);
+    SweWarmStart(g, p);  // production-shaped: see MorphoKnobLiveness's own
+                         // comment on why a bone-dry start is the wrong test
+    g.sus[g.idx(16, 3)] = 0.05f;
+    RunSweCycles(g, p, cycles);
+    return g;
+  };
+  Grid g0 = run(0), gN = run(30);
+  bool differs = false;
+  for (size_t i = 0; i < g0.cells && !differs; ++i)
+    if (g0.height[i] != gN.height[i] || g0.h[i] != gN.h[i] ||
+        g0.sus[i] != gN.sus[i])
+      differs = true;
+  Check("knob is live: --cycles (0 vs 30)", differs,
+        differs ? "output changes" : "NO EFFECT - phase 1 not wired");
+}
+
+// --- M20. boundary classification: whole lake in, channel out --------------
+// The channel-into-lake fixture the brief asks for: a fast, shallow channel
+// (fails BOTH seed conditions -- see kLakeSeedDepthM/kLakeSeedSpeedMPerS's
+// own comment) draining into a flat-surfaced lake with a deep core AND a
+// shallow margin ring (the margin fails the DEPTH seed test on its own, and
+// must be pulled in by GROWTH instead, via surface continuity with the deep
+// seed next to it). Plus two isolated single-cell probes of the seed test in
+// its own right, disconnected from either region so growth cannot be what
+// saves or dooms them: a deep-but-fast "flood pulse" cell, and a
+// shallow-but-slow "puddle" cell. All hand-built state -- no sim pass runs
+// here, this is a pure statement about ClassifyBoundaryWater's own rule.
+void BoundaryClassification() {
+  Params p = MorphoBase(48, 16.f);  // relief_m = 1, so height IS metres
+  Grid g(p.res);
+
+  // Baseline: dry high ground everywhere, so anything not explicitly wet
+  // below is unambiguously "not water".
+  for (size_t i = 0; i < g.cells; ++i) {
+    g.height[i] = 10.0f;
+    g.h[i] = 0.0f;
+    g.velx[i] = 0.0f;
+    g.vely[i] = 0.0f;
+  }
+
+  // Lake: x in [10,37], y in [24,45], flat water surface at 6.0 m. The
+  // margin ring (within 2 cells of the box edge) is shallow (bed 5.6 m, h
+  // 0.4 m -- BELOW kLakeSeedDepthM) but sits at the SAME surface elevation
+  // as the deep core (bed 0 m, h 6.0 m), which is what lets growth pull it
+  // in without a seed of its own.
+  const int lx0 = 10, lx1 = 37, ly0 = 24, ly1 = 45;
+  for (int y = ly0; y <= ly1; ++y) {
+    for (int x = lx0; x <= lx1; ++x) {
+      const bool margin =
+          (x - lx0 < 2) || (lx1 - x < 2) || (y - ly0 < 2) || (ly1 - y < 2);
+      const size_t i = g.idx(x, y);
+      if (margin) { g.height[i] = 5.6f; g.h[i] = 0.4f; }
+      else { g.height[i] = 0.0f; g.h[i] = 6.0f; }
+      g.velx[i] = 0.001f;  // slow: a lake carries no through-flow
+      g.vely[i] = 0.0f;
+    }
+  }
+
+  // Channel: x in [22,25], y in [0,23] (the row just above the lake box),
+  // bed descending steeply from 40 m to 6.4 m -- so the water surface at
+  // the last channel row (6.4 + 0.3 = 6.7 m) sits 0.7 m above the lake's
+  // 6.0 m, a per-cell head gap two orders above kLakeSurfaceContinuityM.
+  // FAST (1.2 m/s, well over kLakeSeedSpeedMPerS) and shallow (0.3 m,
+  // under kLakeSeedDepthM too) -- fails the seed test on BOTH grounds, not
+  // merely on speed, and growth from the lake cannot reach it either way.
+  const int cx0 = 22, cx1 = 25, cy0 = 0, cy1 = 23;
+  for (int y = cy0; y <= cy1; ++y) {
+    const float bed = 40.0f - (40.0f - 6.4f) * float(y) / float(cy1 - cy0);
+    for (int x = cx0; x <= cx1; ++x) {
+      const size_t i = g.idx(x, y);
+      g.height[i] = bed;
+      g.h[i] = 0.3f;
+      g.velx[i] = 0.0f;
+      g.vely[i] = 1.2f;
+    }
+  }
+
+  // Isolated deep-fast cell (a flood pulse): fails the SLOW half of the
+  // seed test, and is surrounded by dry ground so growth is not in play.
+  g.h[g.idx(5, 5)] = 2.0f;
+  g.velx[g.idx(5, 5)] = 1.0f;
+
+  // Isolated shallow-slow puddle: fails the DEEP half of the seed test, and
+  // is likewise isolated, so nothing grows into it either.
+  g.h[g.idx(5, 40)] = 0.3f;
+
+  const std::vector<float> water = ClassifyBoundaryWater(g, p);
+
+  bool core_tagged = true, margin_tagged = true;
+  for (int y = ly0 + 2; y <= ly1 - 2; y += 5)
+    for (int x = lx0 + 2; x <= lx1 - 2; x += 5)
+      if (!(water[g.idx(x, y)] > 0.0f)) core_tagged = false;
+  for (int x = lx0; x <= lx1; x += 3) {
+    if (!(water[g.idx(x, ly0)] > 0.0f)) margin_tagged = false;
+    if (!(water[g.idx(x, ly1)] > 0.0f)) margin_tagged = false;
+  }
+
+  bool channel_clear = true;
+  for (int y = cy0; y <= cy1; y += 4)
+    for (int x = cx0; x <= cx1; ++x)
+      if (water[g.idx(x, y)] != 0.0f) channel_clear = false;
+
+  const bool pulse_clear = water[g.idx(5, 5)] == 0.0f;
+  const bool puddle_clear = water[g.idx(5, 40)] == 0.0f;
+
+  const bool ok = core_tagged && margin_tagged && channel_clear &&
+                  pulse_clear && puddle_clear;
+  char buf[260];
+  std::snprintf(buf, sizeof(buf),
+                "lake core tagged=%d, shallow margin tagged=%d, channel "
+                "clear=%d, flood-pulse cell clear=%d, puddle cell clear=%d",
+                core_tagged, margin_tagged, channel_clear, pulse_clear,
+                puddle_clear);
+  Check("BoundaryClassification: whole lake incl. margins tagged, channel "
+        "and isolated deep/fast + shallow/slow cells are not",
+        ok, buf);
 }
 
 int RunAll() {
@@ -3428,6 +3569,10 @@ int RunAll() {
   SweResolutionInvariance();
   MorphoDeterminism();
   MorphoKnobLiveness();
+
+  std::printf("\n  driver, output boundary (Task 7)\n");
+  CyclesKnobLiveness();
+  BoundaryClassification();
 
   std::printf("\n  %d passed, %d failed, %d pending", g_pass, g_fail, g_pending);
   if (g_pending_ready)

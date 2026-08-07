@@ -746,6 +746,82 @@ void Cascade(Grid& g, const Params& p, int x, int y, float max_diff) {
   }
 }
 
+// ------------------------------------------- boundary classification -------
+//
+// See protogen.hpp for the WHY (the seed/grow thresholds and their
+// reasoning) -- this is the HOW. Two passes:
+//
+//   1. SEED: any cell that is both deep (h > kLakeSeedDepthM) and slow
+//      (speed < kLakeSeedSpeedMPerS) starts a region.
+//   2. GROW: from each unvisited seed, a 4-connected flood fill over the wet
+//      component (h > eps_wet), crossing a neighbour only when its water
+//      surface is within kLakeSurfaceContinuityM of the cell it came from.
+//
+// DETERMINISM. The seed scan is row-major, but the RESULT does not depend on
+// that order: the "surface within tolerance" relation is symmetric, so the
+// set of cells reachable from a given set of seeds is a pure function of the
+// grid state -- a fixed graph's connected components, not a race. Scan order
+// only decides which seed's flood claims a cell first when two seeds' basins
+// would otherwise both reach it, and by then both floods agree it belongs to
+// the SAME region (their basins are connected through it), so the choice is
+// immaterial to the output.
+//
+// COST. One O(cells) pass to build the surface field, then a flood fill that
+// visits each cell at most once (a cell is pushed to the stack only the
+// first time it is reached, via the `visited` guard) -- O(cells) total, the
+// same order as PriorityFlood above.
+std::vector<float> ClassifyBoundaryWater(const Grid& g, const Params& p) {
+  const int n = g.n;
+  std::vector<float> surface(g.cells);
+  for (size_t i = 0; i < g.cells; ++i)
+    surface[i] = g.height[i] * p.relief_m + g.h[i];
+
+  std::vector<uint8_t> visited(g.cells, 0);
+  std::vector<uint8_t> tagged(g.cells, 0);
+  std::vector<int32_t> stack;
+  stack.reserve(g.cells);
+  static const int dx[4] = {1, -1, 0, 0}, dy[4] = {0, 0, 1, -1};
+
+  for (int y = 0; y < n; ++y) {
+    for (int x = 0; x < n; ++x) {
+      const size_t i = g.idx(x, y);
+      if (visited[i]) continue;
+      const float speed =
+          std::sqrt(g.velx[i] * g.velx[i] + g.vely[i] * g.vely[i]);
+      const bool is_seed =
+          g.h[i] > kLakeSeedDepthM && speed < kLakeSeedSpeedMPerS;
+      if (!is_seed) continue;
+
+      visited[i] = 1;
+      tagged[i] = 1;
+      stack.clear();
+      stack.push_back(int32_t(i));
+      while (!stack.empty()) {
+        const size_t cur = size_t(stack.back());
+        stack.pop_back();
+        const int cx = int(cur % size_t(n)), cy = int(cur / size_t(n));
+        for (int k = 0; k < 4; ++k) {
+          const int nx = cx + dx[k], ny = cy + dy[k];
+          if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
+          const size_t j = g.idx(nx, ny);
+          if (visited[j]) continue;
+          if (!(g.h[j] > p.eps_wet)) continue;  // dry: not part of any lake
+          if (std::fabs(surface[j] - surface[cur]) > kLakeSurfaceContinuityM)
+            continue;  // discontinuous surface: a channel head, not a shore
+          visited[j] = 1;
+          tagged[j] = 1;
+          stack.push_back(int32_t(j));
+        }
+      }
+    }
+  }
+
+  std::vector<float> out(g.cells, 0.f);
+  for (size_t i = 0; i < g.cells; ++i)
+    if (tagged[i]) out[i] = g.h[i];
+  return out;
+}
+
 }  // namespace pg
 
 namespace {
@@ -975,28 +1051,67 @@ void SettleSus(Grid& g, const Params& p) {
 
 // -------------------------------------------------------------------- output
 
+// One headerless .f32 raster, `f[i] * sc` per cell. Shared by Dump() and
+// DumpPhase1() below so the on-disk form (row-major, no header, real units
+// after scaling) has exactly one place that writes it.
+void WriteF32Raster(const Params& p, const std::string& tag, const char* name,
+                    const std::vector<float>& f, float sc) {
+  std::vector<float> tmp(f.size());
+  for (size_t i = 0; i < f.size(); ++i) tmp[i] = f[i] * sc;
+  const std::string path = p.out + "/" + tag + "-" + name + ".f32";
+  FILE* fp = std::fopen(path.c_str(), "wb");
+  if (!fp) {
+    std::fprintf(stderr, "protogen: cannot write %s\n", path.c_str());
+    return;
+  }
+  std::fwrite(tmp.data(), sizeof(float), tmp.size(), fp);
+  std::fclose(fp);
+}
+
+// Phase-0's raster set: height/water/discharge/Q/soil. Used for the initial
+// dump, RunSim's own periodic snapshots, and (unconditionally, before phase
+// 1 gets a chance to run) the phase-0-finished state -- see main()'s own
+// comment for why the phase-1 branch does not replace this call, only
+// follows it.
 void Dump(const Grid& g, const Params& p, const std::string& tag) {
-  std::vector<float> tmp(g.cells);
-  auto write = [&](const char* name, const std::vector<float>& f, float sc) {
-    for (size_t i = 0; i < g.cells; ++i) tmp[i] = f[i] * sc;
-    const std::string path = p.out + "/" + tag + "-" + name + ".f32";
-    FILE* fp = std::fopen(path.c_str(), "wb");
-    if (!fp) {
-      std::fprintf(stderr, "protogen: cannot write %s\n", path.c_str());
-      return;
-    }
-    std::fwrite(tmp.data(), sizeof(float), tmp.size(), fp);
-    std::fclose(fp);
-  };
-  write("height", g.height, p.relief_m);   // metres
-  // No standing water any more: written as zeros so downstream readers
-  // (WriteWorldArtifacts, RunExtractRivers, mapview/game consumers of the
-  // dump) keep seeing a water raster of the shape they expect.
-  const std::vector<float> zero_water(g.cells, 0.f);
-  write("water", zero_water, 1.0f);
-  write("discharge", g.discharge, 1.0f);
-  write("Q", g.Qm3s, 1.0f);                // m^3/s
-  write("soil", g.soil, p.relief_m);       // metres of erodible cover
+  WriteF32Raster(p, tag, "height", g.height, p.relief_m);  // metres
+  // Boundary classification (protogen.hpp/ClassifyBoundaryWater) is the
+  // ONLY place a lake/river distinction exists. For a phase-0-only grid `h`
+  // is identically 0 -- it is a phase-1 field the particle walk never
+  // touches -- so this classifies to no seeds and grows nothing: BYTE
+  // IDENTICAL to the old hardcoded-zero write, which is what keeps a
+  // `--cycles 0` run's `water.f32` shaped exactly like it always was.
+  WriteF32Raster(p, tag, "water", ClassifyBoundaryWater(g, p), 1.0f);
+  WriteF32Raster(p, tag, "discharge", g.discharge, 1.0f);
+  WriteF32Raster(p, tag, "Q", g.Qm3s, 1.0f);                // m^3/s
+  WriteF32Raster(p, tag, "soil", g.soil, p.relief_m);       // metres of cover
+}
+
+// Phase-1's raster set (Task 7): height/soil again (self-contained, like
+// every phase-0 tag), the lake-only water classification, depth (raw `h`,
+// wet OR dry, channel OR lake -- unlike `water` this is deliberately NOT
+// classification-masked, since a depth raster's whole point is showing the
+// wet state honestly), speed magnitude, and the suspended load. NOT
+// discharge/Q: those are phase-0 particle-EMA fields that phase 1 never
+// updates, so writing them under a phase-1 tag would dump stale phase-0
+// state under a new name instead of honestly having no opinion.
+//
+// Used both for the `--snapshot-every`-cadence periodic dumps during
+// RunSweCycles and for the final one at the end of the run -- deliberately
+// the SAME function and SAME raster set for both, rather than a leaner
+// mid-run set plus extra rasters only at the end: a periodic snapshot is
+// only useful for diagnosing a long run if every one of them is already
+// everything --extract-rivers and show.py need, not almost.
+void DumpPhase1(const Grid& g, const Params& p, const std::string& tag) {
+  WriteF32Raster(p, tag, "height", g.height, p.relief_m);
+  WriteF32Raster(p, tag, "water", ClassifyBoundaryWater(g, p), 1.0f);
+  WriteF32Raster(p, tag, "depth", g.h, 1.0f);
+  std::vector<float> speed(g.cells);
+  for (size_t i = 0; i < g.cells; ++i)
+    speed[i] = std::sqrt(g.velx[i] * g.velx[i] + g.vely[i] * g.vely[i]);
+  WriteF32Raster(p, tag, "vel", speed, 1.0f);
+  WriteF32Raster(p, tag, "sus", g.sus, p.relief_m);
+  WriteF32Raster(p, tag, "soil", g.soil, p.relief_m);
 }
 
 }  // namespace
@@ -1217,6 +1332,13 @@ struct WorldArtifactInputs {
   mg::Field2D<float> height_m;  // bed + soil, dry-land surface
   mg::Field2D<float> water_m;   // standing water depth
   mg::Field2D<float> soil_m;    // erodible cover thickness
+  // Phase-1 provenance (Task 7), mirroring CoarseManifest's own three new
+  // fields exactly -- 0/0/0 means "phase 1 did not run" on this input, which
+  // is what BuildInputsFromGrid's default leaves it at for the unconditional
+  // phase-0 WriteWorldArtifacts call (see main()).
+  float morfac = 0.0f;
+  int cycles = 0;
+  int substeps = 0;
 };
 
 // Writes world.txt then rivers.bin to `out_dir`. The manifest goes first
@@ -1241,6 +1363,9 @@ bool WriteWorldArtifacts(const WorldArtifactInputs& in, const std::string& out_d
   man.steps = in.steps;
   man.soil_cut_mountain_m = t_mountain;
   man.soil_cut_hills_m = t_hills;
+  man.morfac = in.morfac;
+  man.cycles = in.cycles;
+  man.substeps = in.substeps;
 
   std::string err;
   if (!mg::write_coarse_manifest(out_dir, man, &err)) {
@@ -1283,7 +1408,13 @@ bool WriteWorldArtifacts(const WorldArtifactInputs& in, const std::string& out_d
   return true;
 }
 
-WorldArtifactInputs BuildInputsFromGrid(const Grid& g, const Params& p) {
+// `cycles_run`: 0 (the default) for the unconditional phase-0 call in
+// main() -- leaves the manifest's phase-1 provenance at 0/0/0, i.e. "did not
+// run". The phase-1 final call passes the actual completed cycle count, so
+// the provenance fields name what really happened even if a tripwire cut
+// the run short of `p.cycles`.
+WorldArtifactInputs BuildInputsFromGrid(const Grid& g, const Params& p,
+                                        int cycles_run = 0) {
   WorldArtifactInputs in;
   in.res = g.n;
   in.world_m = p.world_m;
@@ -1291,11 +1422,18 @@ WorldArtifactInputs BuildInputsFromGrid(const Grid& g, const Params& p) {
   in.seed = p.seed;
   in.steps = p.steps;
   in.height_m = ToField2D(g.height, g.n, p.relief_m);
-  // No standing water any more (see the header note); zeros keep
-  // WriteWorldArtifacts/SoilCutoffs/river extraction running the 0-lake case
-  // they already handle.
+  // Boundary classification (see ClassifyBoundaryWater's header comment):
+  // for a phase-0-only grid `h` is identically 0, so this is all zero --
+  // the same 0-lake case WriteWorldArtifacts/SoilCutoffs/river extraction
+  // already handled when `water_m` was a hardcoded zero field.
   in.water_m = mg::Field2D<float>(g.n, g.n);
+  in.water_m.data = ClassifyBoundaryWater(g, p);
   in.soil_m = ToField2D(g.soil, g.n, p.relief_m);
+  if (cycles_run > 0) {
+    in.morfac = p.morfac;
+    in.cycles = cycles_run;
+    in.substeps = p.swe_substeps;
+  }
   return in;
 }
 
@@ -1326,9 +1464,13 @@ bool LoadDumpField(const std::string& path, int n, std::vector<float>& out) {
 // because it calls the exact same WriteWorldArtifacts a normal run does, the
 // two paths cannot silently diverge.
 //
-// Reads the FINAL snapshot: RunSim always dumps at step == p.steps regardless
-// of --snapshot-every (see its verbose block), so world.txt's own `steps`
-// names that tag exactly.
+// Reads the FINAL snapshot. Which tag that is depends on whether phase 1
+// ran (Task 7): `man->cycles > 0` means the true final state is a
+// DumpPhase1 tag at the completed cycle count (main() names its phase-1
+// snapshots "%04d-cycle" and always lands one exactly there, whatever
+// `cycles % snapshot_every` is -- see main()'s own comment); otherwise it is
+// phase-0's own final tag, which RunSim always dumps at step == p.steps
+// regardless of --snapshot-every.
 int RunExtractRivers(const std::string& dir) {
   std::string err;
   const auto man = mg::load_coarse_manifest(dir, &err);
@@ -1338,7 +1480,10 @@ int RunExtractRivers(const std::string& dir) {
   }
 
   char tag[64];
-  std::snprintf(tag, sizeof(tag), "%04d-step", man->steps);
+  if (man->cycles > 0)
+    std::snprintf(tag, sizeof(tag), "%04d-cycle", man->cycles);
+  else
+    std::snprintf(tag, sizeof(tag), "%04d-step", man->steps);
   const std::string base = dir + "/" + std::string(tag) + "-";
 
   WorldArtifactInputs in;
@@ -1347,6 +1492,11 @@ int RunExtractRivers(const std::string& dir) {
   in.runoff_m_per_yr = man->runoff_m_per_yr;
   in.seed = man->seed;
   in.steps = man->steps;
+  // Carry the provenance straight through so re-running --extract-rivers on
+  // its own output does not silently drop it from world.txt.
+  in.morfac = man->morfac;
+  in.cycles = man->cycles;
+  in.substeps = man->substeps;
 
   std::vector<float> height, water, soil;
   if (!LoadDumpField(base + "height.f32", in.res, height)) return 1;
@@ -1361,6 +1511,210 @@ int RunExtractRivers(const std::string& dir) {
   in.soil_m.data = std::move(soil);
 
   return WriteWorldArtifacts(in, dir) ? 0 : 1;
+}
+
+// ------------------------------------------------- run diagnostics (Task 7)
+//
+// PRINTED, NOT ASSERTED: these are about what a PRODUCTION run's landscape
+// looks like, not a pass-or-fail statement about the sim -- a run with
+// plenty of depressions or off-map drainage is not necessarily wrong, it is
+// information Task 8's full-run validation needs a baseline for.
+
+// 8-neighbour local minima on the final bed: a cheap, purely LOCAL proxy for
+// "how many depressions does this landscape have" -- not a re-run of
+// PriorityFlood's actual basin resolution (which would also need to decide
+// what counts as a real depression vs. float noise on an otherwise flat
+// reach), just a count of cells no immediate neighbour undercuts. Border
+// cells are excluded from being candidates, matching this file's other
+// border convention (`Grid::oob`): the border is open/base level by
+// definition, never a depression.
+int CountLocalMinima8(const Grid& g) {
+  const int n = g.n;
+  static const int dx[8] = {-1, 0, 1, -1, 1, -1, 0, 1};
+  static const int dy[8] = {-1, -1, -1, 0, 0, 1, 1, 1};
+  int count = 0;
+  for (int y = 1; y < n - 1; ++y) {
+    for (int x = 1; x < n - 1; ++x) {
+      const float z = g.height[g.idx(x, y)];
+      bool is_min = true;
+      for (int k = 0; k < 8 && is_min; ++k)
+        if (g.height[g.idx(x + dx[k], y + dy[k])] < z) is_min = false;
+      if (is_min) ++count;
+    }
+  }
+  return count;
+}
+
+// Fraction of cells whose D8 steepest-descent path on the FINAL bed reaches
+// the map border, vs. one that dead-ends at a local minimum (a depression,
+// or a cycle across a float-flat plateau). One receiver per cell (the
+// lowest of its 8 neighbours, or itself if none is lower), then every
+// chain is walked with memoization -- a cell's drains-off-map/stuck verdict
+// is resolved exactly once and every subsequent walk that reaches an
+// already-resolved cell reads the cached answer instead of re-walking --
+// so the whole thing costs O(cells) amortized, the same order as
+// PriorityFlood, despite naively looking like O(cells * path length).
+double FractionDrainsOffMap(const Grid& g) {
+  const int n = g.n;
+  static const int dx[8] = {-1, 0, 1, -1, 1, -1, 0, 1};
+  static const int dy[8] = {-1, -1, -1, 0, 0, 1, 1, 1};
+
+  std::vector<int32_t> receiver(g.cells);
+  for (int y = 0; y < n; ++y) {
+    for (int x = 0; x < n; ++x) {
+      const size_t i = g.idx(x, y);
+      if (x == 0 || y == 0 || x == n - 1 || y == n - 1) {
+        receiver[i] = -1;  // border: already off-map
+        continue;
+      }
+      float best = g.height[i];
+      int32_t best_j = int32_t(i);  // no lower neighbour -> a sink (itself)
+      for (int k = 0; k < 8; ++k) {
+        const size_t j = g.idx(x + dx[k], y + dy[k]);
+        if (g.height[j] < best) { best = g.height[j]; best_j = int32_t(j); }
+      }
+      receiver[i] = best_j;
+    }
+  }
+
+  // status: 0 unresolved, 1 drains to the border, 2 stuck (sink or cycle).
+  std::vector<uint8_t> status(g.cells, 0);
+  std::vector<int32_t> stamp(g.cells, -1);  // which walk last touched a cell
+  std::vector<int32_t> path;
+  path.reserve(256);
+  int32_t walk_id = 0;
+  size_t drains = 0;
+
+  for (size_t start = 0; start < g.cells; ++start) {
+    if (status[start] != 0) {
+      if (status[start] == 1) ++drains;
+      continue;
+    }
+    path.clear();
+    int32_t cur = int32_t(start);
+    ++walk_id;
+    uint8_t result = 0;
+    while (true) {
+      if (status[size_t(cur)] != 0) { result = status[size_t(cur)]; break; }
+      if (stamp[size_t(cur)] == walk_id) { result = 2; break; }  // cycle
+      stamp[size_t(cur)] = walk_id;
+      path.push_back(cur);
+      const int32_t r = receiver[size_t(cur)];
+      if (r == -1) { result = 1; break; }   // reached the border
+      if (r == cur) { result = 2; break; }  // local minimum
+      cur = r;
+    }
+    for (int32_t c : path) status[size_t(c)] = result;
+    if (result == 1) drains += path.size();
+  }
+  return g.cells ? double(drains) / double(g.cells) : 0.0;
+}
+
+// End-of-phase-1 print: depression count, off-map drainage fraction, and
+// the two advection-fixer diagnostics carried on `Grid` since Task 6.
+// Matters most for a MORFAC-accelerated production run, where a dry-start
+// or otherwise ill-posed advection step can quietly destroy suspended load
+// -- `swe_sed_advect_fix_max`/`swe_sed_advect_fix_residual_m3` are how that
+// would show up here rather than only in the (rarer) mass-audit tripwire.
+void PrintRunDiagnostics(const Grid& g) {
+  const int depressions = CountLocalMinima8(g);
+  const double off_map_frac = FractionDrainsOffMap(g);
+  std::printf(
+      "protogen: phase-1 diagnostics\n"
+      "  depressions (8-neighbour local minima on the final bed): %d\n"
+      "  cells draining off-map (D8 on the final bed): %.2f%%\n"
+      "  advection fixer: worst |factor-1| %.4e, unplaced residual %.4e m3\n",
+      depressions, 100.0 * off_map_frac, g.swe_sed_advect_fix_max,
+      g.swe_sed_advect_fix_residual_m3);
+}
+
+// ------------------------------------------------- perf report (Task 7) ----
+//
+// One row per timed pass: total wall time, mean per CALL (a substep for the
+// three fluid passes, a cycle for everything phase-1 beyond that, a step
+// for phase-0's rows -- the natural unit for each, see the header comment
+// on SimStats), and throughput. "cell-updates/sec" for every full-grid
+// Jacobi pass; `drops` is the one exception (a per-PARTICLE pass, not
+// per-cell), labelled `particle-steps/sec` instead rather than reporting a
+// cell-updates number that would not mean what it says.
+void AddPerfRow(std::string& out, const char* name, double total_s,
+                double calls, double units_per_call, const char* call_unit,
+                const char* throughput_unit) {
+  char buf[220];
+  if (calls > 0.0 && total_s > 0.0) {
+    const double mean = total_s / calls;
+    const double throughput = (units_per_call * calls) / total_s;
+    std::snprintf(buf, sizeof(buf),
+                  "  %-14s total %10.3f s   mean %10.3e s/%-8s   "
+                  "%12.4e %s\n",
+                  name, total_s, mean, call_unit, throughput,
+                  throughput_unit);
+  } else {
+    std::snprintf(buf, sizeof(buf), "  %-14s total %10.3f s   (no calls)\n",
+                  name, total_s);
+  }
+  out += buf;
+}
+
+// Builds the printed-AND-perf.txt report. `cycles_run` is how many phase-1
+// cycles actually completed (0 if phase 1 never ran, or if it aborted
+// before finishing a single one) -- separate from `p.cycles`, the REQUESTED
+// count, so an aborted run's throughput numbers are honest about what
+// actually executed rather than dividing by a count that never completed.
+std::string BuildPerfReport(const Grid& g, const Params& p,
+                            const SimStats& st, int cycles_run) {
+  std::string out = "protogen: perf\n";
+  const double cells = double(g.cells);
+  AddPerfRow(out, "drops", st.t_drops, double(p.steps), double(p.drops),
+             "step", "particle-steps/s");
+  AddPerfRow(out, "grid", st.t_grid, double(p.steps), cells, "step",
+             "cell-upd/s");
+  AddPerfRow(out, "settle", st.t_settle, double(p.steps), cells, "step",
+             "cell-upd/s");
+  if (p.cycles > 0) {
+    AddPerfRow(out, "warm_start", st.t_swe_warm_start, 1.0, cells, "call",
+               "cell-upd/s");
+    const double fluid_calls = double(cycles_run) * double(p.swe_substeps);
+    AddPerfRow(out, "swe_flux", st.t_swe_flux, fluid_calls, cells, "substep",
+               "cell-upd/s");
+    AddPerfRow(out, "swe_depth", st.t_swe_depth, fluid_calls, cells,
+               "substep", "cell-upd/s");
+    AddPerfRow(out, "swe_velocity", st.t_swe_velocity, fluid_calls, cells,
+               "substep", "cell-upd/s");
+    AddPerfRow(out, "cfl_reduce", st.t_swe_reduce, double(cycles_run), cells,
+               "cycle", "cell-upd/s");
+    // Morpho hook: 0 calls (not `cycles_run`) when morfac == 0 -- the hook
+    // is SKIPPED entirely then (see RunSweCycles), not run to a no-op, so
+    // the timers genuinely have nothing behind them.
+    const double morpho_calls = p.morfac > 0.f ? double(cycles_run) : 0.0;
+    AddPerfRow(out, "sed_exchange", st.t_swe_sed_exchange, morpho_calls,
+               cells, "cycle", "cell-upd/s");
+    AddPerfRow(out, "sed_advect", st.t_swe_sed_advect, morpho_calls, cells,
+               "cycle", "cell-upd/s");
+    AddPerfRow(out, "talus_flux", st.t_swe_talus_flux, morpho_calls, cells,
+               "cycle", "cell-upd/s");
+    AddPerfRow(out, "talus_apply", st.t_swe_talus_apply, morpho_calls, cells,
+               "cycle", "cell-upd/s");
+  }
+  return out;
+}
+
+// Prints the report AND writes it to `<out>/perf.txt` -- world.txt stays a
+// pure geometry/provenance contract, so timings live in their own file
+// rather than growing CoarseManifest with something no downstream consumer
+// (mapview, the patch providers) has any use for.
+void WritePerfReport(const Grid& g, const Params& p, const SimStats& st,
+                     int cycles_run) {
+  const std::string report = BuildPerfReport(g, p, st, cycles_run);
+  std::printf("%s", report.c_str());
+  const std::string path = p.out + "/perf.txt";
+  FILE* fp = std::fopen(path.c_str(), "w");
+  if (!fp) {
+    std::fprintf(stderr, "protogen: cannot write %s\n", path.c_str());
+    return;
+  }
+  std::fwrite(report.data(), 1, report.size(), fp);
+  std::fclose(fp);
 }
 
 }  // namespace
@@ -1439,6 +1793,9 @@ int main(int argc, char** argv) {
       p.transverse_slope_coeff = std::stof(nxt());
     else if (a == "--talus-relaxation")
       p.talus_relaxation_per_yr = std::stof(nxt());
+    // Phase-1 cycle count (Task 7): 0 (default) leaves phase 1 off. See
+    // Params::cycles's own comment.
+    else if (a == "--cycles") p.cycles = std::stoi(nxt());
     else if (a == "--out") p.out = nxt();
     else { std::fprintf(stderr, "protogen: unknown arg '%s'\n", a.c_str()); return 2; }
   }
@@ -1461,9 +1818,10 @@ int main(int argc, char** argv) {
               "  runoff %.2f m/yr, evaporation %.2f m/yr\n"
               "  settle %.3f/step, sus-diffusion %.3f\n"
               "  swe: %d substeps, CFL %.2f, manning-n %.3f, eps-wet %.4f m, "
-              "dt-floor %.1e s (not yet driven -- Task 7)\n"
+              "dt-floor %.1e s\n"
               "  morpho: morfac %.0f, Kc %.4g s, settling %.1e m/s, "
-              "transverse-slope %.2f, repose %.0f deg, talus %.3g /yr\n",
+              "transverse-slope %.2f, repose %.0f deg, talus %.3g /yr\n"
+              "  phase 1: --cycles %d%s\n",
               p.res, p.res, p.world_m, cell_m, workers, p.relief_m, p.steps,
               p.drops, p.runoff_m_per_yr, p.evaporation_m_per_yr,
               p.settle_fraction, p.sus_diffusion, p.swe_substeps,
@@ -1471,7 +1829,8 @@ int main(int argc, char** argv) {
               double(p.morfac), double(p.capacity_Kc_s),
               double(p.sus_settling_velocity_m_per_s),
               double(p.transverse_slope_coeff), double(p.repose_angle_deg),
-              double(p.talus_relaxation_per_yr));
+              double(p.talus_relaxation_per_yr), p.cycles,
+              p.cycles > 0 ? " (phase 1 on)" : " (phase 1 off)");
 
   {
     std::error_code ec;
@@ -1486,11 +1845,81 @@ int main(int argc, char** argv) {
 
   SimStats st;
   RunSim(p, g, st, true);
-  std::printf("protogen: done\n  timings (s): drops %.1f grid %.1f settle %.1f\n",
+  std::printf("protogen: phase 0 done\n  timings (s): drops %.1f grid %.1f "
+              "settle %.1f\n",
               st.t_drops, st.t_grid, st.t_settle);
 
-  // Output boundary: world.txt + rivers.bin, off the FINISHED grid. Same
-  // function --extract-rivers calls, so the two paths cannot diverge.
+  // Output boundary: world.txt + rivers.bin, off the phase-0-FINISHED grid.
+  // Same function --extract-rivers calls, so the two paths cannot diverge.
+  // ALWAYS runs, even when phase 1 follows below -- a `--cycles 0` run stops
+  // here, which is what keeps its output byte-shaped exactly like it always
+  // was; a `--cycles > 0` run's phase-1 block OVERWRITES world.txt +
+  // rivers.bin with the phase-1-finished state once it completes.
   if (!WriteWorldArtifacts(BuildInputsFromGrid(g, p), p.out)) return 1;
+
+  int cycles_run = 0;
+  if (p.cycles > 0) {
+    std::printf("protogen: phase 1 -- warm start + %d cycles "
+                "(%d substeps/cycle, CFL %.2f, morfac %.0f)\n",
+                p.cycles, p.swe_substeps, p.cfl_number, double(p.morfac));
+    using clk = std::chrono::steady_clock;
+    const auto tw0 = clk::now();
+    SweWarmStart(g, p);
+    const auto tw1 = clk::now();
+    st.t_swe_warm_start = std::chrono::duration<double>(tw1 - tw0).count();
+
+    // `--snapshot-every` reused as a CYCLE cadence (see Params::snapshot_every):
+    // run RunSweCycles in batches of at most that many cycles, dumping a
+    // phase-1 snapshot after each -- so the LAST batch always lands exactly
+    // on `p.cycles`, the same "always land on the final one" guarantee
+    // RunSim's own step loop gives phase 0, however `cycles % snapshot_every`
+    // comes out. Each call audits its own segment (SweRunResult's own
+    // comment), so chunking does not change what the mass audit checks.
+    // Clamped at 1: a non-positive --snapshot-every (malformed input; 250 is
+    // the default) would otherwise make `batch` 0 forever and hang the loop
+    // below rather than fail loudly -- this trades that hang for "runs one
+    // cycle per snapshot", which is slow but finite and correct.
+    const int cadence = std::max(1, p.snapshot_every);
+    bool aborted = false;
+    while (cycles_run < p.cycles) {
+      const int batch = std::min(cadence, p.cycles - cycles_run);
+      const SweRunResult r = RunSweCycles(g, p, batch, &st);
+      cycles_run += batch;
+      if (!r.ok) {
+        // RunSweCycles has already written its own abort-<cycle>-*.f32
+        // snapshot (protogen_swe.cpp's WriteAbortSnapshot) before returning;
+        // that cycle number is relative to THIS batch, so report the GLOBAL
+        // one here for the operator.
+        std::fprintf(stderr,
+                     "protogen: phase 1 ABORTED at cycle %d of %d requested: "
+                     "%s\n",
+                     cycles_run - batch + r.aborted_cycle, p.cycles,
+                     r.reason.c_str());
+        aborted = true;
+        break;
+      }
+      char tag[64];
+      std::snprintf(tag, sizeof(tag), "%04d-cycle", cycles_run);
+      DumpPhase1(g, p, tag);
+      std::printf("  cycle %d/%d done, snapshot '%s'\n", cycles_run,
+                  p.cycles, tag);
+    }
+
+    if (!aborted) {
+      // Output boundary again, off the phase-1-FINISHED grid: surface =
+      // bed + lake-only water and lake_tag = water > 0 (both already inside
+      // WriteWorldArtifacts), plus the three provenance fields so
+      // --extract-rivers (and anything else reading world.txt) can tell a
+      // phase-1 run happened and find the right dump tag.
+      if (!WriteWorldArtifacts(BuildInputsFromGrid(g, p, cycles_run), p.out))
+        return 1;
+      PrintRunDiagnostics(g);
+    }
+
+    WritePerfReport(g, p, st, cycles_run);
+    if (aborted) return 1;
+  } else {
+    WritePerfReport(g, p, st, 0);
+  }
   return 0;
 }

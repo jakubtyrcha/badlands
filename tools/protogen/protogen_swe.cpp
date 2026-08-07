@@ -1699,12 +1699,14 @@ SweRunResult RunSweCycles(Grid& g, const Params& p, int cycles,
       // conversion. See Params::talus_relaxation_per_yr.
       const float dt_bed = p.morfac * dt_morpho;
       TalusFlux(g, p, dt_bed);
-      TalusApply(g, p);
       auto m3 = std::chrono::steady_clock::now();
+      TalusApply(g, p);
+      auto m4 = std::chrono::steady_clock::now();
       if (stats) {
         stats->t_swe_sed_exchange += std::chrono::duration<double>(m1 - m0).count();
         stats->t_swe_sed_advect += std::chrono::duration<double>(m2 - m1).count();
-        stats->t_swe_talus += std::chrono::duration<double>(m3 - m2).count();
+        stats->t_swe_talus_flux += std::chrono::duration<double>(m3 - m2).count();
+        stats->t_swe_talus_apply += std::chrono::duration<double>(m4 - m3).count();
       }
 
       // Periodic mass audit. The invariant, stated once here so the signs
