@@ -17,29 +17,40 @@ module visbuffer;
 import vis_common;
 
 ConstantBuffer<VisFrame> frame;
-StructuredBuffer<PlaneVertex> vertices;
+StructuredBuffer<MeshVertex> vertices;
+StructuredBuffer<DrawInfo> draws;
 
 struct VOut {
     float4 pos : SV_Position;
+    // NOINTERPOLATION: an instance id is an index, and interpolating it across
+    // a triangle produces fractional slots that round to a neighbour's material
+    // along every edge. It is constant per primitive by construction.
+    nointerpolation uint slot : TEXCOORD0;
 }
 
 [shader("vertex")]
-VOut vs_visbuffer(uint vid : SV_VertexID)
+VOut vs_visbuffer(uint vid : SV_VertexID, uint iid : SV_InstanceID)
 {
     // Pulled by vertex id: the RHI has no vertex buffers by design. In an
     // indexed draw SV_VertexID is the fetched index plus base_vertex, which is
     // exactly the addressing DrawInfo's offsets assume.
-    PlaneVertex v = vertices[vid];
+    MeshVertex v = vertices[vid];
+    // ONE mesh, N instances, each offset by its own DrawInfo. The resolve adds
+    // the SAME offset when it rebuilds the triangle, so the two must read it
+    // from the same place or the barycentrics land on a different triangle than
+    // the one that was rasterized.
+    let world = v.position + draws[iid].offset.xyz;
     VOut o;
-    o.pos = mul(frame.view_proj, float4(v.position - frame.camera_pos.xyz, 1.0));
+    o.pos = mul(frame.view_proj, float4(world - frame.camera_pos.xyz, 1.0));
+    o.slot = iid;
     return o;
 }
 
 [shader("fragment")]
 uint fs_visbuffer(VOut i, uint prim : SV_PrimitiveID) : SV_Target
 {
-    // Draw slot 0: there is one draw. The shift is real code on the real path
-    // rather than a placeholder -- the resolve unpacks it and indexes DrawInfo
-    // with the result.
-    return PackVis(0u, prim);
+    // The instance id IS the draw slot, which is why the sphere grid needs no
+    // per-draw uniform: fourteen spheres are one instanced draw, and the
+    // packing already carries eight bits of slot.
+    return PackVis(i.slot, prim);
 }

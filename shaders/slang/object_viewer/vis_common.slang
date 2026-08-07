@@ -1,7 +1,7 @@
 // Shared visibility-buffer types and packing. NO RESOURCE DECLARATIONS.
 //
 // Split out of visbuffer.slang because a module's globals come across with an
-// import: with `StructuredBuffer<PlaneVertex> vertices` living beside these
+// import: with `StructuredBuffer<MeshVertex> vertices` living beside these
 // types, the resolve's own `vertices` binding became an ambiguous reference to
 // two different buffers. Types and packing are shared; a binding belongs to
 // whoever binds it.
@@ -20,7 +20,10 @@ public struct VisFrame {
 // Three float4s, 48 bytes. A float3 pads to 16 in MSL, so the obvious layout is
 // 40 bytes on the CPU and 64 here -- every vertex after the first read from the
 // wrong offset, which shears the mesh rather than failing.
-public struct PlaneVertex {
+//
+// Mirrors MeshVertex in mesh_types.hpp. Named for the thing rather than for its
+// first caller, now that the sphere grid uses it too.
+public struct MeshVertex {
     public float4 pos_nx;    // xyz position, w normal.x
     public float4 nyz_uv;    // xy normal.yz, zw uv
     public float4 tangent;   // xyz tangent, w bitangent sign
@@ -32,12 +35,25 @@ public struct PlaneVertex {
     public property float2 uv { get { return nyz_uv.zw; } }
 }
 
+// One INSTANCE, indexed by the draw slot the visibility buffer packs. Mirrors
+// DrawInfo in mesh_types.hpp -- 48 bytes, three 16-byte rows.
 public struct DrawInfo {
     public uint first_index;
     public uint first_vertex;
     public uint material_slot;
-    public uint pad;
+    public uint override_mask;
+    public float4 offset;    // xyz world offset for this instance
+    public float4 material;  // x roughness, y metallic
 }
+
+// Which fields of DrawInfo::material the resolve should believe.
+//
+// AN EXPLICIT MASK, NOT A SENTINEL: "negative roughness means use the map"
+// would make one value mean two things, and would reinterpret a legitimately
+// zero roughness. The plane clears the mask and reads the pack instead, so
+// neither field is accepted-and-ignored.
+public static const uint kOverrideRoughness = 1u;
+public static const uint kOverrideMetallic = 2u;
 
 // --- The packing ------------------------------------------------------------
 //

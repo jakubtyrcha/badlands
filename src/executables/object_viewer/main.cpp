@@ -37,6 +37,7 @@
 #include "executables/object_viewer/output_pass.hpp"
 #include "executables/object_viewer/material_pack.hpp"
 #include "executables/object_viewer/plane_mesh.hpp"
+#include "executables/object_viewer/sphere_grid.hpp"
 #include "executables/object_viewer/resolve_pass.hpp"
 #include "executables/object_viewer/shading_cpu.hpp"
 #include "executables/object_viewer/visbuffer_pass.hpp"
@@ -50,8 +51,9 @@ using badlands::graph::RasterContext;
 using badlands::graph::RenderGraph;
 using badlands::object_viewer::LinePass;
 using badlands::object_viewer::OutputPass;
-using badlands::object_viewer::PlaneMesh;
+using badlands::object_viewer::SceneMesh;
 using badlands::object_viewer::BuildPlaneMesh;
+using badlands::object_viewer::BuildSphereGrid;
 using badlands::object_viewer::VisbufferPass;
 using badlands::object_viewer::ResolvePass;
 using badlands::object_viewer::DebugView;
@@ -72,7 +74,7 @@ namespace {
 // segment covers these texels and not those" are different claims, and a
 // headless run that could not say which it was checking would be checking
 // neither.
-enum class Scene { Clear, Lines, Grid, Plane };
+enum class Scene { Clear, Lines, Grid, Plane, Spheres };
 
 struct Options {
   bool headless = false;
@@ -180,6 +182,10 @@ bool ParseU32(const char* text, uint32_t min, uint32_t max, uint32_t& out) {
   return true;
 }
 
+// Declared here because ParseArgs reconciles --debug-view against it, and its
+// definition sits with the other scene predicates further down.
+bool SceneUsesVisbuffer(Scene scene);
+
 bool ParseArgs(int argc, char** argv, Options& opt) {
   // RECORDED, NOT APPLIED, and reconciled after the loop.
   //
@@ -226,6 +232,7 @@ bool ParseArgs(int argc, char** argv, Options& opt) {
       else if (std::strcmp(v, "lines") == 0) opt.scene = Scene::Lines;
       else if (std::strcmp(v, "grid") == 0) opt.scene = Scene::Grid;
       else if (std::strcmp(v, "plane") == 0) opt.scene = Scene::Plane;
+      else if (std::strcmp(v, "spheres") == 0) opt.scene = Scene::Spheres;
       else {
         spdlog::error(
             "object_viewer: unknown scene '{}' (clear|lines|grid|plane)", v);
@@ -284,19 +291,31 @@ bool ParseArgs(int argc, char** argv, Options& opt) {
     }
   }
 
-  // The reconciliation. A debug view or a plane self-test only means anything
-  // against the plane scene, so either it is implied or the caller asked for
-  // something that contradicts it -- and a contradiction is refused rather than
-  // resolved by argument order.
-  const bool wants_plane = view_given || implies_plane;
-  if (wants_plane && scene_given && opt.scene != Scene::Plane) {
+  // The reconciliation. A debug view needs a scene with a MATERIAL, and the
+  // plane self-tests need the plane specifically -- so a contradiction is
+  // refused rather than resolved by argument order.
+  //
+  // --debug-view now accepts `spheres` as well: every view it offers is
+  // computed by the same resolve for both scenes, and refusing the chart the
+  // roughness view would have made the chart's own headless oracle impossible
+  // to express. The plane SELF-TESTS still require the plane, because their
+  // oracles are closed forms over a flat surface.
+  const bool wants_visbuffer = view_given || implies_plane;
+  if (implies_plane && scene_given && opt.scene != Scene::Plane) {
     spdlog::error(
-        "object_viewer: --debug-view and the plane self-tests require "
-        "--scene plane, but --scene was given as something else -- refusing "
-        "rather than silently picking one");
+        "object_viewer: the plane self-tests require --scene plane, but "
+        "--scene was given as something else -- refusing rather than silently "
+        "picking one");
     return false;
   }
-  if (wants_plane) opt.scene = Scene::Plane;
+  if (view_given && scene_given && !SceneUsesVisbuffer(opt.scene)) {
+    spdlog::error(
+        "object_viewer: --debug-view needs a scene with a material (plane or "
+        "spheres), but --scene was given as something else -- refusing rather "
+        "than silently picking one");
+    return false;
+  }
+  if (wants_visbuffer && !scene_given) opt.scene = Scene::Plane;
   return true;
 }
 
@@ -350,6 +369,31 @@ struct Camera {
   }
 };
 
+// The sphere chart, framed to FIT rather than to a fixed distance.
+//
+// ASPECT-AWARE because the chart is much wider than it is tall: at 640x256 a
+// distance chosen for a square frame leaves it a smudge in the middle, and one
+// chosen for the width overflows a square one. Both the render and the oracle
+// call this, so the projection the oracle inverts is the projection the frame
+// was drawn with -- a second copy here would put every predicted pixel slightly
+// off and the failures would read as a broken resolve.
+Camera SphereCamera(float aspect) {
+  const auto bounds = badlands::object_viewer::SphereGridExtent();
+  Camera cam;
+  cam.perspective = true;
+  cam.far_m = 200.0f;
+
+  const float half_fov = glm::radians(cam.fov_deg) * 0.5f;
+  const float fit_vertical = bounds.radius / std::tan(half_fov);
+  const float fit_horizontal =
+      bounds.radius / (std::tan(half_fov) * std::max(aspect, 1e-3f));
+  // The BINDING constraint, plus a margin so nothing touches the frame edge.
+  const float distance = std::max(fit_vertical, fit_horizontal) * 1.12f;
+  cam.position = {bounds.center.x, bounds.center.y,
+                  bounds.center.z + distance};
+  return cam;
+}
+
 // The camera each scene is asserted under. The line scene MUST stay unrotated:
 // its assertion is a closed form ("half the width, middle row"), and that only
 // holds looking straight down -Z.
@@ -360,6 +404,8 @@ Camera CameraFor(Scene scene) {
     cam.pitch = -0.45f;
     cam.yaw = 0.35f;
     cam.extent = 12.0f;
+  } else if (scene == Scene::Spheres) {
+    cam = SphereCamera(1.0f);
   } else if (scene == Scene::Plane) {
     // Looking down at the plane from in front of it, so the near edge is
     // genuinely nearer than the far one -- which is what makes the depth
@@ -445,8 +491,21 @@ bool SceneHasLines(Scene scene) {
 // Only a SCENE-REFERRED image gets a tone curve. A debug view has already
 // written a display-referred value, and tone-mapping it would turn "roughness
 // is 0.35" into a preview that shows 0.26.
+// The scenes that drive the visibility-buffer chain. A predicate rather than
+// `== Scene::Plane` repeated at six call sites, because that is exactly the
+// shape that got the windowed path drawing a different scene from the one the
+// assertions covered once before (see SceneHasLines).
+bool SceneUsesVisbuffer(Scene scene) {
+  return scene == Scene::Plane || scene == Scene::Spheres;
+}
+
+// The geometry each of those scenes draws.
+SceneMesh MeshFor(Scene scene) {
+  return scene == Scene::Spheres ? BuildSphereGrid() : BuildPlaneMesh();
+}
+
 bool SceneNeedsTonemap(const Options& opt) {
-  return opt.scene == Scene::Plane && opt.view == DebugView::Lit;
+  return SceneUsesVisbuffer(opt.scene) && opt.view == DebugView::Lit;
 }
 
 // THE GRAPH, built identically for both modes. THREE targets, and the split is
@@ -585,7 +644,7 @@ rhi::TexturePtr MakeUiTarget(IRhiDevice& device, uint32_t w, uint32_t h) {
 // derivation divides by a non-positive w. A "--near-plane-camera" run that
 // produced none of them would pass while testing nothing, which is a worse
 // outcome than failing.
-std::vector<bool> NearPlaneStraddlers(const Camera& cam, const PlaneMesh& mesh,
+std::vector<bool> NearPlaneStraddlers(const Camera& cam, const SceneMesh& mesh,
                                       float aspect) {
   const glm::mat4 vp = cam.Proj(aspect) * cam.View();
   std::vector<bool> straddling(mesh.TriangleCount(), false);
@@ -702,9 +761,13 @@ bool RenderOnce(IRhiDevice& device, const Options& opt, rhi::ColorSpace mode,
   std::unique_ptr<VisbufferPass> vis;
   std::unique_ptr<ResolvePass> resolve;
   PlaneChain chain;
+  const float scene_aspect = float(opt.width) / float(std::max(1u, opt.height));
   const Camera plane_cam =
-      opt.near_plane_camera ? NearPlaneCamera() : CameraFor(Scene::Plane);
-  if (opt.scene == Scene::Plane) {
+      opt.near_plane_camera
+          ? NearPlaneCamera()
+          : (opt.scene == Scene::Spheres ? SphereCamera(scene_aspect)
+                                         : CameraFor(opt.scene));
+  if (SceneUsesVisbuffer(opt.scene)) {
     // "test" and "checker" are SYNTHETIC packs, not directories. The headless
     // oracles use them so no assertion depends on a shipped data file, and
     // because constant textures make the mip level irrelevant to nine of the
@@ -714,7 +777,7 @@ bool RenderOnce(IRhiDevice& device, const Options& opt, rhi::ColorSpace mode,
                : (opt.pack == "checker" ? MakeCheckerPack(device)
                                         : LoadMaterialPack(device, opt.pack));
     if (!pack) return false;
-    const PlaneMesh mesh = BuildPlaneMesh();
+    const SceneMesh mesh = MeshFor(opt.scene);
     vis = VisbufferPass::Create(device, compiler, mesh, opt.width, opt.height);
     resolve = ResolvePass::Create(device, compiler, *pack, kSceneFormat);
     if (!vis || !resolve) return false;
@@ -973,7 +1036,7 @@ int RunPlaneVisbufferCheck(IRhiDevice& device, const Options& opt) {
   if (!compiler) return 1;
 
   constexpr float kHalfExtent = 5.0f;
-  const PlaneMesh mesh = BuildPlaneMesh(kHalfExtent);
+  const SceneMesh mesh = BuildPlaneMesh(kHalfExtent);
   auto vis = VisbufferPass::Create(device, *compiler, mesh, opt.width,
                                    opt.height);
   if (!vis) return 1;
@@ -1227,7 +1290,7 @@ int RunDebugViewCheck(IRhiDevice& device, const Options& opt) {
   // a vacuous check is what retires a risk that is still there.
   if (opt.near_plane_camera) {
     const Camera np = NearPlaneCamera();
-    const PlaneMesh mesh = BuildPlaneMesh();
+    const SceneMesh mesh = BuildPlaneMesh();
     const float aspect = float(opt.width) / float(opt.height);
     const std::vector<bool> straddling = NearPlaneStraddlers(np, mesh, aspect);
     const size_t n =
@@ -1917,6 +1980,114 @@ int RunFrameRingSelfTest(IRhiDevice& device, const Options& opt) {
   return 0;
 }
 
+
+// The sphere chart, asserted through the ROUGHNESS debug view.
+//
+// One render proves two mechanisms at once, which is why this is the check
+// rather than "some texels changed":
+//
+//   * the INSTANCE ID reached the packing -- fourteen spheres are one instanced
+//     draw, so if the fragment shader still wrote slot 0 every sphere would
+//     report the same material;
+//   * the OVERRIDE MASK is honoured -- the pack is constant, so any roughness
+//     other than the pack's own can only have come from DrawInfo.
+//
+// A sweep that is present but flat, or shifted by one column, fails here. A
+// blank frame fails harder.
+int RunSphereGridCheck(IRhiDevice& device, const Options& opt) {
+  namespace ov = badlands::object_viewer;
+  auto compiler = MakeCompiler();
+  if (!compiler) return 1;
+
+  Options local = opt;
+  local.scene = Scene::Spheres;
+  local.view = DebugView::Roughness;
+  // The constant pack, so the ONLY source of a varying roughness is the
+  // per-instance override. With a real pack the ARM map would vary too and the
+  // assertion could not tell the two apart.
+  local.pack = "test";
+  Frame frame;
+  if (!RenderOnce(device, local, local.present, *compiler, frame)) return 1;
+
+  const float aspect = float(local.width) / float(std::max(1u, local.height));
+  // THE SAME camera RenderOnce just used. Recomputed from the same function
+  // rather than a fixed one, because the framing depends on the aspect.
+  const Camera cam = SphereCamera(aspect);
+  const glm::mat4 vp = cam.Proj(aspect) * cam.View();
+
+  int failures = 0;
+  for (uint32_t row = 0; row < ov::kMetallicSteps; ++row) {
+    float previous = -1.0f;
+    for (uint32_t col = 0; col < ov::kRoughnessSteps; ++col) {
+      // Camera-OFFSET, the same convention the passes use.
+      const glm::vec3 centre =
+          ov::SphereGridCenter(col, row) - cam.position;
+      const glm::vec4 clip = vp * glm::vec4(centre, 1.0f);
+      if (clip.w <= 0.0f) {
+        spdlog::error("object_viewer: sphere ({},{}) is behind the camera", col,
+                      row);
+        return 1;
+      }
+      const float ndc_x = clip.x / clip.w;
+      const float ndc_y = clip.y / clip.w;
+      const int px = int((ndc_x * 0.5f + 0.5f) * float(local.width));
+      const int py = int((1.0f - (ndc_y * 0.5f + 0.5f)) * float(local.height));
+      if (px < 0 || py < 0 || px >= int(local.width) ||
+          py >= int(local.height)) {
+        spdlog::error("object_viewer: sphere ({},{}) projects off screen to "
+                      "({},{}) -- the chart does not fit the framing",
+                      col, row, px, py);
+        return 1;
+      }
+
+      // The roughness view emits the channel as a CODE VALUE, so the byte is
+      // the roughness. Sampled at the sphere's centre, which faces the camera.
+      const float got = frame.rgba[(size_t(py) * local.width + px) * 4];
+      const float want = ov::SphereRoughness(col);
+      if (std::abs(got - want) > 0.04f) {
+        spdlog::error(
+            "object_viewer: sphere ({},{}) shows roughness {:.3f} at ({},{}), "
+            "expected {:.3f} -- the instance id or the override mask is not "
+            "reaching the resolve",
+            col, row, got, px, py, want);
+        ++failures;
+      }
+      if (got <= previous) {
+        spdlog::error(
+            "object_viewer: roughness did not increase across row {} at column "
+            "{} ({:.3f} after {:.3f}) -- the sweep is flat or mis-ordered",
+            row, col, got, previous);
+        ++failures;
+      }
+      previous = got;
+    }
+  }
+  if (failures > 0) return 1;
+  spdlog::info(
+      "object_viewer: the sphere chart sweeps roughness across {} columns and "
+      "{} rows, {} instances in one draw",
+      ov::kRoughnessSteps, ov::kMetallicSteps, ov::kSphereCount);
+
+  if (opt.out.empty()) return 0;
+
+  // The ASSERTION above is always the roughness sweep; the IMAGE is whatever
+  // was asked for. Writing the roughness frame under --debug-view lit would be
+  // a flag accepted and ignored -- and the one that silently hands back a
+  // different picture than the one requested is the worst kind, because the
+  // picture looks fine.
+  if (opt.view != DebugView::Roughness || opt.pack != local.pack) {
+    Options render = opt;
+    render.scene = Scene::Spheres;
+    if (!RenderOnce(device, render, render.present, *compiler, frame)) return 1;
+  }
+  std::vector<uint8_t> pixels(frame.rgba.size(), 0);
+  for (size_t i = 0; i < frame.rgba.size(); ++i) {
+    pixels[i] = badlands::color::ToByte(frame.rgba[i]);
+  }
+  badlands_write_png(opt.out.c_str(), pixels.data(), opt.width, opt.height);
+  return 0;
+}
+
 int RunHeadless(IRhiDevice& device, const Options& opt) {
   if (opt.self_test_output) return RunOutputSelfTest(device, opt);
   if (opt.self_test_frame_ring) return RunFrameRingSelfTest(device, opt);
@@ -1924,6 +2095,7 @@ int RunHeadless(IRhiDevice& device, const Options& opt) {
   if (opt.self_test_gradients) return RunGradientSelfTest(device, opt);
   if (opt.self_test_visbuffer) return RunPlaneVisbufferCheck(device, opt);
   if (opt.scene == Scene::Plane) return RunDebugViewCheck(device, opt);
+  if (opt.scene == Scene::Spheres) return RunSphereGridCheck(device, opt);
 
   auto compiler = MakeCompiler();
   if (!compiler) return 1;
@@ -2203,7 +2375,7 @@ int RunWindowed(IRhiDevice& device, const Options& opt) {
   std::unique_ptr<VisbufferPass> vis;
   std::unique_ptr<ResolvePass> resolve;
   PlaneChain chain;
-  if (opt.scene == Scene::Plane) {
+  if (SceneUsesVisbuffer(opt.scene)) {
     pack = opt.pack == "test"
                ? MakeConstantPack(device,
                                   badlands::object_viewer::TestPackValues{})
@@ -2211,7 +2383,7 @@ int RunWindowed(IRhiDevice& device, const Options& opt) {
                       ? MakeCheckerPack(device)
                       : LoadMaterialPack(device, opt.pack));
     if (!pack) return 1;
-    vis = VisbufferPass::Create(device, *compiler, BuildPlaneMesh(),
+    vis = VisbufferPass::Create(device, *compiler, MeshFor(opt.scene),
                                 shell->Width(), shell->Height());
     // The SCENE target's format: linear float, so the lit view keeps headroom.
     resolve = ResolvePass::Create(device, *compiler, *pack, kSceneFormat);

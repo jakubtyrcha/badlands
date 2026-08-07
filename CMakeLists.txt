@@ -1541,6 +1541,8 @@ add_test(NAME badlands_render_graph_tests COMMAND badlands_render_graph_tests
 add_executable(badlands_plane_mesh_tests
     src/engine/tests/plane_mesh_tests.cpp
     src/executables/object_viewer/plane_mesh.cpp
+    src/executables/object_viewer/mesh_types.cpp
+    src/executables/object_viewer/sphere_grid.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_plane_mesh_tests PRIVATE
@@ -1701,6 +1703,8 @@ if(APPLE)
         src/executables/object_viewer/line_pass.cpp
         src/executables/object_viewer/output_pass.cpp
         src/executables/object_viewer/plane_mesh.cpp
+        src/executables/object_viewer/mesh_types.cpp
+        src/executables/object_viewer/sphere_grid.cpp
         src/executables/object_viewer/material_pack.cpp
         src/executables/object_viewer/resolve_pass.cpp
         src/executables/object_viewer/visbuffer_pass.cpp
@@ -1708,7 +1712,8 @@ if(APPLE)
         src/engine/rendering/debug_line_expand.cpp)
     target_link_libraries(badlands_object_viewer PRIVATE
         badlands_render_graph badlands_rhi_app badlands_slang
-        badlands_imgui_rhi assets nlohmann_json::nlohmann_json)
+        badlands_imgui_rhi badlands_ibl badlands_camera assets
+        nlohmann_json::nlohmann_json)
     target_sources(badlands_object_viewer PRIVATE
         ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp)
     target_include_directories(badlands_object_viewer PRIVATE
@@ -1733,6 +1738,16 @@ if(APPLE)
                      --width 256 --height 192
                      --out ${CMAKE_BINARY_DIR}/object_viewer_grid.png
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    # The sphere chart, asserted through the ROUGHNESS view: fourteen spheres
+    # are ONE instanced draw, so a fragment shader still writing slot 0 would
+    # report the same material for all of them, and the constant pack means a
+    # varying roughness can only have come from the per-instance override.
+    add_test(NAME object_viewer_spheres
+             COMMAND badlands_object_viewer --headless --scene spheres
+                     --width 512 --height 256
+                     --out ${CMAKE_BINARY_DIR}/object_viewer_spheres.png
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
     add_test(NAME object_viewer_lines
              COMMAND badlands_object_viewer --headless --scene lines
                      --width 64 --height 64

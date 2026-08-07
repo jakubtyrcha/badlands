@@ -54,7 +54,7 @@ public static const uint kViewAo = 9u;
 
 ConstantBuffer<ResolveFrame> frame;
 Texture2D<uint> visbuffer;
-StructuredBuffer<PlaneVertex> vertices;
+StructuredBuffer<MeshVertex> vertices;
 StructuredBuffer<uint> indices;
 StructuredBuffer<DrawInfo> draws;
 Texture2D<float4> albedo_map;
@@ -177,17 +177,23 @@ float4 fs_resolve(VOut i) : SV_Target
     let i0 = indices[base + 0u] + draw.first_vertex;
     let i1 = indices[base + 1u] + draw.first_vertex;
     let i2 = indices[base + 2u] + draw.first_vertex;
-    PlaneVertex v0 = vertices[i0];
-    PlaneVertex v1 = vertices[i1];
-    PlaneVertex v2 = vertices[i2];
+    MeshVertex v0 = vertices[i0];
+    MeshVertex v1 = vertices[i1];
+    MeshVertex v2 = vertices[i2];
+
+    // THE SAME OFFSET the raster pass applied. Rebuilding the triangle at the
+    // mesh's origin instead would put the barycentrics on a triangle that was
+    // never rasterized -- every instance but the one at the origin would sample
+    // its material through the wrong surface point.
+    let inst = draw.offset.xyz;
 
     // Camera-OFFSET, exactly as the raster pass projected them. Using world
     // positions here and camera-relative ones there puts the barycentrics on a
     // different triangle than the one that was rasterized.
     let cam = frame.camera_pos.xyz;
-    let p0 = mul(frame.view_proj, float4(v0.position - cam, 1.0));
-    let p1 = mul(frame.view_proj, float4(v1.position - cam, 1.0));
-    let p2 = mul(frame.view_proj, float4(v2.position - cam, 1.0));
+    let p0 = mul(frame.view_proj, float4(v0.position + inst - cam, 1.0));
+    let p1 = mul(frame.view_proj, float4(v1.position + inst - cam, 1.0));
+    let p2 = mul(frame.view_proj, float4(v2.position + inst - cam, 1.0));
 
     // Pixel CENTRE. Sampling the corner puts a pixel on the far side of a
     // triangle edge from where it was rasterized, which shows up as a one-pixel
@@ -199,7 +205,7 @@ float4 fs_resolve(VOut i) : SV_Target
     let uv = Interp2(v0.uv, v1.uv, v2.uv, bary.lambda);
     let uv_ddx = Interp2(v0.uv, v1.uv, v2.uv, bary.ddx);
     let uv_ddy = Interp2(v0.uv, v1.uv, v2.uv, bary.ddy);
-    let world = Interp3(v0.position, v1.position, v2.position, bary.lambda);
+    let world = Interp3(v0.position, v1.position, v2.position, bary.lambda) + inst;
     let geo_n = normalize(Interp3(v0.normal, v1.normal, v2.normal, bary.lambda));
     let tan_raw = Interp3(v0.tangent.xyz, v1.tangent.xyz, v2.tangent.xyz,
                           bary.lambda);
@@ -228,8 +234,14 @@ float4 fs_resolve(VOut i) : SV_Target
 
     let V = normalize(cam - world);
     let ao = arm.r;
-    let roughness = arm.g;
-    let metallic = arm.b;
+    // The pack's ARM map decides these UNLESS this instance says otherwise. The
+    // sphere chart overrides both, because a controlled sweep is its whole
+    // point; the plane clears the mask and reads the map, which is what its
+    // Roughness and Metallic debug-view oracles assert against.
+    let roughness = (draw.override_mask & kOverrideRoughness) != 0u
+                        ? draw.material.x : arm.g;
+    let metallic = (draw.override_mask & kOverrideMetallic) != 0u
+                        ? draw.material.y : arm.b;
 
     let view = uint(frame.params.x);
     // Every debug branch below emits a display-referred CODE VALUE, converted

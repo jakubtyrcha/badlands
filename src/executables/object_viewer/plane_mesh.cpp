@@ -12,8 +12,8 @@ constexpr int kQuadsPerSide = 8;
 
 }  // namespace
 
-PlaneMesh BuildPlaneMesh(float half_extent, float uv_tiles) {
-  PlaneMesh mesh;
+SceneMesh BuildPlaneMesh(float half_extent, float uv_tiles) {
+  SceneMesh mesh;
   constexpr int kVertsPerSide = kQuadsPerSide + 1;
   mesh.vertices.reserve(size_t(kVertsPerSide) * kVertsPerSide);
 
@@ -25,7 +25,7 @@ PlaneMesh BuildPlaneMesh(float half_extent, float uv_tiles) {
       const float px = (u * 2.0f - 1.0f) * half_extent;
       const float pz = (v * 2.0f - 1.0f) * half_extent;
 
-      PlaneVertex vert;
+      MeshVertex vert;
       // Normal is +y everywhere: a flat plane. That is what makes the `normal`
       // debug view a closed-form assertion -- a flat normal map over a flat
       // plane must resolve to exactly (0,1,0).
@@ -53,26 +53,11 @@ PlaneMesh BuildPlaneMesh(float half_extent, float uv_tiles) {
       mesh.indices.insert(mesh.indices.end(), {i1, i2, i3});
     }
   }
+  // ONE instance, at the origin, overriding nothing. override_mask stays 0 so
+  // the resolve reads roughness and metallic from the pack's ARM map, which is
+  // exactly what the Roughness and Metallic debug-view oracles assert.
+  mesh.draws.push_back(DrawInfo{});
   return mesh;
-}
-
-bool ValidatePrimitiveCount(const PlaneMesh& mesh) {
-  if (mesh.indices.size() % 3 != 0) {
-    spdlog::error(
-        "object_viewer: the plane mesh has {} indices, which is not a whole "
-        "number of triangles",
-        mesh.indices.size());
-    return false;
-  }
-  if (mesh.TriangleCount() > kMaxPrimitivesPerDraw) {
-    spdlog::error(
-        "object_viewer: {} triangles exceeds the {} the visibility buffer can "
-        "address -- the primitive field would overflow into the draw slot and "
-        "the resolve would fetch an out-of-bounds DrawInfo",
-        mesh.TriangleCount(), kMaxPrimitivesPerDraw);
-    return false;
-  }
-  return true;
 }
 
 }  // namespace badlands::object_viewer
