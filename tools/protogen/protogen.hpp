@@ -18,6 +18,32 @@ namespace pg {
 
 constexpr double kSecondsPerYear = 31557600.0;
 
+// SWE velocity bound, as a multiple of the local shallow-water wave speed
+// sqrt(g*h). NOT a physical claim (real open-channel flows rarely exceed
+// Froude ~2-3 even at spillways) -- it exists purely as a numerical backstop
+// where a virtual pipe's carried-over flux (momentum from a PREVIOUS,
+// possibly deeper substep) gets reinterpreted through a since-collapsed
+// A_pipe (built from the CURRENT, shallower depth): a depth that fell
+// faster than the flux drained inflates the implied velocity without bound
+// (measured 113 m/s / Froude ~75 in 0.2 m water on the wet-dry cliff fixture
+// before this bound existed). 10x is an order of magnitude above any
+// legitimate steep-channel Froude number, so it never clips normal
+// supercritical dynamics, but 10x below the ~75 the bug produced -- closes
+// the runaway without becoming a de facto flow limiter. Shared here (not a
+// private constant in protogen_swe.cpp) so SweWetDryFrontStability can
+// assert against the SAME number the implementation enforces, not a
+// hand-copied duplicate that could silently drift out of sync.
+constexpr float kMaxFroude = 10.0f;
+// MORFAC clamp scaffolding (Task 6 activates this, Task 4 only seeds it --
+// see Params::morfac and ClampMorfacBedDelta below): the fraction of a
+// cell's water depth a single fluid cycle's morpho hook may move the bed by,
+// AFTER morfac scaling. 10%: a starting bound with no bed-delta magnitude
+// yet to calibrate it against (nothing calls ClampMorfacBedDelta today), so
+// it may need retuning once Task 6 supplies a real erosion/deposition term
+// -- the number exists so the clamp is never silently unbounded, not because
+// 10% is a derived physical limit.
+constexpr float kMaxBedDeltaFraction = 0.1f;
+
 // ---------------------------------------------------------------- parameters
 
 // TEST SEAM. `Descend` appends one entry per particle step when a probe is
@@ -284,6 +310,15 @@ struct Params {
   // to an absurd combination -- either way, continuing would spend cycles
   // producing output with no diagnosable meaning instead of naming the fault.
   float dt_floor_s = 1e-5f;
+  // Morphological acceleration factor: how many fluid cycles' worth of bed
+  // change Task 6's morpho hook is allowed to apply per ACTUAL fluid cycle
+  // (the standard MORFAC trick -- run the fluid at its own timescale, but
+  // let the slower bed evolve faster than real sediment transport would, so
+  // a landform-scale run does not need landform-scale fluid time). 1.0
+  // (identity, i.e. no acceleration) because nothing computes a bed delta
+  // yet to accelerate -- Task 6 is this knob's first real consumer; see
+  // `ClampMorfacBedDelta` below for where it is applied.
+  float morfac = 1.0f;
 
   // THE landscape clock. One step represents this many years, and every
   // process scales with it: diffusion through k = D*dt/cell^2, and erosion
@@ -425,6 +460,17 @@ struct SweRunResult {
 // requires it). `stats`, if non-null, accumulates per-pass wall time.
 SweRunResult RunSweCycles(Grid& g, const Params& p, int cycles,
                           SimStats* stats = nullptr);
+
+// MORFAC clamp scaffolding for Task 6's morpho hook (SedExchange et al.):
+// scales a proposed bed-elevation delta (metres, either sign) by
+// `p.morfac`, then bounds the magnitude to `kMaxBedDeltaFraction * depth_m`
+// so one fluid cycle's accelerated bed change can never exceed a fixed
+// fraction of the water sitting on top of it. INERT today -- nothing calls
+// this yet (the morpho hook is empty, see RunSweCycles's comment) -- so
+// Task 6 ACTIVATES this path by calling it, rather than inventing it from
+// scratch. Exported (not a private helper in protogen_swe.cpp) so a test
+// can exercise its clamp behaviour directly.
+float ClampMorfacBedDelta(float raw_delta_m, float depth_m, const Params& p);
 
 }  // namespace pg
 

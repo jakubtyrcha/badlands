@@ -19,6 +19,15 @@
 // -- `Grid::height` itself stays the existing dimensionless ~[0,1] raster,
 // untouched by anything here.
 //
+// THE Flux -> Depth -> Velocity ORDER IS NOT JUST A CONVENTION, IT IS A
+// DEPENDENCY: SweVelocity divides by `h_b`, which only holds "the depth
+// SweFlux used" because SweDepth's `h`/`h_b` swap ran in between (see
+// SweVelocity's own comment). Calling these three out of order, or calling
+// SweVelocity on its own after some other sequence, reads stale or wrong
+// state. RunSweCycles's substep loop is the one place this order is allowed
+// to be assumed; tests that drive the passes directly (see
+// protogen_tests.cpp) must replicate it exactly.
+//
 // build: see the repo's tools/protogen/README.md and this file's own
 // CLAUDE.md-documented build line; Taskflow is header-only so this stays a
 // standalone TU, same as protogen.cpp.
@@ -124,8 +133,49 @@ void SweFlux(Grid& g, const Params& p, float dt) {
       // B*dt*v^2 + v - v_free = 0 rather than integrated explicitly, because
       // the drag relaxation time here is routinely far shorter than a CFL
       // substep's dt (shallow, rough cells relax in milliseconds).
+      //
+      // Solved as v = 2*v_free / (1 + sqrt(1 + 4*bd*v_free)), NOT Descend's
+      // own (sqrt(1+4*bd*v_free) - 1) / (2*bd) -- the two are algebraically
+      // identical (multiply the latter's numerator and denominator by the
+      // conjugate sqrt(...)+1) but not numerically identical: Descend only
+      // ever runs in the shallow sheet-flow regime, where that subtraction
+      // is safe. Here the SWE state routinely sits at low face velocities in
+      // deep water (a barely-perturbed lake), where 4*bd*v_free is small and
+      // sqrt(1+x)-1 catastrophically cancels -- measured to collapse to
+      // EXACTLY 0.0 (100% error) for v_free ~3e-4 m/s in 20 m water, and 10%
+      // error still at ~3e-3 m/s. The 2*v_free/(1+sqrt(...)) form has no
+      // subtraction of near-equal quantities at either extreme (bd -> 0 gives
+      // v -> v_free exactly; bd large gives v -> sqrt(v_free/bd)), so it
+      // needs no bd > 0 special case either -- the denominator is always
+      // >= 2.
       const float B = kGravityMS2 * p.swe_manning_n * p.swe_manning_n /
                       std::pow(own_h, 4.0f / 3.0f);
+      // Froude bound, PER FACE (see the loop below for why the /sqrt(2)):
+      // `flux[i][k]` carries momentum forward from whatever substep set it,
+      // and `A_pipe` above is built from `own_h` as it stands THIS substep
+      // -- if depth collapsed faster than the carried-over flux did (a
+      // fast-draining wet-dry front, exactly SweWetDryFrontStability's
+      // fixture), reinterpreting a still-large flux through a now-small
+      // A_pipe manufactures a velocity with no physical bound (measured
+      // 113 m/s, Froude ~75, in 0.2 m water before this clamp existed).
+      // Capping at kMaxFroude x the local wave speed sqrt(g*own_h) closes
+      // that without touching ordinary subcritical flow -- see kMaxFroude's
+      // own comment (protogen.hpp) for why 10x. Same `own_h` for all 4
+      // directions of this cell, so computed once here rather than per face.
+      //
+      // The /sqrt(2) is load-bearing, not decoration: SweVelocity combines
+      // TWO independently-clamped face velocities per axis (velx from the
+      // +x/-x pair, vely from +y/-y), so if this per-face cap were exactly
+      // kMaxFroude*sqrt(g*h) and both axes simultaneously sat at their own
+      // cap, the COMBINED 2-D speed sqrt(velx^2+vely^2) could reach
+      // kMaxFroude*sqrt(g*h)*sqrt(2) -- measured exactly (worst ratio
+      // 1.4142, i.e. sqrt(2)) the first time this bound was tested without
+      // the correction. Capping each face at the bound/sqrt(2) makes the
+      // WORST-CASE combination land exactly back on kMaxFroude*sqrt(g*h),
+      // which is the number SweWetDryFrontStability actually asserts
+      // against.
+      const float v_max_per_face =
+          kMaxFroude * std::sqrt(kGravityMS2 * own_h) * 0.70710678f;  // /sqrt(2)
 
       std::array<float, 4> f{};
       for (int k = 0; k < 4; ++k) {
@@ -154,10 +204,8 @@ void SweFlux(Grid& g, const Params& p, float dt) {
           const float A_pipe = cell_m * own_h;
           const float v_free = f_free / A_pipe;
           const float bd = B * dt;
-          const float v = (bd > 1e-12f)
-                              ? (std::sqrt(1.0f + 4.0f * bd * v_free) - 1.0f) /
-                                    (2.0f * bd)
-                              : v_free;
+          float v = (2.0f * v_free) / (1.0f + std::sqrt(1.0f + 4.0f * bd * v_free));
+          if (v > v_max_per_face) v = v_max_per_face;
           f_new = v * A_pipe;
         }
         f[k] = f_new;
@@ -285,17 +333,33 @@ void SweDepth(Grid& g, const Params& p, float dt) {
 // a face velocity into a flux (flux = v * cell_m * own_h), so this recovers
 // v_(+x) - v_(-x) algebraically, not merely dimensionally.
 //
-// READS: only `flux[i]` and `h[i]` for the single `i` this thread owns --
-// no neighbour access at all, so this pass has no cross-cell hazard to
-// state beyond "distinct threads own distinct i". WRITES: only
+// THE DEPTH THAT DIVISION MUST USE IS `h_b`, NOT `h`. SweFlux built
+// `flux[i]` from the depth `h` held BEFORE this substep's SweDepth call;
+// SweDepth's `g.h.swap(g.h_b)` (the last thing it does) then makes `h` the
+// NEW depth and `h_b` the OLD one -- so calling SweVelocity after SweDepth
+// (the mandated Flux->Depth->Velocity order) and dividing by `h` recovers
+// v_(+x)-v_(-x) using the WRONG denominator, off by a factor of
+// h_old/h_new, unbounded by anything but `eps_wet` (measured: a cell
+// draining from 1 m to 1 mm between two substeps reported a 1000x-inflated
+// velocity; 14% error even on the comparatively gentle wet-dry cliff
+// fixture). Reading `h_b` instead recovers the SAME depth SweFlux actually
+// used, exactly. THIS IS A REAL COUPLING: SweVelocity depending on `h_b`
+// still holding "the depth as of the start of this substep" is only true
+// because the pass order is always Flux -> Depth -> Velocity within one
+// substep, never reordered and never called standalone after some other
+// sequence -- if that dispatch order ever changes, this division must move
+// with it.
+//
+// READS: `flux[i]` and `h_b[i]` for the single `i` this thread owns -- no
+// neighbour access at all, so this pass has no cross-cell hazard to state
+// beyond "distinct threads own distinct i". WRITES: only
 // `velx[i]`/`vely[i]`.
 //
-// Guarded for h -> 0: below eps_wet, velocity is forced to exactly zero
-// rather than computed and divided by a near-zero depth -- SweFlux's own
-// eps_wet gate already keeps flux at 0 there, so this guard is redundant in
-// theory but not something this pass may assume; it is its own defence
-// against a divide-by-near-zero producing a spurious large "velocity" from
-// float noise in an otherwise-zero flux.
+// Guarded for h -> 0: below eps_wet (checked on `h_b`, the SAME depth
+// SweFlux gated its own donor check on -- a cell SweFlux treated as dry
+// produced all-zero flux, so this guard and that one agree by construction),
+// velocity is forced to exactly zero rather than computed and divided by a
+// near-zero depth.
 void SweVelocity(Grid& g, const Params& p) {
   const int n = g.n;
   const float cell_m = p.world_m / float(p.res);
@@ -303,13 +367,14 @@ void SweVelocity(Grid& g, const Params& p) {
     const int y = int(yy);
     for (int x = 0; x < n; ++x) {
       const size_t i = g.idx(x, y);
-      const float hv = g.h[i];
-      if (hv <= p.eps_wet) {
+      const float h_at_flux_time = g.h_b[i];  // see header comment: post-swap,
+                                              // h_b holds the PRE-substep depth
+      if (h_at_flux_time <= p.eps_wet) {
         g.velx[i] = 0.f;
         g.vely[i] = 0.f;
         continue;
       }
-      const float denom = hv * cell_m;
+      const float denom = h_at_flux_time * cell_m;
       g.velx[i] = (g.flux[i][0] - g.flux[i][1]) / denom;
       g.vely[i] = (g.flux[i][2] - g.flux[i][3]) / denom;
     }
@@ -416,27 +481,51 @@ void WriteAbortSnapshot(const Grid& g, const Params& p, int cycle) {
 
 namespace pg {
 
+// Times one DeterministicMaxDepth call into `stats->t_swe_reduce` (if
+// `stats` is non-null) and returns its result -- shared by the initial
+// pre-loop check and the post-substep check inside the loop below, so the
+// two call sites can't drift into timing one and not the other.
+ReduceResult TimedReduce(const Grid& g, const Params& p, SimStats* stats) {
+  const auto t0 = std::chrono::steady_clock::now();
+  const ReduceResult red = DeterministicMaxDepth(g, p);
+  const auto t1 = std::chrono::steady_clock::now();
+  if (stats)
+    stats->t_swe_reduce += std::chrono::duration<double>(t1 - t0).count();
+  return red;
+}
+
 SweRunResult RunSweCycles(Grid& g, const Params& p, int cycles,
                           SimStats* stats) {
   const float cell_m = p.world_m / float(p.res);
   SweRunResult result;
 
+  // Validate the STARTING state before running anything -- the only check in
+  // this function that runs before a cycle's substeps rather than after.
+  // Everything below checks AFTER a cycle's own substeps, on purpose: an
+  // earlier version checked at the TOP of the NEXT cycle instead, which (a)
+  // left the FINAL cycle's own corruption completely unchecked (there is no
+  // "next cycle" for it to be caught at the top of, so the function returned
+  // ok=true regardless of what the last cycle's substeps produced), and (b)
+  // mislabeled every other cycle's fault too (a NaN born during cycle k's
+  // substeps was reported as "cycle k+1", the cycle that happened to notice
+  // it, not the one that caused it). Checking after every cycle -- including
+  // silently reusing that SAME check as the next cycle's CFL input, and
+  // running one extra time up front for the initial state -- fixes both:
+  // `aborted_cycle` now always names the cycle whose substeps actually
+  // produced the fault (or, for a bad starting state, the cycle that fault
+  // would have blocked), and no cycle is special-cased out of the check.
+  ReduceResult red = TimedReduce(g, p, stats);
+  if (red.nonfinite) {
+    result.ok = false;
+    result.aborted_cycle = 0;
+    result.reason =
+        "cycle 0: non-finite h or height detected in the starting state, "
+        "before any substep ran";
+    WriteAbortSnapshot(g, p, 0);
+    return result;
+  }
+
   for (int cycle = 0; cycle < cycles; ++cycle) {
-    const auto t0 = std::chrono::steady_clock::now();
-    const ReduceResult red = DeterministicMaxDepth(g, p);
-    const auto t1 = std::chrono::steady_clock::now();
-    if (stats)
-      stats->t_swe_reduce += std::chrono::duration<double>(t1 - t0).count();
-
-    if (red.nonfinite) {
-      result.ok = false;
-      result.aborted_cycle = cycle;
-      result.reason = "cycle " + std::to_string(cycle) +
-                      ": non-finite h or height detected by the CFL reduction";
-      WriteAbortSnapshot(g, p, cycle);
-      return result;
-    }
-
     // h_max floored at eps_wet: a bone-dry grid has zero wave speed, which
     // would divide by zero below. Flooring at the wet threshold gives a
     // finite, bounded dt instead of an arbitrary one -- physically, nothing
@@ -475,13 +564,39 @@ SweRunResult RunSweCycles(Grid& g, const Params& p, int cycles,
 
     // Morpho hook -- EMPTY. Task 6 fills this in with SedExchange/SedAdvect/
     // TalusFlux+TalusApply, run once per cycle (not per substep) after the
-    // fluid has advanced `swe_substeps` times. MORFAC clamp scaffolding:
-    // when that lands, the bed delta it produces is scaled by `morfac` in
-    // exactly one place and clamped to a bounded fraction of local depth
-    // before it is applied -- inert here because nothing above writes bed.
+    // fluid has advanced `swe_substeps` times, calling `ClampMorfacBedDelta`
+    // (declared in protogen.hpp, defined below in this file) on every bed
+    // delta it produces -- present and real today, just with no caller yet,
+    // so Task 6 activates this path instead of inventing it.
+
+    // Post-substep validity check -- see this function's header comment for
+    // why this runs after EVERY cycle, including the last, rather than only
+    // at the top of a next one that might not exist. Its result also becomes
+    // next iteration's CFL input, so this is not an extra pass over the grid
+    // beyond what computing next cycle's dt already needed.
+    red = TimedReduce(g, p, stats);
+    if (red.nonfinite) {
+      result.ok = false;
+      result.aborted_cycle = cycle;
+      result.reason = "cycle " + std::to_string(cycle) +
+                      ": non-finite h or height detected after this cycle's "
+                      "substeps";
+      WriteAbortSnapshot(g, p, cycle);
+      return result;
+    }
   }
 
   return result;
+}
+
+// See the declaration (protogen.hpp) for the design intent -- this is
+// scaffolding for Task 6, called by nothing today.
+float ClampMorfacBedDelta(float raw_delta_m, float depth_m, const Params& p) {
+  const float scaled = raw_delta_m * p.morfac;
+  const float bound = kMaxBedDeltaFraction * std::max(depth_m, 0.0f);
+  if (scaled > bound) return bound;
+  if (scaled < -bound) return -bound;
+  return scaled;
 }
 
 }  // namespace pg

@@ -1296,14 +1296,77 @@ void SweTripwire() {
     Check("SweTripwire: dt below dt_floor_s aborts, names dt-floor",
           !r.ok && r.aborted_cycle == 0 && named, buf);
   }
+  {
+    // Finding 4 (review): the ORIGINAL RunSweCycles checked at the TOP of
+    // each cycle, which is really "the state as of the END of the PREVIOUS
+    // cycle (or the initial state, for cycle 0)". That left the FINAL
+    // cycle's own substeps completely unchecked -- there is no next cycle's
+    // top to catch them at -- so a fault born during the last cycle's
+    // substeps rode out as `ok=true`. The fix checks AFTER every cycle's
+    // substeps (see RunSweCycles's header comment), including the last.
+    //
+    // To test that specifically, the seed must be INVISIBLE to the check
+    // that runs BEFORE this cycle's substeps (which only inspects `g.h`/
+    // `g.height`) yet cause corruption BY THE END of the substeps that
+    // follow. Poisoning `g.h` directly does not do this -- it is exactly
+    // what the pre-check exists to catch, immediately, at cycle 0 (that is
+    // the FIRST case in this test). Poisoning `g.flux` directly does not
+    // work either, and this is worth recording: SweFlux's own
+    // `if (f_free > 0.f)` gate evaluates false for a NaN operand (as does
+    // `if (f_free < 0.f)`), so ANY NaN flowing into `f_free` -- whether from
+    // a poisoned `flux[i][k]`, a poisoned `h[i]`, or anywhere else feeding
+    // that expression -- gets silently replaced by the branch's untaken-else
+    // default of 0.0, never surviving to be written back. This is a real
+    // (accidental) robustness property of the comparison structure, and it
+    // means "corruption born from otherwise-clean grid state, purely via
+    // normal substep arithmetic" is hard to construct as a test at all.
+    //
+    // What DOES reach `h` is a NaN in `dt` itself, which the grid-only check
+    // cannot see (it never inspects Params) and which the dt_floor_s check
+    // also cannot catch (`NaN < dt_floor_s` is false, same reason NaN never
+    // trips a `<` guard). A NaN `cfl_number` produces exactly that: dt is
+    // computed from a clean grid, comes out NaN, and SweDepth's own h-update
+    // line (`g.h[i] + dt*(...)  + rain_rate*dt`) has no comparison guarding
+    // it -- NaN propagates straight through to `h_b[i]` and, after the
+    // swap, to `g.h[i]`. This is what the OLD code would have returned
+    // ok=true for for a single-cycle call (no next cycle's top to catch it);
+    // the fix's post-substep check catches it in the SAME call.
+    Params p;
+    p.res = 24;
+    p.world_m = 16.0f * float(p.res);
+    p.relief_m = 1.0f;
+    p.out = "";
+    p.cfl_number = std::numeric_limits<float>::quiet_NaN();
+    Grid g(p.res);
+    InitTerrain(g, p);
+    std::fill(g.h.begin(), g.h.end(), 0.5f);  // clean, finite starting state
+    SweRunResult r = RunSweCycles(g, p, 1);
+    const bool named_post =
+        r.reason.find("after this cycle's substeps") != std::string::npos;
+    char buf[300];
+    std::snprintf(buf, sizeof(buf), "ok=%d aborted_cycle=%d reason=\"%s\"",
+                  r.ok, r.aborted_cycle, r.reason.c_str());
+    Check("SweTripwire: fault invisible to the pre-substep check (NaN dt from "
+          "a poisoned cfl_number) is still caught after this cycle's "
+          "substeps",
+          !r.ok && r.aborted_cycle == 0 && named_post, buf);
+  }
 }
 
 // --- S6. the wet-dry front is stable ----------------------------------------
 // A cliff: deep water perched on the high side, bone-dry low side. Must
 // produce no NaN/Inf anywhere, must never let a cell's total substep outflow
 // exceed the volume it held at the START of that substep (the export clamp's
-// own promise, checked from OUTSIDE the pass rather than trusted), and the
-// front must actually advance (water reaches cells that started dry).
+// own promise, checked from OUTSIDE the pass rather than trusted), the front
+// must actually advance (water reaches cells that started dry), and every
+// reported velocity must stay within kMaxFroude x the local wave speed.
+//
+// The Froude check matters on its own: `isfinite` alone is too weak a bar --
+// a collapsing A_pipe (SweFlux's own comment on finding 5) manufactures a
+// large but perfectly FINITE velocity, not a NaN/Inf, so a test that only
+// checked finiteness would have passed right through the exact bug this
+// fixture originally exposed (measured 113 m/s, Froude ~75, in 0.2 m water,
+// before the clamp existed).
 void SweWetDryFrontStability() {
   Params p;
   p.res = 32;
@@ -1327,6 +1390,8 @@ void SweWetDryFrontStability() {
                            // reduction, so it needs its own stable choice
   bool finite = true;
   bool clamp_respected = true;
+  bool froude_bounded = true;
+  double worst_froude_ratio = 0.0;
   for (int s = 0; s < 300 && finite && clamp_respected; ++s) {
     const std::vector<float> h_before = g.h;
     SweFlux(g, p, dt);
@@ -1342,10 +1407,26 @@ void SweWetDryFrontStability() {
     }
     SweDepth(g, p, dt);
     SweVelocity(g, p);
-    for (size_t i = 0; i < g.cells; ++i)
+    for (size_t i = 0; i < g.cells; ++i) {
       if (!std::isfinite(g.h[i]) || !std::isfinite(g.velx[i]) ||
           !std::isfinite(g.vely[i]))
         finite = false;
+      const double speed = std::sqrt(double(g.velx[i]) * double(g.velx[i]) +
+                                     double(g.vely[i]) * double(g.vely[i]));
+      // `g.h_b[i]` (not `g.h[i]`) is the depth SweVelocity actually divided
+      // by -- see its own comment (protogen_swe.cpp, finding 2) for why.
+      // 9.81: this file's own local copy of gravity, matching every other
+      // TU's convention of a small duplicated physical constant rather than
+      // reaching into protogen_swe.cpp for one.
+      const double h_ref = double(g.h_b[i]);
+      const double v_max = double(kMaxFroude) * std::sqrt(9.81 * std::max(h_ref, 0.0));
+      if (speed > v_max) {
+        const double ratio = speed / std::max(v_max, 1e-12);
+        worst_froude_ratio = std::max(worst_froude_ratio, ratio);
+        // 0.1% slack for float rounding in the clamp's own division/sqrt.
+        if (ratio > 1.001) froude_bounded = false;
+      }
+    }
   }
 
   bool advanced = false;
@@ -1356,101 +1437,131 @@ void SweWetDryFrontStability() {
       if (g.h[g.idx(x, y)] > p.eps_wet) advanced = true;
     }
 
-  char buf[160];
+  char buf[220];
   std::snprintf(buf, sizeof(buf),
                 "finite=%d, per-substep outflow<=volume=%d, front advanced "
-                "onto dry side=%d",
-                finite, clamp_respected, advanced);
-  Check("SweWetDryFrontStability", finite && clamp_respected && advanced, buf);
+                "onto dry side=%d, Froude bound held=%d (worst ratio "
+                "over bound %.4f)",
+                finite, clamp_respected, advanced, froude_bounded,
+                worst_froude_ratio);
+  Check("SweWetDryFrontStability",
+        finite && clamp_respected && advanced && froude_bounded, buf);
 }
 
 // --- S7. drag dissipates momentum through a lake body -----------------------
-// A deep, initially-still lake WITH A DRY MARGIN (same shore construction as
+// A still lake WITH A DRY MARGIN (same shore construction as
 // SweWellBalancedness -- lake bed well below a much higher surrounding bed,
 // so the lake edge never exports toward it: head_lake < head_margin always,
 // clamped to 0). Without that margin the lake's own perimeter sits directly
-// on the open array border, where the FULL 20 m depth drains against the
-// h=0 ghost from the very first substep -- a border-drainage transient that
+// on the open array border, where the FULL depth drains against the h=0
+// ghost from the very first substep -- a border-drainage transient that
 // dwarfs the injection signal this test means to isolate (measured on a
-// first attempt: near and far speeds both ~21-22 m/s, indistinguishable,
-// because the whole perimeter was firing at once).
+// first attempt at 20 m deep: near and far speeds both ~21-22 m/s,
+// indistinguishable, because the whole perimeter was firing at once).
 //
-// Each substep, ONE cell near the lake's edge gets a small direct depth
-// increment (bypassing the sim -- no knob needed, per the brief), mimicking
-// a steady trickle inflow. Interior velocity magnitude must decay with
-// distance from the injection point: an undamped scheme would let that
-// disturbance ring across the lake at roughly constant speed (a "jet");
-// Manning drag should bleed it off well before the far sample.
+// SHALLOW, not deep, and that is a deliberate correction, not the original
+// design: Manning drag is B = g*n^2/depth^(4/3), so it gets WEAKER, not
+// stronger, in deep water. A first version of this test used a 20 m deep
+// lake (matching the brief's "deep, still lake" wording literally) and
+// measured NO discriminating effect at all -- near-field speed differed by
+// under 0.3% between swe_manning_n = 0 and the production default 0.035
+// (0.13782 vs 0.13747 m/s), and the far/near ratio the test used to check
+// (0.0282 vs 0.0284) was, if anything, backwards. Both readings are
+// consistent with the physics, not a bug: B ~ 2.4e-4 at 20 m/n=0.035 is
+// simply too weak to matter within any affordable substep budget, and
+// nothing short of an unrealistic ~100x roughness bump showed a clear signal
+// there. At 0.5 m the SAME drag law gives B roughly 50x larger
+// (depth^(-4/3) scaling), which is measurably in play at the production
+// default -- this is the shallowest depth still recognisable as standing
+// water (a pond) rather than sheet flow.
+//
+// THE DISCRIMINATING METRIC IS A DIRECT drag-on vs. drag-off COMPARISON of
+// near-field speed, not a within-run far/near ratio. The ratio was the
+// original (wrong) metric: geometric spreading of an injected pulse across
+// a 2-D surface decays the signal on its own, with or without drag, so the
+// ratio came out nearly IDENTICAL whether or not drag was on (measured here
+// too: 0.340 with drag off vs. 0.342 with drag on -- statistically the
+// same). The absolute near-field speed, compared ACROSS two otherwise
+// identical runs, is what actually isolates drag's own contribution: it
+// must be meaningfully smaller with drag on, and would obviously fail to be
+// if drag were disabled (that IS the drag-off run).
 void SweLakeMomentumDissipation() {
-  Params p;
-  p.res = 64;
-  p.world_m = 16.0f * float(p.res);
-  p.relief_m = 1.0f;
-  p.swe_manning_n = 0.035f;
+  auto build_and_run = [](float manning_n) {
+    Params p;
+    p.res = 64;
+    p.world_m = 16.0f * float(p.res);
+    p.relief_m = 1.0f;
+    p.swe_manning_n = manning_n;
 
-  Grid g(p.res);
-  const int lo = 8, hi = 55;  // lake block, 8-cell dry margin to the border
-  const int y_mid = (lo + hi) / 2;
-  for (int y = 0; y < p.res; ++y)
-    for (int x = 0; x < p.res; ++x) {
-      const size_t i = g.idx(x, y);
-      if (x >= lo && x <= hi && y >= lo && y <= hi) {
-        g.height[i] = 0.0f;
-        g.h[i] = 20.0f;
-      } else {
-        g.height[i] = 1000.0f;  // dry margin, far above the lake surface
-        g.h[i] = 0.0f;
+    Grid g(p.res);
+    const int lo = 8, hi = 55;  // lake block, 8-cell dry margin to the border
+    const int y_mid = (lo + hi) / 2;
+    const float depth = 0.5f;  // shallow pond -- see header comment for why
+    for (int y = 0; y < p.res; ++y)
+      for (int x = 0; x < p.res; ++x) {
+        const size_t i = g.idx(x, y);
+        if (x >= lo && x <= hi && y >= lo && y <= hi) {
+          g.height[i] = 0.0f;
+          g.h[i] = depth;
+        } else {
+          g.height[i] = 1000.0f;  // dry margin, far above the lake surface
+          g.h[i] = 0.0f;
+        }
       }
+
+    const float dt = 0.3f;
+    const int inject_x = lo + 4;
+    const float bump = 0.05f * depth;  // 5% of depth/substep, every substep
+    for (int s = 0; s < 800; ++s) {
+      g.h[g.idx(inject_x, y_mid)] += bump;
+      SweFlux(g, p, dt);
+      SweDepth(g, p, dt);
+      SweVelocity(g, p);
     }
 
-  const float dt = 0.3f;  // a little under this fixture's natural CFL dt
-                          // (~0.5*16/sqrt(9.81*20) ~ 0.57 s) so the wave
-                          // speed sqrt(g*h) ~ 14 m/s can cross several cells
-                          // per substep without a separate CFL call
-  const int inject_x = lo + 4;
-  const int near_x = inject_x + 4;
-  const int far_x = 48;  // well inside the block (hi=55), short of its own
-                         // far wall where reflection off the dry margin
-                         // would confound the reading
-  // 1 m/substep measured (scratchpad/diag_lake.cpp) as the smallest trickle
-  // that resolves into a clean monotone decay within an affordable substep
-  // count; smaller trickles (tried down to 2 cm) were still mostly numerical
-  // noise at these distances after 250-2000 substeps -- the signal exists
-  // but does not visibly organise into "decay with distance" that fast.
-  for (int s = 0; s < 800; ++s) {
-    g.h[g.idx(inject_x, y_mid)] += 1.0f;  // trickle, every substep
-    SweFlux(g, p, dt);
-    SweDepth(g, p, dt);
-    SweVelocity(g, p);
-  }
-
-  // Speed along the centreline at increasing distance from the injection.
-  auto speed_at = [&](int x) {
-    const size_t i = g.idx(x, y_mid);
-    return std::sqrt(double(g.velx[i]) * double(g.velx[i]) +
-                     double(g.vely[i]) * double(g.vely[i]));
+    auto speed_at = [&](int x) {
+      const size_t i = g.idx(x, y_mid);
+      return std::sqrt(double(g.velx[i]) * double(g.velx[i]) +
+                       double(g.vely[i]) * double(g.vely[i]));
+    };
+    const int near_x = inject_x + 4;
+    const int far_x = 40;
+    struct R { double near_speed, far_speed, worst_beyond_near; };
+    R r{speed_at(near_x), speed_at(far_x), 0.0};
+    for (int x = near_x + 1; x <= far_x; ++x)
+      r.worst_beyond_near = std::max(r.worst_beyond_near, speed_at(x));
+    return r;
   };
-  const double near_speed = speed_at(near_x);
-  const double far_speed = speed_at(far_x);
-  bool no_blowup = true;
-  double worst_beyond_near = 0.0;
-  for (int x = near_x + 1; x <= far_x; ++x)
-    worst_beyond_near = std::max(worst_beyond_near, speed_at(x));
-  // "No jet": nothing past the near sample may exceed it by more than a
-  // little (a jet would show up as a LATER sample being as fast or faster
-  // than the one right by the source). "Decays": the far sample is a small
-  // fraction of the near one.
-  if (worst_beyond_near > near_speed * 1.1 + 1e-9) no_blowup = false;
-  const bool decays = near_speed > 1e-6 && far_speed < 0.3 * near_speed;
 
-  char buf[220];
+  const auto off = build_and_run(0.0f);     // drag disabled: B = 0 exactly
+  const auto on = build_and_run(0.035f);    // production default
+
+  // PRIMARY: drag must measurably suppress the near-field speed relative to
+  // the SAME injection with drag off. Measured ~17-27% at this depth across
+  // a few substep counts during tuning; 10% is a generous margin below that
+  // -- loose enough not to be fixture-noise-sensitive, tight enough that
+  // disabling the drag term (or reverting to the old bugged closed form,
+  // which also under-damps -- see SweFlux's own comment on finding 1) would
+  // fail it.
+  const bool drag_suppresses =
+      on.near_speed < off.near_speed * 0.90 && off.near_speed > 1e-6;
+
+  // SECONDARY, on the drag-ON (production) run only: the qualitative shape
+  // this test originally checked still holds -- decays with distance, no
+  // jet outrunning the near sample.
+  const bool no_jet = on.worst_beyond_near <= on.near_speed * 1.1 + 1e-9;
+  const bool decays = on.far_speed < 0.5 * on.near_speed;
+
+  char buf[300];
   std::snprintf(buf, sizeof(buf),
-                "near (x=%d) speed %.4e m/s, far (x=%d) speed %.4e m/s, "
-                "worst beyond near %.4e m/s",
-                near_x, double(near_speed), far_x, double(far_speed),
-                worst_beyond_near);
-  Check("SweLakeMomentumDissipation: velocity decays into the lake, no jet",
-        no_blowup && decays, buf);
+                "near speed: drag-off %.4e vs drag-on %.4e m/s (%.0f%% "
+                "suppression); drag-on far %.4e, worst-beyond-near %.4e",
+                off.near_speed, on.near_speed,
+                100.0 * (1.0 - on.near_speed / std::max(off.near_speed, 1e-12)),
+                on.far_speed, on.worst_beyond_near);
+  Check("SweLakeMomentumDissipation: drag measurably suppresses speed, "
+        "on-run still decays with no jet",
+        drag_suppresses && no_jet && decays, buf);
 }
 
 // --- S8. Manning normal-depth convergence on a uniform incline --------------
@@ -1524,6 +1635,47 @@ void SweManningConvergence() {
   Check("SweManningConvergence", ok, buf);
 }
 
+// --- S9. MORFAC clamp scaffolding (review finding 6: spec gap) --------------
+// `ClampMorfacBedDelta` has no caller yet -- Task 6's morpho hook is the
+// first one -- but "present and inert" should still mean "present and
+// CORRECT", not merely "present and untested". Exercises it directly.
+void MorfacClampScaffold() {
+  Params p;
+  p.morfac = 1.0f;
+  const float depth = 2.0f;
+  const float bound = kMaxBedDeltaFraction * depth;  // 0.2 m at morfac = 1
+
+  // Small delta, well inside the bound, morfac = 1: passes through unchanged.
+  const float small = ClampMorfacBedDelta(0.01f, depth, p);
+  const bool small_ok = std::fabs(small - 0.01f) < 1e-6f;
+
+  // Large positive delta: clamped to +bound exactly, not merely reduced.
+  const float big_pos = ClampMorfacBedDelta(10.0f, depth, p);
+  const bool big_pos_ok = std::fabs(big_pos - bound) < 1e-6f;
+
+  // Large negative delta: clamped to -bound, sign preserved.
+  const float big_neg = ClampMorfacBedDelta(-10.0f, depth, p);
+  const bool big_neg_ok = std::fabs(big_neg + bound) < 1e-6f;
+
+  // morfac scales BEFORE the bound is applied: a delta that is fine on its
+  // own but exceeds the bound once morfac amplifies it must also clamp.
+  Params p10 = p;
+  p10.morfac = 10.0f;
+  const float scaled_then_clamped = ClampMorfacBedDelta(0.05f, depth, p10);
+  const bool scaled_ok = std::fabs(scaled_then_clamped - bound) < 1e-6f;  // 0.05*10=0.5 -> clamps to 0.2
+
+  const bool ok = small_ok && big_pos_ok && big_neg_ok && scaled_ok;
+  char buf[260];
+  std::snprintf(buf, sizeof(buf),
+                "small(0.01)=%.4f (want 0.01), big+(10)=%.4f (want +%.4f), "
+                "big-(-10)=%.4f (want %.4f), morfac10x(0.05)=%.4f (want %.4f)",
+                double(small), double(big_pos), double(bound), double(big_neg),
+                double(-bound), double(scaled_then_clamped), double(bound));
+  Check("MorfacClampScaffold: scales by morfac then bounds to a depth "
+        "fraction (Task 6's first caller)",
+        ok, buf);
+}
+
 int RunAll() {
   std::printf("protogen sanity tests (small grids, production 16 m cells)\n");
   MassConservation();
@@ -1565,6 +1717,7 @@ int RunAll() {
   SweWetDryFrontStability();
   SweLakeMomentumDissipation();
   SweManningConvergence();
+  MorfacClampScaffold();
 
   std::printf("\n  %d passed, %d failed, %d pending", g_pass, g_fail, g_pending);
   if (g_pending_ready)
