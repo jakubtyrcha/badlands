@@ -32,9 +32,48 @@
 
 namespace badlands::rhi_app {
 
+// The back-channel a view needs for things only the app can do.
+//
+// FOUND BY PORTING THE SECOND APP. rhi_lab's windowed self-test drives a
+// scripted resize through the window manager -- the same path a user drag takes,
+// so the test exercises the coalescing rather than bypassing it -- and it reads
+// the window in POINTS to compute the request. A view with no way to reach
+// either could not be written at all, which the first port never revealed
+// because object_viewer never asks the window for anything.
+//
+// NARROW ON PURPOSE: three methods, not the whole AppShell. A view calling
+// Run() again, or reaching the swapchain behind the layer's back, are not
+// things this seam should make expressible.
+class RhiAppHost {
+ public:
+  virtual ~RhiAppHost() = default;
+
+  // Asks the window manager for a new size, in POINTS (what SDL takes). The new
+  // PIXEL size arrives as an event and goes through the same coalescing a user
+  // drag uses -- which is the part worth testing.
+  virtual void RequestResizePoints(uint32_t width, uint32_t height) = 0;
+
+  // Ends the loop after the current frame.
+  virtual void Stop() = 0;
+
+  // What the SWAPCHAIN is currently sized for, in pixels. The sizes, not the
+  // swapchain: an app asserting that its targets, the window and the swapchain
+  // all agree needs these three numbers, and handing out the object so it can
+  // read two of them would let it acquire and present behind the loop's back.
+  virtual uint32_t SwapchainWidth() const = 0;
+  virtual uint32_t SwapchainHeight() const = 0;
+
+  // The window, for the POINT-space queries SDL answers and the shell does not.
+  // Everything the shell reports is in PIXELS, and on a HiDPI display those are
+  // different numbers -- comparing one against the other is a test that fails on
+  // a correct implementation.
+  virtual SDL_Window* Window() = 0;
+};
+
 // What a view is built against. Everything here exists only after the app has
 // started, which is why views arrive through a factory.
 struct RhiAppContext {
+  RhiAppHost* host = nullptr;
   rhi::IRhiDevice* device = nullptr;
   slang::SlangCompiler* compiler = nullptr;
   // READ BACK from the swapchain, never assumed: the shell may present
@@ -109,6 +148,17 @@ struct RhiAppConfig {
   bool vsync = true;
   // Search paths for the Slang compiler, in order.
   std::vector<std::string> shader_paths;
+
+  // An EXISTING device to run on, borrowed. The layer creates its own when this
+  // is null.
+  //
+  // FOUND BY PORTING rhi_lab. An app with both a headless and a windowed path
+  // creates its device before it knows which path it is on -- and its scene,
+  // targets and pipelines with it. If the layer then made a SECOND device, the
+  // app would render with one into the other's drawable: two devices, resources
+  // that belong to neither consistently, and Metal forgiving enough that it
+  // draws anyway. Lending the device is the fix; owning it is only the default.
+  rhi::IRhiDevice* device = nullptr;
 };
 
 // Flags the layer parses out of argv, so every app spells them the same way.
@@ -134,7 +184,8 @@ class RhiApp {
 
   // Runs to completion. Returns a process exit code. Parses and STRIPS the
   // layer's own flags from argv first.
-  int Run(int argc, char** argv, const ViewFactory& factory);
+  int Run(int argc, char** argv, const ViewFactory& factory,
+          RunStats* out_stats = nullptr);
 
   // The same, with the flags already parsed.
   //
@@ -143,7 +194,11 @@ class RhiApp {
   // argument and gets refused -- the app rejecting a flag the layer documents.
   // So the app calls ParseAppArgs itself, up front, and hands the result here
   // rather than having argv parsed twice.
-  int RunParsed(const RhiAppOptions& options, const ViewFactory& factory);
+  // `out_stats` receives what the loop actually did. Exposed because an app's
+  // own assertions need it: "the window really did resize" and "some frame was
+  // presented" are claims about the LOOP, and a view cannot see either.
+  int RunParsed(const RhiAppOptions& options, const ViewFactory& factory,
+                RunStats* out_stats = nullptr);
 
  private:
   RhiAppConfig config_;

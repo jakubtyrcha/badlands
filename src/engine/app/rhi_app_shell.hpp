@@ -113,6 +113,12 @@ struct RunStats {
   uint64_t frames_presented = 0;
   uint32_t final_width = 0;   // PIXELS
   uint32_t final_height = 0;
+  // What the SWAPCHAIN ended up sized for. Reported here rather than fetched
+  // afterwards because the shell is gone by then -- an app that reached for it
+  // after the run read freed memory and got 0x0, which its own assertion then
+  // blamed on the resize.
+  uint32_t final_swapchain_width = 0;
+  uint32_t final_swapchain_height = 0;
   bool aborted = false;  // a callback asked to stop, or a rebuild failed
 };
 

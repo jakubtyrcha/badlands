@@ -100,18 +100,52 @@ RhiAppOptions ParseAppArgs(int& argc, char** argv) {
   return opt;
 }
 
-int RhiApp::Run(int argc, char** argv, const ViewFactory& factory) {
+namespace {
+
+// The host, implemented over the shell. A thin forwarder rather than exposing
+// AppShell itself, so a view cannot re-enter Run or reach the swapchain.
+class ShellHost final : public RhiAppHost {
+ public:
+  explicit ShellHost(AppShell& shell) : shell_(shell) {}
+  void RequestResizePoints(uint32_t w, uint32_t h) override {
+    shell_.RequestResizePoints(w, h);
+  }
+  void Stop() override { shell_.Stop(); }
+  uint32_t SwapchainWidth() const override {
+    return shell_.Swapchain() ? shell_.Swapchain()->GetWidth() : 0;
+  }
+  uint32_t SwapchainHeight() const override {
+    return shell_.Swapchain() ? shell_.Swapchain()->GetHeight() : 0;
+  }
+  SDL_Window* Window() override { return shell_.Window(); }
+
+ private:
+  AppShell& shell_;
+};
+
+}  // namespace
+
+int RhiApp::Run(int argc, char** argv, const ViewFactory& factory,
+                RunStats* out_stats) {
   RhiAppOptions opt = ParseAppArgs(argc, argv);
   if (!opt.valid) return 1;
-  return RunParsed(opt, factory);
+  return RunParsed(opt, factory, out_stats);
 }
 
-int RhiApp::RunParsed(const RhiAppOptions& opt, const ViewFactory& factory) {
+int RhiApp::RunParsed(const RhiAppOptions& opt, const ViewFactory& factory,
+                      RunStats* out_stats) {
   if (!opt.valid) return 1;
 
-  auto device = CreateDevice({.backend = NativeBackend(),
-                              .enable_validation = true,
-                              .label = config_.title});
+  // Borrowed if the app already has one -- see RhiAppConfig::device. `owned`
+  // exists only to keep the layer-created case alive for the run.
+  std::unique_ptr<IRhiDevice> owned;
+  IRhiDevice* device = config_.device;
+  if (!device) {
+    owned = CreateDevice({.backend = NativeBackend(),
+                          .enable_validation = true,
+                          .label = config_.title});
+    device = owned.get();
+  }
   if (!device) return 1;
 
   auto compiler = slang::CreateSlangCompiler(config_.shader_paths);
@@ -142,7 +176,7 @@ int RhiApp::RunParsed(const RhiAppOptions& opt, const ViewFactory& factory) {
     spdlog::error("rhi_app: ImGui_ImplSDL3_InitForMetal failed");
     return 1;
   }
-  if (!ImGui_ImplRHI_Init({.device = device.get(),
+  if (!ImGui_ImplRHI_Init({.device = device,
                            .compiler = compiler.get(),
                            .target_format = kUiFormat,
                            .framebuffer_width = shell->Width(),
@@ -209,7 +243,9 @@ int RhiApp::RunParsed(const RhiAppOptions& opt, const ViewFactory& factory) {
   if (!rebuild_ui_target(shell->Width(), shell->Height())) return 1;
 
   // --- The view -----------------------------------------------------------
-  RhiAppContext ctx{.device = device.get(),
+  ShellHost host(*shell);
+  RhiAppContext ctx{.host = &host,
+                    .device = device,
                     .compiler = compiler.get(),
                     .surface_format = surface_format,
                     .surface_color_space = surface_cs,
@@ -295,8 +331,14 @@ int RhiApp::RunParsed(const RhiAppOptions& opt, const ViewFactory& factory) {
     graph::RenderGraph graph(*device);
     auto ui_h = graph.ImportTexture(ui_target.get(), ResourceState::Undefined,
                                     "ui_overlay");
+    // UNDEFINED as the entry state, not RenderTarget. This pass runs after the
+    // VIEW's, in a separate encoder, and cannot know what state the view left
+    // the drawable in -- asserting RenderTarget means the graph derives no
+    // transition, and the validation layer then reports the drawable as
+    // Undefined at BeginRenderPass. Declaring what is actually known lets the
+    // graph emit the transition, which is also what DX12 will need.
     auto surface_h = graph.ImportTexture(target->GetTexture(),
-                                         ResourceState::RenderTarget, "surface");
+                                         ResourceState::Undefined, "surface");
     if (!ui_h.IsValid() || !surface_h.IsValid()) return false;
 
     // Cleared to transparent every frame: the overlay is rebuilt from scratch,
@@ -342,6 +384,7 @@ int RhiApp::RunParsed(const RhiAppOptions& opt, const ViewFactory& factory) {
   const uint64_t frame_cap =
       !opt.screenshot_path.empty() && opt.max_frames == 0 ? 1 : opt.max_frames;
   const RunStats stats = shell->Run(cb, frame_cap);
+  if (out_stats) *out_stats = stats;
 
   int exit_code = stats.aborted ? 1 : 0;
   if (pending_shot) {

@@ -47,6 +47,7 @@ extern "C" {
 #include "engine/slang/slang_compiler.hpp"
 #include "game/geometry/terrain_clusters.hpp"
 #include "src/executables/rhi_lab/lab_scene.hpp"
+#include "engine/app/rhi_app.hpp"
 #include "engine/app/rhi_app_shell.hpp"
 
 using namespace badlands;
@@ -855,98 +856,177 @@ int main(int argc, char** argv) {
   };  // record_frame
 
   if (opt.windowed) {
-    // The window, the swapchain, the resize coalescing and the frame pacing all
-    // live in AppShell now -- shared with object_viewer, because a second copy
-    // of that loop is a second copy of every macOS input and HiDPI bug it took
-    // several rounds to get right.
-    auto shell = rhi_app::AppShell::Create(
-        *device, {.title = "badlands rhi_lab",
-                  .width = opt.width,
-                  .height = opt.height,
-                  .present_format = Format::BGRA8Unorm});
-    if (!shell) return 1;
-    if (!MakeTargets(*device, shell->Width(), shell->Height(), targets)) return 1;
-    if (!rebuild_resolve()) return 1;
+    // THE SECOND CONSUMER of RhiApp, and the one that proved the layer
+    // generalises. Porting it found four things object_viewer never asked for:
+    // a view could not request a resize, could not read the window in POINTS,
+    // could not see the loop's RunStats, and could not learn the swapchain's
+    // size. All four are things this self-test is entirely made of.
+    //
+    // A THIN ADAPTER over the lambdas above rather than a restructuring of the
+    // lab: what is being tested here is that the layer's interface can carry
+    // this app, not that the app is written the layer's way. Rewriting
+    // record_frame into a view's members would change what the resize test
+    // covers while claiming to be a port.
+    class LabView : public rhi_app::RhiAppView {
+     public:
+      LabView(const Options& opt, Targets& targets, FlyCamera& cam,
+              uint32_t& frame_offset, std::set<uint32_t>& offsets_seen,
+              uint32_t& rendered_after_resize,
+              std::function<bool()> rebuild_resolve,
+              std::function<bool(uint32_t, uint32_t)> update_uniforms,
+              std::function<void(ITextureView*, uint32_t, uint32_t, bool)> record)
+          : opt_(opt), targets_(targets), cam_(cam), frame_offset_(frame_offset),
+            offsets_seen_(offsets_seen),
+            rendered_after_resize_(rendered_after_resize),
+            rebuild_resolve_(std::move(rebuild_resolve)),
+            update_uniforms_(std::move(update_uniforms)),
+            record_(std::move(record)) {}
 
-    spdlog::info(
-        "rhi_lab: WASD/QE to move, hold right mouse to look, shift to go "
-        "faster, Esc to quit");
+      void SetInitialWidthOut(uint32_t* out) { out_initial_w_ = out; }
 
-    // Self-test bookkeeping. The request is in POINTS, because that is what
-    // SDL_SetWindowSize takes; everything downstream is in PIXELS, which on a
-    // HiDPI display is a different number. Asserting against the requested
-    // value compares the two and fails on a correct implementation -- which is
-    // exactly what this test did on its first run.
-    int point_w = 0, point_h = 0;
-    SDL_GetWindowSize(shell->Window(), &point_w, &point_h);
-    const int test_point_w = point_w / 2 + 64;
-    const int test_point_h = point_h / 2 + 32;
-    const uint32_t initial_pixel_w = shell->Width();
-    uint32_t rendered_after_resize = 0;
-    // Which uniform slices the frames actually used. If consecutive frames
-    // share one, the CPU is overwriting bytes the GPU may still be reading --
-    // the hazard the ring exists to remove, and one that renders a plausible
-    // image while it happens.
-    std::set<uint32_t> frame_offsets_seen;
+      bool Initialize(const rhi_app::RhiAppContext& ctx) override {
+        host_ = ctx.host;
+        if (!MakeTargets(*ctx.device, ctx.width, ctx.height, targets_)) {
+          return false;
+        }
+        if (!rebuild_resolve_()) return false;
+        initial_pixel_w_ = ctx.width;
+        if (out_initial_w_) *out_initial_w_ = ctx.width;
 
-    rhi_app::AppShellCallbacks cb;
-    cb.OnEvent = [&](const SDL_Event& e) {
-      if (e.type == SDL_EVENT_MOUSE_MOTION && (e.motion.state & SDL_BUTTON_RMASK)) {
-        constexpr float kLookRate = 0.0035f;
-        cam.Turn(-e.motion.xrel * kLookRate, -e.motion.yrel * kLookRate);
+        // POINTS, because that is what SDL_SetWindowSize takes; everything
+        // downstream is PIXELS, which on a HiDPI display is a different number.
+        int pw = 0, ph = 0;
+        SDL_GetWindowSize(host_->Window(), &pw, &ph);
+        test_point_w_ = pw / 2 + 64;
+        test_point_h_ = ph / 2 + 32;
+
+        spdlog::info(
+            "rhi_lab: WASD/QE to move, hold right mouse to look, shift to go "
+            "faster, Esc to quit");
         return true;
       }
-      return false;
-    };
-    cb.OnUpdate = [&](const rhi_app::FrameInfo& f) {
-      const float boost = f.keys[SDL_SCANCODE_LSHIFT] ? 4.0f : 1.0f;
-      const float step = cam.speed * boost * std::min(f.dt, 0.1f);
-      if (f.keys[SDL_SCANCODE_W]) cam.position += cam.Forward() * step;
-      if (f.keys[SDL_SCANCODE_S]) cam.position -= cam.Forward() * step;
-      if (f.keys[SDL_SCANCODE_D]) cam.position += cam.Right() * step;
-      if (f.keys[SDL_SCANCODE_A]) cam.position -= cam.Right() * step;
-      if (f.keys[SDL_SCANCODE_E]) cam.position.y += step;
-      if (f.keys[SDL_SCANCODE_Q]) cam.position.y -= step;
 
-      // Scripted resize, partway through a self-test run. Requested through the
-      // SAME window-manager path a user drag uses, so the test exercises the
-      // coalescing rather than bypassing it.
-      if (opt.self_test_frames > 0 &&
-          f.index == uint64_t(opt.self_test_frames / 2)) {
-        shell->RequestResizePoints(uint32_t(test_point_w),
-                                   uint32_t(test_point_h));
+      bool OnEvent(const SDL_Event& e) override {
+        if (e.type == SDL_EVENT_MOUSE_MOTION &&
+            (e.motion.state & SDL_BUTTON_RMASK)) {
+          constexpr float kLookRate = 0.0035f;
+          cam_.Turn(-e.motion.xrel * kLookRate, -e.motion.yrel * kLookRate);
+          return true;
+        }
+        return false;
       }
-    };
-    cb.OnFrameBegin = [&](uint64_t frame_index) {
-      // Recycles this frame's slot. Safe without a check: the shell's
-      // BeginFrame already blocked until the frame that owned it retired.
-      frame_alloc->BeginFrame(frame_index);
-    };
-    cb.OnResize = [&](uint32_t w, uint32_t h) {
-      if (!MakeTargets(*device, w, h, targets)) return false;
-      // The resolve table is immutable and holds the OLD visbuffer and depth
-      // views, so it has to be rebuilt too.
-      return rebuild_resolve();
-    };
-    cb.OnRender = [&](ITextureView* target, const rhi_app::FrameInfo& f) {
-      if (!update_frame_uniforms(f.width, f.height)) return false;
-      record_frame(target, f.width, f.height, /*want_readback=*/false);
-      frame_offsets_seen.insert(frame_offset);
-      if (f.width != initial_pixel_w) ++rendered_after_resize;
-      return true;
+
+      void Update(const rhi_app::FrameTime& t) override {
+        if (!t.keys) return;
+        const float boost = t.keys[SDL_SCANCODE_LSHIFT] ? 4.0f : 1.0f;
+        const float step = cam_.speed * boost * std::min(t.real_dt, 0.1f);
+        if (t.keys[SDL_SCANCODE_W]) cam_.position += cam_.Forward() * step;
+        if (t.keys[SDL_SCANCODE_S]) cam_.position -= cam_.Forward() * step;
+        if (t.keys[SDL_SCANCODE_D]) cam_.position += cam_.Right() * step;
+        if (t.keys[SDL_SCANCODE_A]) cam_.position -= cam_.Right() * step;
+        if (t.keys[SDL_SCANCODE_E]) cam_.position.y += step;
+        if (t.keys[SDL_SCANCODE_Q]) cam_.position.y -= step;
+
+        // Scripted resize, partway through a self-test run. Requested through
+        // the SAME window-manager path a user drag uses, so the test exercises
+        // the coalescing rather than bypassing it.
+        if (opt_.self_test_frames > 0 &&
+            t.index == uint64_t(opt_.self_test_frames / 2)) {
+          host_->RequestResizePoints(uint32_t(test_point_w_),
+                                     uint32_t(test_point_h_));
+        }
+      }
+
+      void OnFrameBegin(uint64_t frame_index) override {
+        if (on_frame_begin_) on_frame_begin_(frame_index);
+      }
+      void SetFrameBegin(std::function<void(uint64_t)> f) {
+        on_frame_begin_ = std::move(f);
+      }
+
+      bool OnResize(uint32_t w, uint32_t h) override {
+        if (!MakeTargets(*device_, w, h, targets_)) return false;
+        // The resolve table is immutable and holds the OLD visbuffer and depth
+        // views, so it has to be rebuilt too.
+        return rebuild_resolve_();
+      }
+      void SetDevice(IRhiDevice* d) { device_ = d; }
+
+      bool Render(ITextureView* target, const rhi_app::FrameInfo& f) override {
+        if (!update_uniforms_(f.width, f.height)) return false;
+        record_(target, f.width, f.height, /*want_readback=*/false);
+        offsets_seen_.insert(frame_offset_);
+        if (f.width != initial_pixel_w_) ++rendered_after_resize_;
+        return true;
+      }
+
+      uint32_t InitialPixelWidth() const { return initial_pixel_w_; }
+      rhi_app::RhiAppHost* Host() const { return host_; }
+
+     private:
+      const Options& opt_;
+      Targets& targets_;
+      FlyCamera& cam_;
+      uint32_t& frame_offset_;
+      std::set<uint32_t>& offsets_seen_;
+      uint32_t& rendered_after_resize_;
+      std::function<bool()> rebuild_resolve_;
+      std::function<bool(uint32_t, uint32_t)> update_uniforms_;
+      std::function<void(ITextureView*, uint32_t, uint32_t, bool)> record_;
+      std::function<void(uint64_t)> on_frame_begin_;
+      rhi_app::RhiAppHost* host_ = nullptr;
+      IRhiDevice* device_ = nullptr;
+      uint32_t initial_pixel_w_ = 0;
+      uint32_t* out_initial_w_ = nullptr;
+      int test_point_w_ = 0, test_point_h_ = 0;
     };
 
-    const auto stats = shell->Run(cb, opt.self_test_frames);
+    std::set<uint32_t> frame_offsets_seen;
+    uint32_t rendered_after_resize = 0;
+    uint32_t swapchain_w = 0, swapchain_h = 0;
+    // Captured by the view during Initialize; read after the run, when the view
+    // is gone.
+    uint32_t initial_pixel_width = 0;
 
-    // Checked BEFORE anything else, and outside the self-test: the shell sets
-    // this when a target rebuild failed, and the self-test's own size checks
-    // cannot see it -- MakeTargets assigns the requested width before it tries
-    // to create anything, so after a failure targets.width still equals the
-    // size that was asked for and the comparison passes against itself.
-    if (stats.aborted) {
-      spdlog::error("rhi_lab: the render loop aborted");
-      return 1;
-    }
+    // LENDS ITS DEVICE. The lab creates one before it knows whether it is
+    // running headless or windowed, and its scene, targets and pipelines are
+    // built against it -- so letting the layer make a second would have this
+    // app rendering with one device into the other's drawable.
+    rhi_app::RhiApp app({.title = "badlands rhi_lab",
+                         .width = opt.width,
+                         .height = opt.height,
+                         .shader_paths = {"shaders/slang/common",
+                                          "shaders/slang/rhi_lab",
+                                          "shaders/slang/app",
+                                          "shaders/slang/ui"},
+                         .device = device.get()});
+    rhi_app::RunStats stats;
+    rhi_app::RhiAppOptions app_opts;
+    app_opts.max_frames = uint64_t(std::max(0, opt.self_test_frames));
+
+    LabView* lab_view = nullptr;
+    const int rc = app.RunParsed(
+        app_opts,
+        [&](const rhi_app::RhiAppContext& ctx) {
+          auto v = std::make_unique<LabView>(
+              opt, targets, cam, frame_offset, frame_offsets_seen,
+              rendered_after_resize, rebuild_resolve, update_frame_uniforms,
+              record_frame);
+          v->SetDevice(ctx.device);
+          v->SetInitialWidthOut(&initial_pixel_width);
+          v->SetFrameBegin([&](uint64_t i) { frame_alloc->BeginFrame(i); });
+          lab_view = v.get();
+          return v;
+        },
+        &stats);
+    // FROM RunStats, not from the host after the fact: the app destroys the
+    // view and the shell before returning, so reaching for either here read
+    // freed memory and reported 0x0 -- which this test then blamed on the
+    // resize.
+    swapchain_w = stats.final_swapchain_width;
+    swapchain_h = stats.final_swapchain_height;
+    const uint32_t initial_pixel_w = initial_pixel_width;
+    if (rc != 0) return rc;
 
     if (opt.self_test_frames > 0) {
       // Exit status IS the assertion: this runs as a ctest with no test
@@ -971,11 +1051,9 @@ int main(int argc, char** argv) {
                       stats.final_height);
         return 1;
       }
-      if (shell->Swapchain()->GetWidth() != stats.final_width ||
-          shell->Swapchain()->GetHeight() != stats.final_height) {
+      if (swapchain_w != stats.final_width || swapchain_h != stats.final_height) {
         spdlog::error("rhi_lab self-test: swapchain is {}x{}, window is {}x{}",
-                      shell->Swapchain()->GetWidth(),
-                      shell->Swapchain()->GetHeight(), stats.final_width,
+                      swapchain_w, swapchain_h, stats.final_width,
                       stats.final_height);
         return 1;
       }

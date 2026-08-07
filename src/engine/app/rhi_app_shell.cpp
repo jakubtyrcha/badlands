@@ -243,6 +243,10 @@ RunStats AppShell::Run(const AppShellCallbacks& cb, uint64_t max_frames) {
   SDL_GetWindowSizeInPixels(window_, &final_pw, &final_ph);
   stats.final_width = uint32_t(std::max(0, final_pw));
   stats.final_height = uint32_t(std::max(0, final_ph));
+  if (swapchain_) {
+    stats.final_swapchain_width = swapchain_->GetWidth();
+    stats.final_swapchain_height = swapchain_->GetHeight();
+  }
   return stats;
 }
 
