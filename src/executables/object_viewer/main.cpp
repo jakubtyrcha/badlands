@@ -655,7 +655,7 @@ bool BuildGraph(RenderGraph& graph, ITexture* scene, ITexture* ui,
     if (!plane.vis->AddToGraph(graph)) return false;
     if (!plane.resolve->AddToGraph(
             graph, plane.vis->VisbufferHandle(), plane.vis->Visbuffer(),
-            plane.vis->VerticesHandle(), plane.vis->IndicesHandle(),
+            plane.vis->DepthHandle(), plane.vis->VerticesHandle(), plane.vis->IndicesHandle(),
             plane.vis->DrawsHandle(), scene_h, plane.vis->Vertices(),
             plane.vis->Indices(), plane.vis->Draws())) {
       return false;
@@ -2060,6 +2060,7 @@ int RunFrameRingSelfTest(IRhiDevice& device, const Options& opt) {
                                        "scene");
     if (!scene_h.IsValid() ||
         !resolve->AddToGraph(graph, vis->VisbufferHandle(), vis->Visbuffer(),
+                            vis->DepthHandle(),
                              vis->VerticesHandle(), vis->IndicesHandle(),
                              vis->DrawsHandle(), scene_h, vis->Vertices(),
                              vis->Indices(), vis->Draws())) {

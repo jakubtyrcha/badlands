@@ -28,33 +28,6 @@ import standard_lighting;
 import sh_lighting;
 import output_transform;
 
-// Mirrors ResolveFrameUniform in resolve_pass.hpp.
-public struct ResolveFrame {
-    public float4x4 view_proj;
-    public float4 camera_pos;     // xyz world
-    public float4 sun_direction;  // xyz, normalized, pointing TOWARD the sun
-    public float4 sun_color;      // rgb, already scaled by intensity
-    public float4 params;         // x = debug view, y = near, z = far
-    // x = prefiltered mip count, y = environment intensity, z = 1 when the IBL
-    // textures hold a real environment. z EXISTS BECAUSE A BINDING CANNOT BE
-    // ABSENT: the table always names a cube, so without a flag a 1x1 dummy and
-    // a real environment are indistinguishable and the viewer would silently
-    // light everything with black.
-    public float4 ibl;
-    // The frustum basis: forward at the centre, plus the half-extents at the
-    // near plane. THREE VECTORS RATHER THAN AN INVERSE VIEW-PROJECTION, because
-    // this pass deliberately has no matrix inverse (see the header) and the
-    // background only needs a direction, not a world position.
-    public float4 ray_forward;
-    public float4 ray_right;
-    public float4 ray_up;
-    public float4 ambient_sh[9];  // L2 SH, ENGINE convention (pre-convolved)
-}
-
-// Mirrors DebugView in resolve_pass.hpp, and every entry is reachable from
-// --debug-view as well as from the UI. A test iterates the enum to prove that:
-// a mode only the UI can reach is a mode no headless assertion covers.
-public static const uint kViewLit = 0u;
 public static const uint kViewTriangleId = 1u;
 public static const uint kViewBarycentric = 2u;
 public static const uint kViewDepth = 3u;
@@ -190,22 +163,19 @@ float4 fs_resolve(VOut i) : SV_Target
     let px = int2(int(i.uv.x * float(w)), int(i.uv.y * float(h)));
     let packed = visbuffer.Load(int3(px, 0));
 
-    // THE BACKGROUND, and it is view-dependent in exactly one direction.
+    // DEPTH MAKES THIS UNREACHABLE, and it stays anyway.
     //
-    // Under Lit it is the environment along the view ray, so what lights the
-    // spheres is visible behind them. Under every OTHER view it stays the flat
-    // constant it has always been -- the nine debug-view oracles assert on that
-    // background, and sampling the environment there would silently change what
-    // nine existing tests mean.
+    // The pass is drawn at z = 0 with Less against the visbuffer's own depth,
+    // so it runs only where geometry was rasterized -- and the raster pass
+    // clears kVisEmpty and depth 0.0 in the SAME render pass that writes both,
+    // so "depth > 0" and "has an id" are the same fact. A desync between them
+    // would therefore be a change to that pass, not to this one.
+    //
+    // Emitting MAGENTA rather than deleting the check: a silent wrong surface
+    // is exactly what RHI rule 1 forbids, and an unreachable branch costs one
+    // comparison against a value already in a register.
     if (packed == kVisEmpty) {
-        if (uint(frame.params.x) == kViewLit && frame.ibl.z > 0.5) {
-            // Mip 0: the SOURCE environment, not a roughness-convolved level.
-            // The sky is what it is; only a surface reflecting it is blurred.
-            let dir = normalize(BackgroundRay(i.uv));
-            let env = prefiltered_env.SampleLevel(ibl_sampler, dir, 0.0).rgb;
-            return float4(env * frame.ibl.y, 1.0);
-        }
-        return float4(SrgbToLinear(float3(0.05, 0.06, 0.09)), 1.0);
+        return float4(1.0, 0.0, 1.0, 1.0);
     }
 
     let draw = draws[VisDraw(packed)];

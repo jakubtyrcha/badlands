@@ -55,6 +55,25 @@ public struct DrawInfo {
 public static const uint kOverrideRoughness = 1u;
 public static const uint kOverrideMetallic = 2u;
 
+// Mirrors ResolveFrameUniform in resolve_pass.hpp. Lives HERE rather than in
+// resolve.slang because the background pass needs the same struct and importing
+// resolve would drag its bindings along -- the exact ambiguity this module was
+// split out to prevent.
+public struct ResolveFrame {
+    public float4x4 view_proj;
+    public float4 camera_pos;     // xyz world
+    public float4 sun_direction;  // xyz, normalized, pointing TOWARD the sun
+    public float4 sun_color;      // rgb, already scaled by intensity
+    public float4 params;         // x = debug view, y = near, z = far
+    public float4 ibl;            // x = mip count, y = intensity, z = present
+    public float4 ray_forward;
+    public float4 ray_right;
+    public float4 ray_up;
+    public float4 ambient_sh[9];
+}
+
+public static const uint kViewLit = 0u;
+
 // --- The packing ------------------------------------------------------------
 //
 // (draw_slot << 24) | (primitive + 1). Eight bits of draw, twenty-four of

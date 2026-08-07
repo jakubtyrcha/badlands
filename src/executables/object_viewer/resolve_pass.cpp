@@ -1,5 +1,7 @@
 #include "executables/object_viewer/resolve_pass.hpp"
 
+#include "executables/object_viewer/visbuffer_pass.hpp"
+
 #include <cmath>
 #include <cstring>
 
@@ -95,11 +97,46 @@ std::unique_ptr<ResolvePass> ResolvePass::Create(IRhiDevice& device,
        .fragment_shader = pass->fs_.get(),
        .fragment_entry = "fs_resolve",
        .color_formats = {target_format},
-       // No blend state and no depth: a fullscreen resolve REPLACES what it
-       // covers, and the depth test already happened in the raster pass.
+       // DEPTH-TESTED, not branchy. The triangle sits at z = 0 and compares
+       // Less against the visbuffer's reversed-Z depth (cleared to 0 = far), so
+       // the expensive material path -- five fetches, analytic gradients, a
+       // full BRDF -- never runs on a background pixel. Write is off: this pass
+       // reads the depth the raster pass produced and does not own it.
+       .depth = {.test_enabled = true,
+                 .write_enabled = false,
+                 .compare = CompareFunction::Less,
+                 .format = VisbufferPass::kDepthFormat},
        .cull_mode = CullMode::None,
        .label = "resolve"});
   if (!pass->pipeline_) return nullptr;
+
+  // THE DEPTH SPLIT. `Less` at z = 0 against a reversed-Z buffer cleared to 0
+  // runs only where geometry was rasterized; the background's `GreaterEqual`
+  // runs only where it was not. Write is off in both -- neither draw owns the
+  // depth, they only read it.
+  auto load_bg = [&](const char* entry) -> ShaderModulePtr {
+    auto compiled = compiler.Get({.module = "background", .entry = entry},
+                                 slang::ShaderTarget::Metal);
+    if (!compiled) return nullptr;
+    return device.CreateShaderModule(compiled->source, compiled->reflection,
+                                     std::string("background::") + entry);
+  };
+  pass->bg_vs_ = load_bg("vs_background");
+  pass->bg_fs_ = load_bg("fs_background");
+  if (!pass->bg_vs_ || !pass->bg_fs_) return nullptr;
+  pass->bg_pipeline_ = device.CreateRenderPipeline(
+      {.vertex_shader = pass->bg_vs_.get(),
+       .vertex_entry = "vs_background",
+       .fragment_shader = pass->bg_fs_.get(),
+       .fragment_entry = "fs_background",
+       .color_formats = {target_format},
+       .depth = {.test_enabled = true,
+                 .write_enabled = false,
+                 .compare = CompareFunction::GreaterEqual,
+                 .format = VisbufferPass::kDepthFormat},
+       .cull_mode = CullMode::None,
+       .label = "background"});
+  if (!pass->bg_pipeline_) return nullptr;
 
   pass->alloc_ = FrameAllocator::Create(
       device, {.block_size = 64 * 1024,
@@ -249,9 +286,10 @@ void ResolvePass::SetEnvironment(ITextureView* prefiltered, uint32_t mip_count,
     lut_view_ = brdf_lut;
     frame_.ibl = glm::vec4(float(mip_count), intensity, 1.0f, 0.0f);
   }
-  // The table NAMES the views, and a table is immutable -- so swapping the
-  // environment has to drop it and let AddToGraph rebuild.
+  // The tables NAME the views, and a table is immutable -- so swapping the
+  // environment has to drop BOTH and let AddToGraph rebuild them.
   table_.reset();
+  bg_table_.reset();
 }
 
 void ResolvePass::SetViewRays(glm::vec3 forward, glm::vec3 right,
@@ -264,6 +302,7 @@ void ResolvePass::SetViewRays(glm::vec3 forward, glm::vec3 right,
 bool ResolvePass::AddToGraph(graph::RenderGraph& graph,
                              graph::ResourceHandle visbuffer,
                              ITexture* visbuffer_texture,
+                             graph::ResourceHandle depth,
                              graph::ResourceHandle vertices,
                              graph::ResourceHandle indices,
                              graph::ResourceHandle draws,
@@ -345,11 +384,45 @@ bool ResolvePass::AddToGraph(graph::RenderGraph& graph,
     if (!lut.IsValid()) return false;
     pass.Reads(lut);
   }
+  // READ-ONLY: both draws test this depth and neither writes it. Declaring it
+  // as a target rather than a Reads() is what tells the graph it is an
+  // ATTACHMENT -- a sampled read would derive the wrong transition.
+  pass.DepthReadOnly(depth);
+
+  // The background's own table. A table resolves slots against ONE pipeline's
+  // reflection, and the background shader declares three bindings where the
+  // resolve declares thirteen -- so sharing one would resolve every slot to the
+  // wrong index.
+  if (bg_table_frame_ != frame_buffer_ || !bg_table_) {
+    auto bg = device_->CreateBindingTable(
+        {.render_pipeline = bg_pipeline_.get(),
+         .entries = {{.slot = 0,
+                      .kind = BindingKind::UniformBuffer,
+                      .buffer = frame_buffer_,
+                      .dynamic_offset = true},
+                     {.slot = 1,
+                      .kind = BindingKind::SampledTexture,
+                      .texture_view = env_view_},
+                     {.slot = 2,
+                      .kind = BindingKind::Sampler,
+                      .sampler = ibl_sampler_.get()}},
+         .label = "background"});
+    if (!bg) return false;  // CreateBindingTable logged why
+    bg_table_ = std::move(bg);
+    bg_table_frame_ = frame_buffer_;
+  }
+
   pass.Execute([this](const graph::RasterContext& ctx) {
     const uint32_t offsets[1] = {frame_offset_};
+    // TWO DISJOINT DRAWS, partitioned by the depth test rather than by a
+    // branch: the resolve covers what was rasterized, the background covers
+    // what was not, and between them they cover the target exactly once.
     ctx.pass->SetPipeline(pipeline_.get());
     ctx.pass->SetBindingTable(0, table_.get(), offsets);
     ctx.pass->Draw(3);  // one fullscreen triangle
+    ctx.pass->SetPipeline(bg_pipeline_.get());
+    ctx.pass->SetBindingTable(0, bg_table_.get(), offsets);
+    ctx.pass->Draw(3);
   });
   return true;
 }

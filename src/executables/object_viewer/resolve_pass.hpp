@@ -142,8 +142,12 @@ class ResolvePass {
   // buffer's TEXTURE is passed too, because the binding table names it and a
   // table is immutable -- a resize replaces the texture and the table has to
   // follow.
+  // `depth` is the visibility buffer's own depth, declared READ-ONLY: the
+  // resolve and the background are two disjoint depth-tested draws over it
+  // rather than one fullscreen pass that branches. See background.slang.
   bool AddToGraph(graph::RenderGraph& graph, graph::ResourceHandle visbuffer,
                   rhi::ITexture* visbuffer_texture,
+                  graph::ResourceHandle depth,
                   graph::ResourceHandle vertices, graph::ResourceHandle indices,
                   graph::ResourceHandle draws, graph::ResourceHandle target,
                   rhi::IBuffer* vertex_buffer, rhi::IBuffer* index_buffer,
@@ -158,6 +162,13 @@ class ResolvePass {
   const MaterialPack* pack_ = nullptr;
   rhi::ShaderModulePtr vs_, fs_;
   rhi::RenderPipelinePtr pipeline_;
+  // The BACKGROUND half. Its own pipeline because the depth compare is pipeline
+  // state, and its own table because a table resolves slots against one
+  // pipeline's reflection.
+  rhi::ShaderModulePtr bg_vs_, bg_fs_;
+  rhi::RenderPipelinePtr bg_pipeline_;
+  rhi::BindingTablePtr bg_table_;
+  rhi::IBuffer* bg_table_frame_ = nullptr;
   // A RING, for the same reason VisbufferPass has one: the shell keeps up to
   // three frames in flight and a plain memcpy into one buffer rewrites bytes an
   // older frame is still reading. Here that desynchronises the resolve from the
