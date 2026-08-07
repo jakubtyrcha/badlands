@@ -771,7 +771,8 @@ add_library(badlands_patch_providers STATIC
     src/mapgen/file_patch_source.cpp
     src/mapgen/coarse_world_patch_source.cpp
     src/mapgen/cubic_sample.cpp
-    src/mapgen/relief_filter.cpp)
+    src/mapgen/relief_filter.cpp
+    src/mapgen/patch_export.cpp)
 target_link_libraries(badlands_patch_providers PUBLIC badlands_patch_lib)
 
 # badlands_mapview_view: everything the map tool needs to fetch a patch and
@@ -827,6 +828,20 @@ endif()
 add_executable(badlands_mapview
     src/executables/mapview/main_mapview.cpp)
 target_link_libraries(badlands_mapview PRIVATE badlands_mapview_view badlands_patch_providers)
+
+# badlands_patch_export: the map tool's OFFLINE half -- cuts windows out of a
+# coarse world through the same Fetch mapview uses and writes them as images.
+# Headless and GPU-free: it links the providers plus the `assets` crate for the
+# PNG write, and nothing else. The PNG dependency stops HERE, which is what
+# keeps it out of src/mapgen/ (see patch_export.hpp).
+add_executable(badlands_patch_export
+    src/executables/patch_export/main.cpp)
+target_link_libraries(badlands_patch_export PRIVATE badlands_patch_providers assets)
+target_include_directories(badlands_patch_export PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/crates/assets/include)
+if(APPLE)
+    target_link_options(badlands_patch_export PRIVATE "-Wl,-ld_new")
+endif()
 
 # badlands_terrain_cluster_tests: Catch2 invariants for the terrain cluster-LOD
 # DAG build (error monotonicity, sphere nesting, crack-free seams, grid
@@ -2012,6 +2027,21 @@ target_include_directories(badlands_relief_tests PRIVATE
 )
 target_link_libraries(badlands_relief_tests PRIVATE badlands_patch_providers)
 add_test(NAME badlands_relief_tests COMMAND badlands_relief_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_patch_export_tests: the image ENCODINGS of PatchData (patch_export.hpp)
+# -- height with the watermap in the blue channel, the biome palette, the
+# hillshade. It links badlands_patch_providers and NOTHING else on purpose: the
+# encoders return pixel buffers and never touch the `assets` crate or the engine,
+# so this target is also the test that the split held.
+add_executable(badlands_patch_export_tests
+    src/mapgen/patch_export_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_patch_export_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_link_libraries(badlands_patch_export_tests PRIVATE badlands_patch_providers)
+add_test(NAME badlands_patch_export_tests COMMAND badlands_patch_export_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_lake_surface_tests: pure-CPU tests for the per-lake water surface and
 # its buried skirt -- the overlap that keeps a later wave displacement from

@@ -59,6 +59,21 @@ by nature — it is a pure function of a graph and a heightfield.
 ./build/badlands_mapview --load <patch-dir>  # a finished patch (map.txt)
 ./build/badlands_mapview --test-map          # the synthetic 128 m forest fixture
 ```
+
+**The stage-2 loop is two commands, and they share one `Fetch`.** Export the
+windows offline, then open the same origin in 3D:
+```sh
+./build/badlands_patch_export --load <coarse-dir> --windows <list.txt> \
+    --patch-size 256 --patch-res 256 --out <out-dir> --dump-patch
+./build/badlands_mapview --load <coarse-dir> --patch-size 256 --patch-res 256 \
+    --patch-origin 5568,2176
+```
+- A window loaded as a coarse world and as a `--dump-patch` directory renders
+  **byte-identically** in mapview — measured, and the reason stage 2 and stage 3
+  need no separate fold.
+- `badlands_patch_export`'s height PNGs autoscale **per image** and record the
+  range in a sidecar; a shared range costs 7x the precision here. Flags and the
+  decode formulas are in `src/executables/patch_export/README.md`.
 - Exactly one of `--synthetic` / `--load` / `--test-map` is required. `--load`
   detects which kind of directory it was handed: `world.txt` means a coarse
   world, `map.txt` means a finished patch.
