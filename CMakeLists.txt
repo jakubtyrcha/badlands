@@ -289,6 +289,30 @@ target_include_directories(badlands_usd_lib PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/tinyusdz/src)
 target_link_libraries(badlands_usd_lib PRIVATE tinyusdz::tinyusdz_static)
 
+# badlands_rigpack_lib: the OFFLINE animation packer (tools/rigpack) -- turns the
+# 0 A.D. import intermediate into the runtime rig asset AnimationSet loads.
+#
+# Its own target, and deliberately a THIN link line: ozz's offline builders, glm
+# and nlohmann, with no SDL3, no Dawn and no badlands_engine. Same discipline as
+# badlands_usd_lib above. It is an asset tool, so nothing it needs belongs in the
+# runtime and nothing in the runtime belongs here.
+#
+# (tools/protogen is NOT wired into the build; that is specific to protogen being
+# a throwaway exploration, and does not generalise to tools/.)
+add_library(badlands_rigpack_lib STATIC
+    tools/rigpack/intermediate.cpp
+    tools/rigpack/recipe.cpp
+    tools/rigpack/pack.cpp
+)
+target_include_directories(badlands_rigpack_lib PUBLIC
+    ${CMAKE_SOURCE_DIR}/tools
+    ${CMAKE_SOURCE_DIR}/third_party/glm)
+target_link_libraries(badlands_rigpack_lib PUBLIC
+    ozz_animation_offline ozz_animation ozz_base nlohmann_json::nlohmann_json)
+
+add_executable(badlands_rigpack tools/rigpack/main.cpp)
+target_link_libraries(badlands_rigpack PRIVATE badlands_rigpack_lib)
+
 add_library(badlands_engine STATIC
     src/engine/rendering/gpu_context.cpp
     src/engine/rendering/vertex_layout.cpp
@@ -1098,12 +1122,16 @@ add_executable(badlands_animation_tests
     # SaveScreenshot calls Update(0.0f) and the sim never ticks.
     src/game/tests/skeleton_debug_overlay_tests.cpp
     src/game/visual/skeleton_debug_overlay.cpp
+    # The offline packer, round-tripped through the real AnimationSet::Load --
+    # which is why it lives in THIS suite rather than its own: the assertion
+    # that matters is that what rigpack writes is what the runtime reads.
+    tools/rigpack/tests/rigpack_tests.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_animation_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
 )
-target_link_libraries(badlands_animation_tests PRIVATE badlands_engine badlands_game_lib ozz_animation_offline)
+target_link_libraries(badlands_animation_tests PRIVATE badlands_engine badlands_game_lib ozz_animation_offline badlands_rigpack_lib)
 if(APPLE)
     target_link_options(badlands_animation_tests PRIVATE "-Wl,-ld_new")
 endif()
