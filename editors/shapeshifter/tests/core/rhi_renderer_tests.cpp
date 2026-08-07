@@ -90,3 +90,113 @@ TEST_CASE("shapeshifter: all seven pipelines build ON METAL", "[ss-rhi][metal]")
   CHECK(p->blend_lines);
   CHECK(p->blend_tris);
 }
+
+#include "engine/graph/render_graph.hpp"
+#include "engine/rhi/null/null_rhi.hpp"
+#include "rhi_renderer.h"
+#include "camera.h"
+#include "scene.h"
+
+namespace null = badlands::rhi::null;
+namespace graph = badlands::graph;
+
+TEST_CASE("shapeshifter: the frame is three passes, and only the first two "
+          "touch depth", "[ss-rhi]") {
+  // The whole shape of the port in one assertion. Metal renders correctly
+  // whether or not the depth declarations are right, so this is the only place
+  // "geometry writes depth, the ground plate tests it without writing, the
+  // chrome ignores it" is checkable at all.
+  auto device = CreateDevice({.backend = BackendKind::Null,
+                              .enable_validation = true, .label = "frame"});
+  REQUIRE(device);
+  auto compiler = MakeCompiler();
+  REQUIRE(compiler);
+  auto renderer = sq::RhiRenderer::Create(*device, *compiler, Format::RGBA16Float);
+  REQUIRE(renderer);
+
+  auto color_tex = device->CreateTexture(
+      {.width = 64, .height = 64, .format = Format::RGBA16Float,
+       .usage = TextureUsage::RenderTarget, .label = "color"});
+  auto depth_tex = device->CreateTexture(
+      {.width = 64, .height = 64, .format = Format::Depth32Float,
+       .usage = TextureUsage::DepthStencil, .label = "depth"});
+  REQUIRE(color_tex);
+  REQUIRE(depth_tex);
+
+  // `add` is the direct test entry point; spawn_snapped/spawn_unsnapped do id
+  // and name allocation this does not need.
+  sq::SceneDocument doc;
+  sq::Node node;
+  node.id = 1;
+  node.shape = sq::Shape::Cube;
+  doc.add(node);
+  sq::Camera camera;
+  camera.aspect = 1.0f;
+
+  device->BeginFrame();
+  renderer->BeginFrame(device->CurrentFrame());
+
+  graph::RenderGraph g(*device);
+  auto color = g.ImportTexture(color_tex.get(), ResourceState::Undefined, "c");
+  auto depth = g.ImportTexture(depth_tex.get(), ResourceState::Undefined, "d");
+  REQUIRE(renderer->BuildFrame(g, color, depth, doc, sq::kInvalidNode, camera,
+                               64, 64));
+  REQUIRE(g.Compile());
+
+  auto* log = null::GetCommandLog(*device);
+  REQUIRE(log);
+  log->Clear();
+  auto encoder = device->CreateCommandEncoder("frame");
+  g.Execute(*encoder);
+  encoder->Finish();
+  device->Submit(*encoder);
+  device->EndFrame();
+  device->WaitIdle();
+
+  REQUIRE(log->Count(null::RecordedCommand::Kind::BeginRenderPass) == 3);
+  const auto* geometry = log->Find(null::RecordedCommand::Kind::BeginRenderPass, 0);
+  const auto* ground   = log->Find(null::RecordedCommand::Kind::BeginRenderPass, 1);
+  const auto* chrome   = log->Find(null::RecordedCommand::Kind::BeginRenderPass, 2);
+  REQUIRE(geometry); REQUIRE(ground); REQUIRE(chrome);
+
+  // Geometry clears depth to the reversed-Z far value and writes it.
+  CHECK(geometry->has_depth);
+  CHECK(geometry->depth_load == LoadOp::Clear);
+  CHECK_FALSE(geometry->depth_read_only);
+  // The ground plate tests what geometry wrote, and PRESERVES it -- discarding
+  // here would leave the buffer undefined for anything reading it later.
+  CHECK(ground->has_depth);
+  CHECK(ground->depth_load == LoadOp::Load);
+  CHECK(ground->depth_read_only);
+  CHECK(ground->depth_store == StoreOp::Store);
+  // The chrome pass has NO depth attachment, which is what lets its pipelines
+  // declare no depth format and still satisfy Metal's format-match rule.
+  CHECK_FALSE(chrome->has_depth);
+
+  // The scene has one node, so the raymarch draws; the mesh is dormant, so it
+  // does not. A frame that recorded no draws would satisfy every check above.
+  CHECK(log->Count(null::RecordedCommand::Kind::Draw) >= 2);
+}
+
+TEST_CASE("shapeshifter: a skipped acquire presents nothing", "[ss-rhi]") {
+  // A minimized or occluded window makes Acquire return Skip every frame. That
+  // is a NORMAL frame, not a failure, and the renderer must not present -- which
+  // is the part PresentCount can prove and a log cannot.
+  auto device = CreateDevice({.backend = BackendKind::Null,
+                              .enable_validation = true, .label = "skip"});
+  REQUIRE(device);
+  auto sc = device->CreateSwapchain({.native_window = nullptr, // headless
+                                     .width = 64, .height = 64,
+                                     .format = Format::RGBA16Float,
+                                     .label = "sc"});
+  REQUIRE(sc);
+  null::SetSwapchainFault(*sc, null::SwapchainFault::Skip);
+
+  const uint64_t before = null::PresentCount(*sc);
+  device->BeginFrame();
+  const auto frame = sc->Acquire();
+  CHECK(frame.status == AcquireStatus::Skip);
+  CHECK(frame.view == nullptr);
+  device->EndFrame();
+  CHECK(null::PresentCount(*sc) == before);
+}
