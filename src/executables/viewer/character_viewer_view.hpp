@@ -55,6 +55,7 @@ class CharacterViewerView : public AppView {
 
   // Overrides the character asset manifest (default
   // assets/characters/quaternius/clips.json). Call before Initialize().
+  // Backs `--rig`.
   void SetManifestPath(std::string path) { manifest_path_ = std::move(path); }
 
  private:
@@ -85,6 +86,9 @@ class CharacterViewerView : public AppView {
 
   std::string initial_clip_name_;
   int clip_index_ = 0;
+  // Substring filter over the clip list. An imported 0 A.D. family declares 651
+  // clips, which is a haystack rather than a list without it.
+  char clip_filter_[64] = {};
   // Presentation time within the clip, in seconds. anim_* by the project's
   // clock rules: this is a view, so it advances on presentation time and never
   // on anything the sim would recognise.

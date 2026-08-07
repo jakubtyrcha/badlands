@@ -1,13 +1,16 @@
 #include "executables/viewer/character_viewer_view.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <limits>
+#include <string>
 #include <utility>
 
 #include <imgui.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <spdlog/spdlog.h>
 
+#include "engine/animation/attachment_lines.hpp"
 #include "engine/animation/skeleton_lines.hpp"
 #include "engine/app/sdl_input_util.hpp"  // NormalizedWheelY
 #include "engine/rendering/scene_build.hpp"
@@ -46,6 +49,21 @@ struct JointBounds {
     return r > 0.01f ? r : 1.0f;  // a degenerate rig still gets a camera
   }
 };
+
+// Case-insensitive substring match, with an empty filter matching everything.
+// 0 A.D.'s names are all lower_snake, but a user typing "Swordsman" should not
+// have to know that.
+bool MatchesFilter(const std::string& name, const char* filter) {
+  if (filter == nullptr || filter[0] == '\0') return true;
+  const auto lower = [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  };
+  std::string haystack = name;
+  std::string needle = filter;
+  std::transform(haystack.begin(), haystack.end(), haystack.begin(), lower);
+  std::transform(needle.begin(), needle.end(), needle.begin(), lower);
+  return haystack.find(needle) != std::string::npos;
+}
 
 JointBounds ComputeJointBounds(const Pose& pose) {
   const ozz::span<const ozz::math::Float4x4> models = pose.models();
@@ -167,6 +185,10 @@ void CharacterViewerView::UpdateSkeleton() {
                                       glm::vec3(0.0f, 1.0f, 0.0f));
   EmitSkeletonLines(animation_->skeleton(), *pose_, world,
                     skeleton_lines_, kBoneColor, kBoneThickness);
+  // Into the SAME buffer: a frame has one debug-line buffer, and an emitter that
+  // owned its own would silently erase the bones (src/engine/CLAUDE.md).
+  // Always on -- that is also what keeps a --screenshot run deterministic.
+  EmitAttachmentAxes(*animation_, *pose_, world, skeleton_lines_);
 }
 
 void CharacterViewerView::HandleEvent(const SDL_Event& event, int /*width*/,
@@ -214,22 +236,51 @@ void CharacterViewerView::Update(float dt, const bool* /*keyboard_state*/) {
 void CharacterViewerView::DrawUI() {
   if (!scene_renderer_ || !animation_) return;
 
-  ImGui::SetNextWindowSize(ImVec2(240.0f, 460.0f), ImGuiCond_FirstUseEver);
-  ImGui::SetNextWindowSizeConstraints(ImVec2(200.0f, 240.0f),
+  ImGui::SetNextWindowSize(ImVec2(340.0f, 620.0f), ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSizeConstraints(ImVec2(240.0f, 300.0f),
                                       ImVec2(4096.0f, 4096.0f));
   ImGui::Begin("Character");
 
-  ImGui::Text("%d joints", animation_->skeleton().num_joints());
-  ImGui::Separator();
+  if (!animation_->family().empty()) {
+    ImGui::Text("%s", animation_->family().c_str());
+  }
+  ImGui::Text("%d joints, %d attachments", animation_->skeleton().num_joints(),
+              animation_->attachment_count());
 
-  for (int i = 0; i < animation_->clip_count(); ++i) {
-    if (ImGui::Selectable(animation_->clip_name(i).c_str(), i == clip_index_)) {
-      clip_index_ = i;
-      anim_seconds_ = 0.0f;  // a new clip starts at its beginning
+  // The clip list is the rig's whole vocabulary, and for an imported 0 A.D.
+  // family that is 651 entries of `biped__infantry__swordsman__attack_...`.
+  // Scrolling past hundreds of near-identical names is not browsing, hence the
+  // filter -- the one control here, and the reason the list is usable at all.
+  ImGui::SeparatorText("Clips");
+  ImGui::SetNextItemWidth(-1.0f);
+  ImGui::InputTextWithHint("##clip_filter", "filter", clip_filter_,
+                           sizeof(clip_filter_));
+
+  int shown = 0;
+  if (ImGui::BeginChild("clips", ImVec2(0.0f, 180.0f), ImGuiChildFlags_Borders)) {
+    for (int i = 0; i < animation_->clip_count(); ++i) {
+      const std::string& name = animation_->clip_name(i);
+      if (!MatchesFilter(name, clip_filter_)) continue;
+      ++shown;
+      if (ImGui::Selectable(name.c_str(), i == clip_index_)) {
+        clip_index_ = i;
+        anim_seconds_ = 0.0f;  // a new clip starts at its beginning
+      }
     }
+  }
+  ImGui::EndChild();
+  // Say how many of how many, so an empty list reads as "no match" rather than
+  // as a rig that failed to load.
+  if (clip_filter_[0] != '\0') {
+    ImGui::Text("%d of %d", shown, animation_->clip_count());
+  } else {
+    ImGui::Text("%d", animation_->clip_count());
   }
 
   ImGui::Separator();
+  // The selected clip stays selected through a filter that hides it, so
+  // filtering never silently changes what is playing.
+  ImGui::TextWrapped("%s", animation_->clip_name(clip_index_).c_str());
   const AnimationClip& clip = animation_->clip(clip_index_);
   ImGui::Text("%.2fs", clip.duration_seconds());
   ImGui::Checkbox("Play", &playing_);
@@ -243,6 +294,28 @@ void CharacterViewerView::DrawUI() {
     anim_seconds_ = ratio * clip.duration_seconds();
     fixed_ratio_.reset();  // scrubbing releases a --anim-time pin
   }
+
+  // What the RIG DECLARES, read-only. The viewer reads whatever names the asset
+  // carries and shows them; it never interprets what a marker or an attachment
+  // means -- that stays a decision for the layer above.
+  if (const int markers = animation_->clip_marker_count(clip_index_); markers > 0) {
+    ImGui::SeparatorText("Markers");
+    for (int i = 0; i < markers; ++i) {
+      ImGui::Text("%s  %.2f", animation_->clip_marker_name(clip_index_, i).c_str(),
+                  animation_->clip_marker_value(clip_index_, i));
+    }
+  }
+
+  ImGui::SeparatorText("Attachments");
+  // Scrolls: a 0 A.D. biped declares ~74, which would otherwise push the clip
+  // list off the panel entirely.
+  if (ImGui::BeginChild("attachments", ImVec2(0.0f, 0.0f),
+                        ImGuiChildFlags_Borders)) {
+    for (int i = 0; i < animation_->attachment_count(); ++i) {
+      ImGui::TextUnformatted(animation_->attachment_name(i).c_str());
+    }
+  }
+  ImGui::EndChild();
 
   ImGui::End();
 
