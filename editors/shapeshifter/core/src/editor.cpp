@@ -142,6 +142,22 @@ Editor* Editor::create() {
 }
 
 void Editor::attachLayer(void* caMetalLayer) {
+    // TEARDOWN FIRST, in reverse dependency order. Assigning over impl_->device
+    // destroys the old device, and the renderer built from it -- pipelines,
+    // binding tables, the frame allocator's buffers, a swapchain -- outlives
+    // that assignment by five lines and is then destroyed against freed memory.
+    // The early return below makes it worse: a second CreateDevice that fails
+    // leaves a live renderer pointing at a device that no longer exists, and
+    // the next render() walks it.
+    //
+    // Reached whenever SwiftUI calls makeNSView a second time on the same
+    // Editor -- a re-created representable identity, the viewport moving
+    // between panes. The Editor is app-lifetime (SWIFT_IMMORTAL_REFERENCE), so
+    // it is the same instance every time.
+    impl_->renderer.reset();
+    impl_->compiler.reset();
+    impl_->device.reset();
+
     impl_->device = badlands::rhi::CreateDevice(
         {.backend = badlands::rhi::BackendKind::Metal,
          // Debug builds get the validation decorator; it is compiled out of

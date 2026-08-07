@@ -334,3 +334,36 @@ TEST_CASE("shapeshifter: a headless frame draws the scene", "[ss-rhi][dump]") {
   INFO("lit texels along the bottom edge: " << edge_lit);
   CHECK(edge_lit > 0);
 }
+
+#include <shapeshifter/ShapeshifterCore.h>
+
+TEST_CASE("shapeshifter: attaching a layer twice does not free a live renderer",
+          "[ss-rhi][metal]") {
+  // attachLayer used to assign straight over impl_->device, which destroys the
+  // OLD device while the renderer built from it -- pipelines, binding tables,
+  // the frame allocator's buffers, a swapchain -- was still alive five lines
+  // further down. SwiftUI reaches this by calling makeNSView a second time on
+  // the same app-lifetime Editor.
+  //
+  // A WEAK GATE, said plainly: without a sanitizer a use-after-free usually
+  // still "works", so a pass here is not proof. It is a live call site for the
+  // ordering, which is what makes the bug reproducible under
+  // -fsanitize=address rather than only reachable through the app.
+  auto probe = CreateDevice({.backend = BackendKind::Metal, .label = "probe"});
+  if (!probe) {
+    SUCCEED("no Metal device on this host");
+    return;
+  }
+  probe.reset();
+
+  sq::Editor* editor = sq::Editor::create();
+  REQUIRE(editor != nullptr);
+  // No layer: attachLayer builds the device, compiler and renderer either way,
+  // and a null layer keeps RenderFrame from asking for a drawable that a test
+  // has no window to present.
+  editor->attachLayer(nullptr);
+  editor->setViewportSize(800.0f, 600.0f, 2.0f);
+  editor->attachLayer(nullptr);
+  editor->render();
+  SUCCEED("the second attach rebuilt the device without freeing it underneath");
+}
