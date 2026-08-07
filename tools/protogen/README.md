@@ -23,7 +23,8 @@ river extraction pipeline, rivers.bin's binary graph dump) straight from
 ```sh
 c++ -O3 -std=c++23 \
   -I src -I third_party/FastNoiseLite -I third_party/glm -I build/_deps/taskflow-src \
-  tools/protogen/protogen.cpp src/core/parallel.cpp \
+  tools/protogen/protogen.cpp tools/protogen/protogen_swe.cpp tools/protogen/protogen_tests.cpp \
+  src/core/parallel.cpp \
   src/mapgen/hydrology.cpp src/mapgen/river_graph.cpp src/mapgen/river_prune.cpp \
   src/mapgen/coarse_io.cpp src/mapgen/river_io.cpp \
   -o /tmp/protogen
