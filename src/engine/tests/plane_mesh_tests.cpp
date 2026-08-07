@@ -208,10 +208,11 @@ TEST_CASE("spheres: normals point outward and the winding is CCW", "[plane]") {
     const glm::vec3 b = glm::vec3(grid.vertices[grid.indices[t + 1]].pos_nx);
     const glm::vec3 c = glm::vec3(grid.vertices[grid.indices[t + 2]].pos_nx);
     const glm::vec3 centroid = (a + b + c) / 3.0f;
-    // Degenerate triangles exist at the poles, where the ring collapses; skip
-    // those rather than assert a normal they do not have.
+    // NO SKIP. The UV sphere this replaced had degenerate polar triangles that
+    // had to be stepped over, and a `continue` there would now hide a genuine
+    // degeneracy by making its winding assertion pass vacuously. The octahedron
+    // has none -- which the area test above asserts rather than assumes.
     const glm::vec3 face = glm::cross(b - a, c - a);
-    if (glm::length(face) < 1e-6f) continue;
     INFO("triangle " << t / 3);
     CHECK(glm::dot(glm::normalize(face), glm::normalize(centroid)) > 0.0f);
   }
@@ -264,6 +265,49 @@ TEST_CASE("spheres: every vertex is on the sphere with a matching normal",
     // closed form rather than a smoothing check.
     CHECK(glm::dot(n, glm::normalize(p)) == Catch::Approx(1.0f).margin(1e-5));
   }
+}
+
+TEST_CASE("spheres: no triangle straddles a UV seam", "[plane]") {
+  // THE ASSERTION THE BOUNDS CHECK BELOW CANNOT MAKE, and the one that catches
+  // a real seam. A vertex whose fold branch came out wrong still lands inside
+  // [0,1]^2 and still leaves the min/max over all vertices at exactly 0 and 1 --
+  // so coverage passes while the texture is wrapped across the whole map on a
+  // strip two triangles wide.
+  //
+  // What a seam actually looks like is a UV edge far longer than the geometry
+  // edge that carries it. On a lattice of n subdivisions no correct triangle
+  // spans more than about 1/n of the map, so anything near half a map is a
+  // fold that disagreed with its neighbour.
+  const SceneMesh grid = BuildSphereGrid();
+
+  // The WORST edge, found first and asserted once -- rather than an assertion
+  // per edge, which aborts on the mildest violation and reports a number that
+  // says nothing about how bad the seam is.
+  float worst = 0.0f;
+  size_t worst_tri = 0;
+  for (size_t t = 0; t < grid.indices.size(); t += 3) {
+    glm::vec2 uv[3];
+    for (int k = 0; k < 3; ++k) {
+      const auto& v = grid.vertices[grid.indices[t + size_t(k)]];
+      uv[k] = glm::vec2(v.nyz_uv.z, v.nyz_uv.w);
+    }
+    for (int k = 0; k < 3; ++k) {
+      const float len = glm::length(uv[(k + 1) % 3] - uv[k]);
+      if (len > worst) {
+        worst = len;
+        worst_tri = t / 3;
+      }
+    }
+  }
+
+  // A correct lattice's longest UV edge is about 1/n of the map; the budget is
+  // a little over that. A vertex that took the wrong fold branch lands most of
+  // a map away from its neighbours, so the two are not close.
+  const float budget = 1.6f / float(kSphereSubdivisions);
+  INFO("worst uv edge " << worst << " on triangle " << worst_tri
+                        << ", budget " << budget);
+  CHECK(worst < budget);
+  CHECK(worst > 0.0f);  // and it is a real mesh, not an empty loop
 }
 
 TEST_CASE("spheres: octahedral UVs cover the unit square and fold at the "

@@ -40,21 +40,54 @@ SphereGridBounds SphereGridExtent(float sphere_radius, float spacing) {
   return b;
 }
 
-glm::vec2 OctEncode(glm::vec3 dir) {
-  const float l1 = std::abs(dir.x) + std::abs(dir.y) + std::abs(dir.z);
-  if (!(l1 > 0.0f)) return glm::vec2(0.5f);
-  const glm::vec3 n = dir / l1;
+namespace {
+
+// The fold itself, taking the seam branch as an ARGUMENT.
+//
+// `n` is already L1-normalized. For the lower hemisphere the map reflects into
+// the four corners of the square, and WHICH corner is not a function of the
+// direction alone: the four edges running from the -Y apex to the equator lie
+// exactly in n.x == 0 or n.z == 0, where the map is genuinely TWO-VALUED. The
+// correct answer there depends on which octahedron face the point belongs to.
+glm::vec2 OctFold(glm::vec3 n, float fold_x, float fold_z) {
   glm::vec2 p(n.x, n.z);
   if (n.y < 0.0f) {
-    // THE MIRROR FOLD. The lower hemisphere is reflected into the four corners
-    // of the square across the diagonals, which is what makes the map
-    // continuous over the whole sphere with no pole and no seam interior to a
-    // face -- every discontinuity lands exactly on an octahedron edge, where
-    // the tessellation already has vertices.
-    p = glm::vec2((1.0f - std::abs(n.z)) * (n.x >= 0.0f ? 1.0f : -1.0f),
-                  (1.0f - std::abs(n.x)) * (n.z >= 0.0f ? 1.0f : -1.0f));
+    p = glm::vec2((1.0f - std::abs(n.z)) * fold_x,
+                  (1.0f - std::abs(n.x)) * fold_z);
   }
   return p * 0.5f + 0.5f;
+}
+
+glm::vec3 L1Normalize(glm::vec3 dir, bool& ok) {
+  const float l1 = std::abs(dir.x) + std::abs(dir.y) + std::abs(dir.z);
+  ok = l1 > 0.0f;
+  return ok ? dir / l1 : glm::vec3(0.0f);
+}
+
+}  // namespace
+
+glm::vec2 OctEncode(glm::vec3 dir) {
+  bool ok = false;
+  const glm::vec3 n = L1Normalize(dir, ok);
+  if (!ok) return glm::vec2(0.5f);
+  // Seam branch recovered from the direction, which is all a shader has. AMBIGUOUS
+  // on the four lower seams by construction -- see OctFold. Mesh generation must
+  // NOT use this form; it knows the face and OctEncodeOnFace takes it.
+  return OctFold(n, n.x >= 0.0f ? 1.0f : -1.0f, n.z >= 0.0f ? 1.0f : -1.0f);
+}
+
+glm::vec2 OctEncodeOnFace(glm::vec3 on_face, float face_sx, float face_sz) {
+  bool ok = false;
+  const glm::vec3 n = L1Normalize(on_face, ok);
+  if (!ok) return glm::vec2(0.5f);
+  // THE FACE decides the branch, so a vertex sitting exactly on a seam gets the
+  // value its own face needs. Without this, every lower face whose sx is -1
+  // takes the +X face's answer on its n.x == 0 edge: a whole lattice row jumps
+  // ~0.77 in u against its neighbours, wrapping the texture across the entire
+  // map on a strip two triangles wide. That is exactly the seam artifact the
+  // octahedron is here to remove, and it is why the map is not a pure function
+  // of direction at generation time.
+  return OctFold(n, face_sx, face_sz);
 }
 
 namespace {
@@ -69,7 +102,7 @@ namespace {
 // UVs; duplicating along the seams costs ~8% more vertices and removes the
 // whole class of seam artifact.
 void AppendOctaFace(SceneMesh& mesh, glm::vec3 a, glm::vec3 b, glm::vec3 c,
-                    float radius) {
+                    float face_sx, float face_sz, float radius) {
   const uint32_t n = kSphereSubdivisions;
   const uint32_t base = uint32_t(mesh.vertices.size());
 
@@ -87,7 +120,7 @@ void AppendOctaFace(SceneMesh& mesh, glm::vec3 a, glm::vec3 b, glm::vec3 c,
       const float wa = 1.0f - wb - wc;
       const glm::vec3 on_face = a * wa + b * wb + c * wc;
       const glm::vec3 normal = glm::normalize(on_face);
-      const glm::vec2 uv = OctEncode(on_face);
+      const glm::vec2 uv = OctEncodeOnFace(on_face, face_sx, face_sz);
 
       MeshVertex v;
       const glm::vec3 p = normal * radius;
@@ -191,10 +224,11 @@ SceneMesh BuildSphereGrid(float sphere_radius, float spacing) {
         const glm::vec3 x(float(sx), 0.0f, 0.0f);
         const glm::vec3 y(0.0f, float(sy), 0.0f);
         const glm::vec3 z(0.0f, 0.0f, float(sz));
+        const float fx = float(sx), fz = float(sz);
         if (sx * sy * sz > 0) {
-          AppendOctaFace(mesh, x, y, z, sphere_radius);
+          AppendOctaFace(mesh, x, y, z, fx, fz, sphere_radius);
         } else {
-          AppendOctaFace(mesh, x, z, y, sphere_radius);
+          AppendOctaFace(mesh, x, z, y, fx, fz, sphere_radius);
         }
       }
     }

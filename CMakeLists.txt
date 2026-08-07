@@ -1810,12 +1810,13 @@ if(APPLE)
 
     # ONE PER DEBUG VIEW, each against a CPU evaluation of the same rule. The
     # pack is SYNTHETIC (constant textures), so no assertion depends on a
-    # shipped data file and the mip level cannot affect nine of the ten — which
-    # confines mip prediction to the gradient test below, where it belongs.
+    # shipped data file and the mip level cannot affect ten of the eleven —
+    # which confines mip prediction to the gradient test below, where it
+    # belongs.
     foreach(view lit triangle-id barycentric uv depth albedo normal
                  roughness metallic displacement ao)
         string(REPLACE "-" "_" view_name "${view}")
-        # --env none, and it matters for exactly one of the ten. The lit view's
+        # --env none, and it matters for exactly one of the eleven. The lit view's
         # oracle is a CPU port of ShadeStandard that passes ambientSpecular = 0,
         # so it asserts the DIRECT lighting exactly; matching an environment
         # would mean porting the split sum to the CPU, which is a second

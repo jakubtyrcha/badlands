@@ -46,8 +46,8 @@ float4 fs_background(VOut i) : SV_Target
 {
     // VIEW-DEPENDENT IN EXACTLY ONE DIRECTION. Under Lit this is the
     // environment; under every other view it is the flat constant it has always
-    // been, because the nine debug-view oracles assert on that background and
-    // sampling an environment there would silently change what nine existing
+    // been, because the other debug-view oracles assert on that background and
+    // sampling an environment there would silently change what ten existing
     // tests mean.
     if (uint(frame.params.x) == kViewLit && frame.ibl.z > 0.5) {
         // Mip 0: the SOURCE environment, not a roughness-convolved level. The

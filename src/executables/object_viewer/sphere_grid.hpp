@@ -55,7 +55,18 @@ struct SphereGridBounds {
 // Distinct from HemiOctEncode in src/game/visual/octahedral.hpp, which covers
 // only y >= 0 for impostor atlases. This is the full sphere, and object_viewer
 // does not link that layer anyway.
+// AMBIGUOUS ON THE FOUR LOWER SEAMS, deliberately: this is the form a shader
+// has, recovering the fold branch from the direction. Mesh generation must use
+// OctEncodeOnFace instead.
 glm::vec2 OctEncode(glm::vec3 dir);
+
+// The same map with the fold branch taken from the FACE rather than from the
+// point. The four edges running from the -Y apex to the equator lie exactly in
+// n.x == 0 or n.z == 0, where the map is two-valued -- and the tessellation
+// puts a whole lattice row on each of them, so this is not a measure-zero
+// concern. `face_sx`/`face_sz` are the signs of the octahedron face's X and Z
+// corners.
+glm::vec2 OctEncodeOnFace(glm::vec3 on_face, float face_sx, float face_sz);
 
 // Roughness sweeps 0..1 left to right; the first row is dielectric and the
 // second is metal. Both are OVERRIDDEN per instance, so the pack's ARM map does
