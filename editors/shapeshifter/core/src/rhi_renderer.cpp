@@ -498,8 +498,33 @@ void RhiRenderer::RenderFrame(const SceneDocument& doc, int32_t selected_id,
 
     auto encoder = device_->CreateCommandEncoder("frame");
     g.Execute(*encoder);
+
+    // The capture rides on THIS encoder rather than a second submit -- an
+    // already-committed command buffer rejects further work, and submitting the
+    // same encoder twice raises "Completed handler provided after commit call"
+    // and aborts. Recorded before Finish, read after the GPU is idle.
+    badlands::rhi::BufferPtr capture_buffer;
+    if (capture_) {
+        capture_buffer = device_->CreateBuffer(
+            {.size = uint64_t(width_px_) * height_px_ * 8,
+             .usage = BufferUsage::CopyDst | BufferUsage::MapRead,
+             .label = "frame_capture"});
+        if (capture_buffer) {
+            encoder->Transition(frame.view->GetTexture(), ResourceState::CopySrc);
+            encoder->Transition(capture_buffer.get(), ResourceState::CopyDst);
+            encoder->CopyTextureToBuffer(frame.view->GetTexture(), 0, 0,
+                                          capture_buffer.get(), 0);
+        }
+    }
+
     encoder->Finish();
     device_->Submit(*encoder);
+    if (capture_buffer) {
+        device_->WaitIdle();
+        capture_->assign(size_t(width_px_) * height_px_ * 8, 0);
+        if (!capture_buffer->Read(0, *capture_)) capture_->clear();
+        capture_ = nullptr; // one frame, as documented
+    }
     swapchain_->Present();
     device_->EndFrame();
 }

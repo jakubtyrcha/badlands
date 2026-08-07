@@ -2487,6 +2487,7 @@ add_library(shapeshifter_core STATIC
     ${SHAPESHIFTER_DIR}/core/src/rhi_renderer.cpp
     ${SHAPESHIFTER_DIR}/core/src/scene.cpp
     ${SHAPESHIFTER_DIR}/core/src/sdf.cpp
+    ${SHAPESHIFTER_DIR}/core/src/shader_paths.cpp
 )
 # core/include is PUBLIC because the Swift app consumes ShapeshifterCore.h and
 # its module.modulemap from there. core/src is PRIVATE and quote-only (-iquote):
@@ -2501,16 +2502,19 @@ target_include_directories(shapeshifter_core
 )
 target_compile_options(shapeshifter_core PRIVATE -iquote${SHAPESHIFTER_DIR}/core/src)
 
-# The Slang shaders are compiled from SOURCE at startup, so the editor needs to
-# find them on disk at run time. Everything else in this repo resolves such
-# paths relative to cwd and is run from the repo root -- but a launched .app
-# bundle has no such cwd, and the failure is silent and total: no compiler, no
-# pipelines, no renderer, a window that clears and draws nothing.
+# The Slang shaders are compiled from SOURCE at startup, so the editor has to
+# find them on disk at run time -- and a launched .app bundle has no useful cwd,
+# so the location cannot be relative. It is NOT the source tree any more: see
+# cmake/ShapeshifterShaders.cmake for why the repo stopped being a run-time
+# input, and shader_paths.cpp for the two tiers that replaced it.
+include(cmake/ShapeshifterShaders.cmake)
+add_dependencies(shapeshifter_core shapeshifter_shaders)
+target_include_directories(shapeshifter_core PRIVATE ${SHAPESHIFTER_SHADER_GEN_DIR})
 target_compile_definitions(shapeshifter_core PRIVATE
-    SHAPESHIFTER_SHADER_DIR="${SHAPESHIFTER_DIR}/shaders"
-    # The engine's shared Slang modules, baked absolute for the same reason.
-    # output_transform lives there, and the editor presents through it.
-    BADLANDS_ENGINE_SLANG_DIR="${CMAKE_SOURCE_DIR}/shaders/slang/common")
+    # The fallback tier: the staged tree, which CMake keeps fresh. Absolute,
+    # because the consumers are a bundle with no cwd and ctest binaries run
+    # from the repo root.
+    SHAPESHIFTER_STAGED_SHADER_DIR="${SHAPESHIFTER_STAGED_SHADERS}")
 
 # DCSDD reconstruction is expensive numerical code (dense per-cell least-squares
 # solves x hundreds of cells x outer iterations). Unoptimized it runs ~43x slower
@@ -2559,6 +2563,7 @@ add_executable(shapeshifter_core_tests
     ${SHAPESHIFTER_DIR}/tests/core/renderer_tests.cpp
     ${SHAPESHIFTER_DIR}/tests/core/scene_tests.cpp
     ${SHAPESHIFTER_DIR}/tests/core/sdf_scene_tests.cpp
+    ${SHAPESHIFTER_DIR}/tests/core/shader_paths_tests.cpp
     ${SHAPESHIFTER_DIR}/tests/core/sdf_tests.cpp
     ${SHAPESHIFTER_DIR}/tests/core/test_main.cpp
 )
@@ -2585,8 +2590,12 @@ add_test(NAME shapeshifter_core_tests COMMAND shapeshifter_core_tests
 # editor's pure-CPU core, this covers what it does to a device.
 add_executable(shapeshifter_rhi_tests
     ${SHAPESHIFTER_DIR}/tests/core/rhi_renderer_tests.cpp
+    ${SHAPESHIFTER_DIR}/tests/core/presented_frame_tests.mm
     third_party/catch2/extras/catch_amalgamated.cpp
 )
+# ARC for the one Objective-C++ case, matching the backend it drives.
+set_source_files_properties(${SHAPESHIFTER_DIR}/tests/core/presented_frame_tests.mm
+    PROPERTIES COMPILE_FLAGS "-fobjc-arc")
 target_include_directories(shapeshifter_rhi_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
     ${CMAKE_SOURCE_DIR}/src
@@ -2599,8 +2608,28 @@ target_link_libraries(shapeshifter_rhi_tests PRIVATE shapeshifter_core assets)
 if(APPLE)
     target_link_options(shapeshifter_rhi_tests PRIVATE "-Wl,-ld_new")
 endif()
-add_test(NAME shapeshifter_rhi_tests COMMAND shapeshifter_rhi_tests
+# ~[display] excludes the presented-frame case below, which needs a real
+# drawable and therefore a WindowServer.
+add_test(NAME shapeshifter_rhi_tests COMMAND shapeshifter_rhi_tests ~[display]
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# T1: the frame that reaches a REAL CAMetalLayer drawable, read back and
+# asserted on. The gate that was missing when this editor shipped a black window
+# twice with every suite green -- a texture the test allocates cannot see a
+# swapchain that refuses every drawable, nor pipelines that failed to build.
+#
+# Behind the `display` label like rhi_lab_windowed_resize and
+# object_viewer_windowed: nextDrawable is vended by the WindowServer, so over
+# SSH or with the screen locked this would fail for reasons that say nothing
+# about the code, and a suite that flakes gets ignored. Run it with:
+#   ctest -L display
+# The always-on cover for the same renderer is the headless dump next door,
+# which allocates its own texture and touches no layer.
+add_test(NAME shapeshifter_presented_frame
+         COMMAND shapeshifter_rhi_tests [display]
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+set_tests_properties(shapeshifter_presented_frame PROPERTIES
+                     LABELS display TIMEOUT 120)
 
 # The editor's Slang entry points, compiled as a test rather than by a target.
 #
@@ -2612,18 +2641,48 @@ add_test(NAME shapeshifter_rhi_tests COMMAND shapeshifter_rhi_tests
 #
 # One test per entry point, not one per file: a shader whose vertex stage
 # compiles and whose fragment stage does not should say which.
+# T3: the shader hash itself, driven through `cmake -P` because the code under
+# test is a CMake script. It stages throwaway copies with the REAL staging
+# script, so it cannot pass against a re-implementation.
+add_test(NAME shapeshifter_shader_hash
+         COMMAND ${CMAKE_COMMAND}
+                 -DEDITOR_SHADERS=${SHAPESHIFTER_SHADER_SRC}
+                 -DCOMMON_SLANG=${BADLANDS_COMMON_SLANG_SRC}
+                 -DSTAGE_SCRIPT=${CMAKE_SOURCE_DIR}/cmake/StageShapeshifterShaders.cmake
+                 -DWORK=${CMAKE_BINARY_DIR}/t3_shader_hash
+                 -P ${CMAKE_SOURCE_DIR}/cmake/TestShaderHash.cmake
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# T5: a built .app must carry shaders matching this checkout. Skips when no
+# bundle exists, since xcodebuild is not part of scripts/build.sh.
+add_test(NAME shapeshifter_bundle_freshness
+         COMMAND ${CMAKE_COMMAND}
+                 -DSTAGED_MANIFEST=${SHAPESHIFTER_STAGED_SHADERS}/MANIFEST
+                 -DDERIVED_DATA=$ENV{HOME}/Library/Developer/Xcode/DerivedData
+                 # Which .app is OURS. Another clone of this repo has its own
+                 # DerivedData directory matching the same glob.
+                 -DEXPECTED_PROJECT=${SHAPESHIFTER_DIR}/Shapeshifter.xcodeproj
+                 -P ${CMAKE_SOURCE_DIR}/cmake/TestBundleFreshness.cmake
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+set_tests_properties(shapeshifter_bundle_freshness PROPERTIES SKIP_RETURN_CODE 77)
+
+#
+# COMPILED FROM THE STAGED TREE, with the include paths derived from the same
+# SHAPESHIFTER_STAGED_INCLUDES the core bakes in. That is the point: these used
+# to carry a hand-written -I list, a third copy alongside editor.cpp's and the
+# test helper's, and the three drifted -- adding `import output_transform;`
+# updated two of them and this one failed. A list nobody maintains cannot drift.
+set(SHAPESHIFTER_SLANGC_INCLUDES "")
+foreach(inc ${SHAPESHIFTER_STAGED_INCLUDES})
+    list(APPEND SHAPESHIFTER_SLANGC_INCLUDES -I ${inc})
+endforeach()
 foreach(shader debug_lines mesh raymarch ground_grid)
     foreach(entry vs_main fs_main)
         add_test(NAME shapeshifter_slang_${shader}_${entry}
                  COMMAND ${BADLANDS_SLANG_ROOT}/bin/slangc
-                         ${SHAPESHIFTER_DIR}/shaders/slang/shapeshifter/${shader}.slang
+                         ${SHAPESHIFTER_STAGED_SHADERS}/slang/shapeshifter/${shader}.slang
                          -target metal -entry ${entry}
-                         -I ${SHAPESHIFTER_DIR}/shaders
-                         # output_transform, which every fragment presents
-                         # through. Must match the editor's runtime search
-                         # paths (editor.cpp), or this compiles what the app
-                         # cannot.
-                         -I ${CMAKE_SOURCE_DIR}/shaders/slang/common
+                         ${SHAPESHIFTER_SLANGC_INCLUDES}
                          -o ${CMAKE_CURRENT_BINARY_DIR}/shapeshifter_${shader}_${entry}.metal
                  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     endforeach()

@@ -44,6 +44,36 @@ targets:
         script: |
           "$SRCROOT/../../scripts/build.sh" shapeshifter_core
         basedOnDependencyAnalysis: false
+    # The shaders ride INSIDE the bundle, so the app never reads the source
+    # tree. CMake owns freshness (it staged the tree and hashed it during the
+    # prebuild above); this phase only places it.
+    #
+    # basedOnDependencyAnalysis: false, and deliberately no inputFiles/
+    # outputFiles. Declaring them re-enables Xcode's dependency analysis and
+    # hands it back the ability to skip this phase -- which is the exact failure
+    # being designed out, since a shader-only edit changes nothing Xcode
+    # compiles. An unconditional rsync of ~50 KB is cheaper than reasoning about
+    # when Xcode is allowed to skip it.
+    #
+    # --delete so a shader removed from the repo leaves the bundle too;
+    # otherwise the stale copy stays and the manifest silently disagrees.
+    postCompileScripts:
+      - name: Copy staged shaders into Resources
+        script: |
+          set -euo pipefail
+          # `build/` is hardcoded, and matches scripts/build.sh, which the
+          # prebuild phase above invokes and which hardcodes the same directory.
+          # They cannot disagree in practice; configuring CMake elsewhere makes
+          # this phase fail loudly below rather than bundle a stale tree.
+          STAGED="$SRCROOT/../../build/shaders_staged"
+          DEST="$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Resources/shaders"
+          if [ ! -f "$STAGED/MANIFEST" ]; then
+            echo "error: $STAGED/MANIFEST missing; the CMake prebuild did not stage the shaders" >&2
+            exit 1
+          fi
+          mkdir -p "$DEST"
+          rsync -a --delete "$STAGED/" "$DEST/"
+        basedOnDependencyAnalysis: false
     info:
       path: app/Info.plist
       properties:

@@ -13,21 +13,20 @@
 #include "engine/slang/slang_compiler.hpp"
 
 #include "rhi_pipelines.h"
+#include "shader_paths.h"
 
 using namespace badlands::rhi;
 
 namespace {
 
-// Both paths: the entry points live in shaders/slang/shapeshifter, and the
-// headers they include (shared_types.h, sdf_scene.h, ground_grid.h) live one
-// level up in shaders/. Relative to the repo root, which is where ctest runs.
+// THE SAME RESOLUTION THE APP USES, not a hand-written list beside it. This
+// used to spell the search paths out again, which made it one of three copies
+// -- and when `import output_transform;` arrived, two were updated and the
+// third broke the build. Now a test that compiles is evidence the app can too.
 std::unique_ptr<badlands::slang::SlangCompiler> MakeCompiler() {
-  const std::string paths[] = {
-      "editors/shapeshifter/shaders/slang/shapeshifter",
-      "editors/shapeshifter/shaders",
-      // output_transform, which every fragment here presents through.
-      "shaders/slang/common"};
-  return badlands::slang::CreateSlangCompiler(paths);
+  const auto loc = sq::ResolveShaderLocation();
+  if (!loc) return nullptr; // logged which tiers it tried and why each failed
+  return badlands::slang::CreateSlangCompiler(loc->search_paths);
 }
 
 }  // namespace

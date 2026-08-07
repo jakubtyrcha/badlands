@@ -43,6 +43,36 @@ is Catch2 and covers what the editor does to a device, because it links the RHI
 and the graph whose own suites are Catch2. The doctest half is a leftover from
 the standalone repo, but the split is now load-bearing rather than accidental.
 
+## Shaders are STAGED, hashed, and bundled — never read from the source tree
+
+The editor compiles Slang at startup, so where it reads from is a correctness
+question, not a packaging one. A binary that reads shaders newer than itself
+fails every pipeline and shows a black window, with the reason on a stderr that
+a Finder launch throws away. That happened. So:
+
+- **CMake stages one canonical tree** (`cmake/ShapeshifterShaders.cmake`) into
+  `build/shaders_staged/`: the editor's shaders, the engine's `slang/common`
+  modules, and a `MANIFEST` holding the tree's content hash. The same hash is
+  baked into the binary as a generated header.
+- **Two tiers, in order, never merged** (`core/src/shader_paths.h`): the app
+  bundle's `Contents/Resources/shaders` if its `MANIFEST` exists, else the
+  staged tree. A tier whose manifest disagrees with the binary is REFUSED, with
+  the path and both hashes, on stderr *and* `os_log`.
+- **Tier 1 is chosen by MANIFEST presence, not by "am I bundled".**
+  `CFBundleCopyResourcesDirectoryURL` returns the executable's own directory for
+  a non-bundled binary, so a bare binary beside a `shaders/MANIFEST` would
+  select it — which is why staging goes to `shaders_staged` and never `shaders`.
+- **A shader-only edit rebuilds and re-bundles.** The baked hash lives in a
+  generated header, so editing a `.slang` relinks the core; the Xcode copy phase
+  runs unconditionally. There is no hot reload — rebuild.
+- **Never add a fourth search-path list.** `editor.cpp`, the test compiler helper
+  and the `slangc` tests all derive from `SHAPESHIFTER_STAGED_INCLUDES`; three
+  hand-maintained copies had already drifted once.
+- **`shapeshifter_presented_frame` is the gate that matters.** It renders through
+  a real `CAMetalLayer` drawable and reads the pixels back, because every suite
+  was green both times the window was black. It is behind `ctest -L display`;
+  the always-on cover is the headless dump, which touches no layer.
+
 ## The frame is three passes
 
 `geometry` (colour clear + depth clear/write: raymarch, mesh) → `ground`

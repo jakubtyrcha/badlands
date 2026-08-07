@@ -600,6 +600,8 @@ class MetalSwapchain final : public ISwapchain {
       // size, so there is no path back: the surface stays black for the life of
       // the process. Setting it here makes the descriptor authoritative at
       // creation, which is what Resize() already does for every size after it.
+      // Regression-gated by "the descriptor decides the surface size, not the
+      // layer" in presented_frame_tests.mm, which wedges without this line.
       layer_.drawableSize = CGSizeMake(desc_.width, desc_.height);
       // BEFORE the pixel format is set, because a failed tag can change it --
       // which is only permitted here, at creation, before anyone has seen it.
