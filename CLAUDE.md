@@ -54,6 +54,16 @@ Don't assume. Don't hide confusion. Surface tradeoffs. Before implementing:
 - If a simpler approach exists, say so. Push back when warranted.
 - If something is unclear, stop. Name what's confusing. Ask.
 
+### Once a plan is approved, RUN IT
+The gates above are for *before* approval. After it, the default is to keep going
+to the end of the plan.
+
+- **Every plan marks its CORE DELIVERABLES and CORE ASSUMPTIONS explicitly**, in their own section. Everything not on those lists is a detail.
+- **Only a core item stops execution.** If a discovery invalidates a core deliverable or a core assumption, stop and ask me to recalibrate.
+- **Details may be overridden without asking**, provided the change is driven by a discovery that invalidated the original and is reported transparently at the end. Choosing a different enum default, a different helper's home, an extra shared bounds check — decide it, do it, tell me afterwards.
+- **Do NOT end a turn to report progress.** Interesting findings, tests going green, a defect caught mid-task: these are turn *content*, not turn boundaries. Report them in one pass when the work is done.
+- **Report deviations as a list at the end**, each with what was found and why it forced the change. Silent deviation is the thing being prevented — not deviation itself.
+
 ## Layer map — the boundary is deliberate
 - **`src/engine/`** — engine ported from the sibling project `sampo` (`/Users/jakub/repos/sampo`): rendering, GPU/pipeline/reflection/frame infra, material system, scene graph, `Camera`, SDL app shell. **No game logic or game types.**
 - **`src/game/`** — C++ game *render/scene* layer: geometry generation, map data, scene composition, UI logic, picking. It is not the simulation.
