@@ -217,21 +217,25 @@ ripple into the other.
   exactly 0, bedrock cut exactly 0.25 m), and a tripwire forbids
   soil-production/weathering interleaved with M>1 (additivity breaks under
   weathering).
-- **The MORFAC clamp masks the channelization factor above roughly M=50 —
-  and, given enough cycles, it can mask it well below that too.** The clamp
-  (`kMaxBedDeltaFraction = 0.1`, bounding one cycle's accelerated bed delta to
-  10% of local depth) is what makes MORFAC legitimate at all, but it also
-  caps the PER-CYCLE delta regardless of how large `M` made the underlying
-  demand — Task 6 measured identical channel cross-sections at M=300 for
-  that reason. This project's own 8 km validation probes extend the finding:
-  at a PRODUCTION cycle count (3000), M=10 and M=50 produced statistically
-  indistinguishable aggregate bed change (max |Δheight| 61.586 m vs
-  61.841 m, mean |Δheight| 5.860 m vs 5.886 m) — both regimes were already
-  clamp-saturated well under the M=300 figure. In this regime `M` mostly
-  controls how many cycles it takes to REACH the clamp-limited landform, not
-  the landform's final amplitude — which is why the 16 km production run
-  below uses M=10, not M=50: it clears every measured gate at least as well
-  and stays further from a bound that clearly binds early.
+- **The MORFAC clamp masks the channelization factor's cross-section
+  signature above roughly M=50** (Task 6: identical channel cross-sections
+  measured at M=300) — but aggregate bed change is NOT M-invariant, and an
+  earlier version of this finding claimed otherwise from the wrong baseline.
+  Comparing each 8 km run's FINAL bed against the shared `0000-initial`
+  height (what both a naive read and this document's first draft did)
+  measures mostly phase 0: phase 0 alone (`3000-step-height.f32`, bit-identical
+  between the M=10 and M=50 runs since MORFAC has no phase-0 effect)
+  already accounts for max |Δheight| 61.557 m / mean 5.856 m — 99.9% of the
+  ~61.6-61.8 m / ~5.86-5.89 m figures a naive full-run comparison reports,
+  which is why those looked "indistinguishable." Isolating phase 1's OWN
+  contribution (`3000-step-height.f32` → `3000-cycle-height.f32`) tells the
+  opposite story: M=10 moved max 18.99 m / mean 0.00486 m; M=50 moved max
+  26.57 m / mean 0.0346 m — a **7.1× divergence in mean bed disturbance**.
+  MORFAC is not clamp-saturated into invariance at production cycle counts;
+  M=50 genuinely disturbs the bed more. That strengthens, not weakens, the
+  M=10 choice below: it reaches equal-or-better depression/drainage
+  diagnostics (see "Full-map runs") for roughly a SEVENTH of the mean bed
+  disturbance M=50 costs.
 - **Warm start seeds channel depth at the cell's FULL width (`cell_m`), not
   the particle walk's sub-grid regime width.** The brief's literal formula
   (`w = channel_width_coeff·√Q`, `Descend`'s own closure) models a channel
@@ -311,8 +315,9 @@ of the way when it shouldn't), instant.
 
 Both at the chosen production config: **`--morfac 10`, `--cycles 3000`,
 default `--swe-substeps 50`** — picked over `--morfac 50` on the 8 km probes
-above (indistinguishable final landform, worse off-map-drainage number; see
-"Findings"). All three runs below hit zero tripwires; the sediment-mass audit
+above (worse off-map-drainage number AND 7.1× the mean phase-1 bed
+disturbance for only marginally fewer depressions; see "Findings"). All
+three runs below hit zero tripwires; the sediment-mass audit
 (checked every 10 cycles) never fired.
 
 | | 8 km, phase 0 only (`--cycles 0`) | 8 km, phase 1 (M=10, 3000 cycles) | 16 km, phase 1 (M=10, 3000 cycles) |
@@ -320,7 +325,7 @@ above (indistinguishable final landform, worse off-map-drainage number; see
 | resolution | 512² | 512² | 1024² |
 | steps × drops | 3000 × 1024 | 3000 × 1024 | 3000 × 4096 |
 | relief | 329.2 m | 329.2 m | 329.0 m |
-| wet % (final) | 0.00% | 1.51% | 2.05% |
+| wet % (final, `water.f32 > 0`) | 0.00% | 1.66% | 2.12% |
 | max lake depth | — | 5.2 m | 6.6 m |
 | depressions (8-nbr local minima) | 4098 | 3905 (−4.7%) | 18958 (−0.6%, from an unchanged 19072 baseline) |
 | off-map drainage (D8 reaches border) | 2.73% | 2.94% (+0.21 pt) | 1.57% (+0.06 pt, from 1.51%) |
@@ -349,17 +354,23 @@ this task's exploration budget and is a natural next probe.
 
 ### 8 km MORFAC knob probes (3000 cycles each, `--swe-substeps 50`)
 
-| M | depressions | off-map drainage | max \|Δheight\| | mean \|Δheight\| | advect fixer worst |
+| M | depressions | off-map drainage | phase-1-only max \|Δheight\| | phase-1-only mean \|Δheight\| | advect fixer worst |
 |---|---|---|---|---|---|
 | — (baseline) | 4098 | 2.73% | — | — | — |
-| 10 | 3905 | **2.94%** | 61.586 m | 5.860 m | 0.380 |
-| 50 | **3856** | 2.64% (worse than baseline) | 61.841 m | 5.886 m | 0.362 |
+| 10 | 3905 | **2.94%** | 18.99 m | **0.00486 m** | 0.380 |
+| 50 | **3856** | 2.64% (worse than baseline) | 26.57 m | 0.0346 m (7.1×) | 0.362 |
 
-M=50 removes marginally more depressions but REGRESSES off-map drainage
-below the baseline, while M=10 improves both. A short-duration check (M=10,
-300 cycles instead of 3000) moved depressions from 4098 to only 4094 and
-drainage not at all — cycle count, not just M, has to be large enough for
-the effect to show, which is why 3000 (matching phase 0's own step budget)
+The Δheight columns isolate phase 1's own contribution
+(`3000-step-height.f32` → `3000-cycle-height.f32`, NOT the shared
+`0000-initial` baseline — phase 0 alone already accounts for max 61.557 m /
+mean 5.856 m and is bit-identical between the two runs, so comparing against
+it would mostly measure phase 0). M=50 removes marginally more depressions
+but REGRESSES off-map drainage below the baseline AND costs 7.1× the mean
+bed disturbance, while M=10 improves both diagnostics for a fraction of the
+disturbance. A short-duration check (M=10, 300 cycles instead of 3000) moved
+depressions from 4098 to only 4094 and drainage not at all — cycle count,
+not just M, has to be large enough for the effect to show, which is why 3000
+(matching phase 0's own step budget)
 is the chosen default over a shorter probe.
 
 ## Phase 2a — window selection (`select.cpp`)
