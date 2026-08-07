@@ -121,6 +121,11 @@ class ResolvePass {
   void SetEnvironment(rhi::ITextureView* prefiltered, uint32_t mip_count,
                       rhi::ITextureView* brdf_lut, float intensity);
 
+  // Intensity alone, which is a multiply in the shader and names no resource --
+  // so unlike SetEnvironment this must NOT drop the binding table. Rebuilding a
+  // table every frame is the record-path allocation rule 11 bans.
+  void SetEnvironmentIntensity(float intensity) { frame_.ibl.y = intensity; }
+
   // The camera basis the background ray uses. Separate from SetCamera because
   // the viewer's Camera carries the projection parameters and this pass does
   // not -- deriving it here would need a second copy of the fov and aspect.

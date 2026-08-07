@@ -38,8 +38,10 @@
 #include "executables/object_viewer/material_pack.hpp"
 #include "executables/object_viewer/plane_mesh.hpp"
 #include "executables/object_viewer/sphere_grid.hpp"
+#include "core/color/output_transform.hpp"
 #include "engine/ibl/environment.hpp"
 #include "engine/ibl/prefiltered_cube.hpp"
+#include "engine/app/orbit_camera_controller.hpp"
 #include "executables/object_viewer/resolve_pass.hpp"
 #include "executables/object_viewer/shading_cpu.hpp"
 #include "executables/object_viewer/visbuffer_pass.hpp"
@@ -85,11 +87,13 @@ struct Options {
   // fails unless the loop stopped anyway. The only way to test that Escape
   // survives an ImGui panel holding keyboard focus, which is what broke it.
   bool self_test_escape = false;
+  bool self_test_ibl = false;
   Scene scene = Scene::Clear;
   // Empty means the procedural sky. A PATH is a Radiance .hdr, and a file that
   // cannot be decoded is a refusal rather than a silent fall back to the sky.
   std::string env_path;
   bool env_none = false;
+  bool env_furnace = false;
   float env_intensity = 1.0f;
   uint32_t width = 1280;
   uint32_t height = 720;
@@ -218,6 +222,9 @@ bool ParseArgs(int argc, char** argv, Options& opt) {
       opt.headless = true;
     } else if (a == "--self-test-escape") {
       opt.self_test_escape = true;
+    } else if (a == "--self-test-ibl") {
+      opt.self_test_ibl = true;
+      opt.headless = true;
     } else if (a == "--self-test-output") {
       opt.self_test_output = true;
       opt.headless = true;
@@ -274,6 +281,11 @@ bool ParseArgs(int argc, char** argv, Options& opt) {
       // the run says it does not have.
       opt.env_path = v;
       opt.env_none = std::strcmp(v, "none") == 0;
+      // "furnace" is the white-furnace environment: radiance 1 in every
+      // direction. A MODE rather than a shipped .hdr, because the assertion it
+      // serves is a closed form and a data file would make it depend on a
+      // texture someone could re-export.
+      opt.env_furnace = std::strcmp(v, "furnace") == 0;
     } else if (a == "--near-plane-camera") {
       opt.near_plane_camera = true;
     } else if (a == "--self-test-frame-ring") {
@@ -581,10 +593,16 @@ bool RebuildIbl(IRhiDevice& device, slang::SlangCompiler& compiler,
 struct Environment {
   std::unique_ptr<ibl::EquirectImage> image;  // null for the procedural sky
   ibl::SkySettings sky;
+  bool furnace = false;
   ibl::RadianceFn Radiance() const {
+    // Radiance 1 EVERYWHERE. The one environment whose answer is a closed form:
+    // a surface under it can reflect at most what it receives, so anything
+    // above 1 is energy the split sum invented.
+    if (furnace) return [](glm::vec3) { return glm::vec3(1.0f); };
     return image ? ibl::EquirectRadiance(*image) : ibl::ProceduralSky(sky);
   }
   const char* SourceName(const std::string& path) const {
+    if (furnace) return "furnace";
     return image ? path.c_str() : "procedural";
   }
 };
@@ -875,8 +893,17 @@ bool RenderOnce(IRhiDevice& device, const Options& opt, rhi::ColorSpace mode,
     // ten views.
     pack = opt.pack == "test"
                ? MakeConstantPack(device, badlands::object_viewer::TestPackValues{})
-               : (opt.pack == "checker" ? MakeCheckerPack(device)
-                                        : LoadMaterialPack(device, opt.pack));
+               : (opt.pack == "checker"
+                      ? MakeCheckerPack(device)
+                      // "white" is albedo 1 and AO 1, which is what the furnace
+                      // argument assumes -- any darker albedo would satisfy the
+                      // ceiling for the wrong reason.
+                      : (opt.pack == "white"
+                             ? MakeConstantPack(
+                                   device,
+                                   badlands::object_viewer::TestPackValues{
+                                       .albedo = {255, 255, 255}, .ao = 255})
+                             : LoadMaterialPack(device, opt.pack)));
     if (!pack) return false;
     const SceneMesh mesh = MeshFor(opt.scene);
     vis = VisbufferPass::Create(device, compiler, mesh, opt.width, opt.height);
@@ -897,7 +924,8 @@ bool RenderOnce(IRhiDevice& device, const Options& opt, rhi::ColorSpace mode,
     // the same path the window runs -- which is the whole reason the headless
     // assertions mean anything.
     if (!opt.env_none) {
-      if (!opt.env_path.empty()) {
+      env.furnace = opt.env_furnace;
+      if (!opt.env_path.empty() && !opt.env_furnace) {
         env.image = ibl::EquirectImage::Load(opt.env_path);
         if (!env.image) return false;  // a bad --env is a refusal, not a sky
       }
@@ -2205,12 +2233,173 @@ int RunSphereGridCheck(IRhiDevice& device, const Options& opt) {
   return 0;
 }
 
+
+// THE WHITE FURNACE, and it is the decisive IBL assertion.
+//
+// A constant environment of radiance 1, the sun off, albedo 1 and AO 1. Under
+// those inputs a surface cannot emit more than it receives, whatever its
+// roughness or metalness -- so the check is ONE-SIDED and that asymmetry is the
+// whole point:
+//
+//   * NEVER above 1 + eps, anywhere. A wrong split-sum normalization, a wrong
+//     SH scale and a wrong F0 lerp all break this, and none of them looks wrong
+//     on its own.
+//   * ~1 only at LOW roughness. A correct SINGLE-SCATTER split sum genuinely
+//     loses energy at metallic 1 and high roughness -- the multi-scatter
+//     deficit, 10-20% in the literature. Asserting ~1 there would fail against
+//     CORRECT code, so the rough end gets a documented floor instead. The floor
+//     is a claim about the approximation, not a fudge to make a test pass.
+int RunIblSelfTest(IRhiDevice& device, const Options& opt) {
+  namespace ov = badlands::object_viewer;
+  auto compiler = MakeCompiler();
+  if (!compiler) return 1;
+
+  Options local = opt;
+  local.scene = Scene::Spheres;
+  local.view = DebugView::Lit;
+  local.env_path = "furnace";
+  local.env_furnace = true;
+  local.env_none = false;
+  local.env_intensity = 1.0f;
+  // SUN OFF. With it on, the direct term adds energy the furnace argument does
+  // not cover and the ceiling stops meaning anything.
+  local.sun_intensity = 0.0f;
+  // A WHITE pack: albedo 1 and AO 1, so the only thing shaping the result is
+  // the IBL. roughness and metallic come from the per-instance overrides.
+  local.pack = "white";
+
+  Frame frame;
+  if (!RenderOnce(device, local, local.present, *compiler, frame)) return 1;
+
+  const float aspect = float(local.width) / float(std::max(1u, local.height));
+  const Camera cam = SphereCamera(aspect);
+  const glm::mat4 vp = cam.Proj(aspect) * cam.View();
+
+  // THE FRAME IS DISPLAY-REFERRED, and the claim is about SCENE radiance.
+  //
+  // Under Lit the output pass tone-curves and encodes, so a furnace of 1.0
+  // arrives as Reinhard(1)=0.5 encoded to ~0.737. Comparing the raw byte
+  // against 1.0 accuses the IBL of losing 26% of its energy, which is the
+  // transform doing its job. So the BOUNDS are predicted forward through the
+  // same transform the shader applies -- the pattern the other oracles use,
+  // via the shared helpers so a second Reinhard cannot creep in here.
+  const auto mode = ToCpuMode(local.present);
+  const bool tonemaps = badlands::color::AppliesTonemap(true, mode);
+  auto to_sink = [&](float scene_linear) {
+    badlands::color::Rgb c{scene_linear, scene_linear, scene_linear};
+    if (tonemaps) c = badlands::color::Tonemap(c);
+    return badlands::color::EncodeOutput(c, mode).r;
+  };
+
+  // THREE CLAIMS, and only the last one carries a tuned number.
+  //
+  //   1. NEVER above what it receives. Closed form, holds everywhere.
+  //   2. A MIRROR returns everything. At roughness 0 the convolution is the
+  //      identity and the BRDF integral is ~1, so a furnace must come back
+  //      whole -- this is the one point where the split sum has no deficit to
+  //      hide behind, which makes it the sharpest check in the set.
+  //   3. Energy falls MONOTONICALLY as roughness rises. The single-scatter
+  //      deficit grows with roughness by construction; a chain that lost energy
+  //      somewhere else would not lose it in that order.
+  //
+  // A loose absolute floor sits under all three to catch catastrophic loss
+  // (a black cube, an unbound LUT) without pretending to know what the deficit
+  // "should" be. Raising the retained energy at the rough end needs a
+  // multi-scatter compensation term, which is a separate decision.
+  const float kCeiling = to_sink(1.02f);
+  const float kMirrorFloor = to_sink(0.90f);
+  const float kCatastrophicFloor = to_sink(0.15f);
+
+  int failures = 0;
+  for (uint32_t row = 0; row < ov::kMetallicSteps; ++row) {
+    float previous = 2.0f;
+    for (uint32_t col = 0; col < ov::kRoughnessSteps; ++col) {
+      const glm::vec3 centre = ov::SphereGridCenter(col, row) - cam.position;
+      const glm::vec4 clip = vp * glm::vec4(centre, 1.0f);
+      if (clip.w <= 0.0f) {
+        spdlog::error("object_viewer: sphere ({},{}) is behind the camera", col, row);
+        return 1;
+      }
+      const int px = int((clip.x / clip.w * 0.5f + 0.5f) * float(local.width));
+      const int py =
+          int((1.0f - (clip.y / clip.w * 0.5f + 0.5f)) * float(local.height));
+      if (px < 0 || py < 0 || px >= int(local.width) || py >= int(local.height)) {
+        spdlog::error("object_viewer: sphere ({},{}) is off screen", col, row);
+        return 1;
+      }
+      const size_t at = (size_t(py) * local.width + px) * 4;
+      const float got = std::max({frame.rgba[at + 0], frame.rgba[at + 1],
+                                  frame.rgba[at + 2]});
+      const float roughness = ov::SphereRoughness(col);
+      const int metal = ov::SphereMetallic(row) > 0.5f ? 1 : 0;
+
+      if (got > kCeiling) {
+        spdlog::error(
+            "object_viewer: white furnace: sphere ({},{}) roughness {:.2f} "
+            "metallic {} emits {:.3f} against a ceiling of {:.3f} -- above "
+            "what it receives, so the split sum is creating energy",
+            col, row, roughness, metal, got, kCeiling);
+        ++failures;
+      }
+      if (col == 0 && got < kMirrorFloor) {
+        spdlog::error(
+            "object_viewer: white furnace: the MIRROR sphere (0,{}) emits only "
+            "{:.3f} against {:.3f} -- at roughness 0 the convolution is the "
+            "identity and the BRDF integral is ~1, so a furnace must come back "
+            "whole",
+            row, got, kMirrorFloor);
+        ++failures;
+      }
+      if (got > previous + 0.01f) {
+        spdlog::error(
+            "object_viewer: white furnace: sphere ({},{}) emits {:.3f}, MORE "
+            "than the smoother sphere beside it ({:.3f}) -- the single-scatter "
+            "deficit grows with roughness, so energy cannot rise along the row",
+            col, row, got, previous);
+        ++failures;
+      }
+      if (got < kCatastrophicFloor) {
+        spdlog::error(
+            "object_viewer: white furnace: sphere ({},{}) emits {:.3f}, below "
+            "the {:.3f} that separates an honest approximation from a black "
+            "cube or an unbound LUT",
+            col, row, got, kCatastrophicFloor);
+        ++failures;
+      }
+      previous = got;
+    }
+  }
+
+  // AND THE ENVIRONMENT ITSELF. The background under Lit samples the same cube,
+  // so a furnace must read back as the white it is -- which is what separates
+  // "the spheres are plausible" from "the chain carries the right values".
+  const size_t corner = 0;
+  const float bg = frame.rgba[corner];
+  const float want_bg = to_sink(1.0f);
+  if (std::abs(bg - want_bg) > 0.02f) {
+    spdlog::error(
+        "object_viewer: white furnace: the background reads {:.3f} where an "
+        "environment of 1.0 predicts {:.3f} -- the cube or the background ray "
+        "is wrong",
+        bg, want_bg);
+    ++failures;
+  }
+
+  if (failures > 0) return 1;
+  spdlog::info(
+      "object_viewer: white furnace OK -- {} spheres, none above {:.2f}, none "
+      "below their floor, background {:.3f}",
+      ov::kSphereCount, kCeiling, bg);
+  return 0;
+}
+
 int RunHeadless(IRhiDevice& device, const Options& opt) {
   if (opt.self_test_output) return RunOutputSelfTest(device, opt);
   if (opt.self_test_frame_ring) return RunFrameRingSelfTest(device, opt);
   if (opt.self_test_hdr) return RunHdrSelfTest(device, opt);
   if (opt.self_test_gradients) return RunGradientSelfTest(device, opt);
   if (opt.self_test_visbuffer) return RunPlaneVisbufferCheck(device, opt);
+  if (opt.self_test_ibl) return RunIblSelfTest(device, opt);
   if (opt.scene == Scene::Plane) return RunDebugViewCheck(device, opt);
   if (opt.scene == Scene::Spheres) return RunSphereGridCheck(device, opt);
 
@@ -2487,10 +2676,14 @@ int RunWindowed(IRhiDevice& device, const Options& opt) {
     return 1;
   }
 
-  // The visibility-buffer chain, for --scene plane only.
+  // The visibility-buffer chain, for the scenes that have a material.
   std::unique_ptr<MaterialPack> pack;
   std::unique_ptr<VisbufferPass> vis;
   std::unique_ptr<ResolvePass> resolve;
+  // FUNCTION SCOPE: the resolve borrows views into the chain and the radiance
+  // function captures the equirect image by reference.
+  Environment env;
+  IblChain ibl_chain;
   PlaneChain chain;
   if (SceneUsesVisbuffer(opt.scene)) {
     pack = opt.pack == "test"
@@ -2505,6 +2698,19 @@ int RunWindowed(IRhiDevice& device, const Options& opt) {
     // The SCENE target's format: linear float, so the lit view keeps headroom.
     resolve = ResolvePass::Create(device, *compiler, *pack, kSceneFormat);
     if (!vis || !resolve) return 1;
+
+    if (!opt.env_none) {
+      env.furnace = opt.env_furnace;
+      if (!opt.env_path.empty() && !opt.env_furnace) {
+        env.image = ibl::EquirectImage::Load(opt.env_path);
+        if (!env.image) return 1;  // a bad --env is a refusal, not a sky
+      }
+      if (!RebuildIbl(device, *compiler, env.Radiance(), ibl_chain)) return 1;
+      resolve->SetEnvironment(ibl_chain.prefiltered->CubeView(),
+                              ibl::PrefilteredCube::kMipCount,
+                              ibl_chain.lut->View(), opt.env_intensity);
+      resolve->SetAmbient(ibl_chain.ambient_sh);
+    }
   }
 
   Camera cam = CameraFor(opt.scene);
@@ -2514,7 +2720,56 @@ int RunWindowed(IRhiDevice& device, const Options& opt) {
   DebugView view = opt.view;
   SunSettings sun;
   sun.intensity = opt.sun_intensity;
-  spdlog::info("object_viewer: WASD/QE to move, wheel to zoom, Esc to quit");
+
+  // THE ORBIT CAMERA, for the scenes that have an object to orbit. Ported from
+  // badlands_viewer's model viewer via badlands_camera, which was split out of
+  // badlands_engine precisely so an RHI app could reach it without Dawn.
+  //
+  // It DRIVES the viewer's own Camera rather than replacing it: Camera::View()
+  // uses the camera-OFFSET convention (camera at the origin, world rebased) and
+  // badlands::Camera does not, so wiring the two together directly would put
+  // every pass in a different space than the one the assertions assume.
+  OrbitCameraController orbit;
+  const bool orbiting = SceneUsesVisbuffer(opt.scene);
+  if (orbiting) {
+    const auto bounds = badlands::object_viewer::SphereGridExtent();
+    if (opt.scene == Scene::Spheres) {
+      orbit.FrameBounds(bounds.center, bounds.radius);
+      // Clamped to the sphere radius so the orbit cannot end up INSIDE one.
+      // Not a correctness fix -- back-face culling makes the interior render
+      // the background, which is correct -- but it is not a view anyone wants.
+      orbit.min_distance = bounds.sphere_radius * 1.5f;
+    } else {
+      orbit.FrameBounds(glm::vec3(0.0f), 6.0f);
+    }
+  }
+  // Drag orbits, wheel zooms, WASD/QE pans the target. Applied here so the
+  // starting frame matches what the orbit state says.
+  auto apply_orbit = [&] {
+    cam.position = orbit.target + orbit.distance * glm::vec3(
+        std::cos(orbit.pitch) * std::sin(orbit.yaw), std::sin(orbit.pitch),
+        std::cos(orbit.pitch) * std::cos(orbit.yaw));
+    const glm::vec3 to_target = orbit.target - cam.position;
+    cam.pitch = std::asin(glm::normalize(to_target).y);
+    cam.yaw = std::atan2(to_target.x, -to_target.z);
+  };
+  if (orbiting) apply_orbit();
+  bool dragging = false;
+  float env_intensity = opt.env_intensity;
+  // What the chain was last baked FROM. Re-baking is 128^2 x 6 CPU evaluations
+  // plus a thirty-draw prefilter, so it runs when one of these moves and not
+  // otherwise -- an unconditional per-frame rebuild is what the Dawn-side
+  // light_environment.hpp note warns about.
+  //
+  // The INTENSITY is deliberately not here: it is a multiply in the shader, so
+  // changing it needs no bake at all.
+  SunSettings baked_sun = sun;
+
+  spdlog::info(
+      orbiting
+          ? "object_viewer: drag to orbit, wheel to zoom, WASD/QE to pan, Esc "
+            "to quit"
+          : "object_viewer: WASD/QE to move, wheel to zoom, Esc to quit");
 
   rhi_app::AppShellCallbacks cb;
   cb.OnEvent = [&](const SDL_Event& e) {
@@ -2538,8 +2793,30 @@ int RunWindowed(IRhiDevice& device, const Options& opt) {
       return true;
     }
     if (e.type == SDL_EVENT_MOUSE_WHEEL) {
-      cam.extent =
-          std::clamp(cam.extent * (e.wheel.y > 0 ? 0.9f : 1.1f), 1.0f, 200.0f);
+      if (orbiting) {
+        // NormalizedWheelY's flip, inline: without it macOS natural scrolling
+        // inverts the zoom and the control feels broken rather than reversed.
+        orbit.HandleMouseWheel(e.wheel.y);
+        apply_orbit();
+      } else {
+        cam.extent =
+            std::clamp(cam.extent * (e.wheel.y > 0 ? 0.9f : 1.1f), 1.0f, 200.0f);
+      }
+      return true;
+    }
+    if (orbiting && e.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
+        e.button.button == SDL_BUTTON_LEFT) {
+      dragging = true;
+      return true;
+    }
+    if (e.type == SDL_EVENT_MOUSE_BUTTON_UP &&
+        e.button.button == SDL_BUTTON_LEFT) {
+      dragging = false;
+      return true;
+    }
+    if (orbiting && dragging && e.type == SDL_EVENT_MOUSE_MOTION) {
+      orbit.HandleMouseDrag(e.motion.xrel, e.motion.yrel);
+      apply_orbit();
       return true;
     }
     return false;
@@ -2552,6 +2829,24 @@ int RunWindowed(IRhiDevice& device, const Options& opt) {
       SDL_PushEvent(&esc);
     }
     if (ImGui::GetIO().WantCaptureKeyboard) return;
+    if (orbiting) {
+      // WASD/QE PANS THE TARGET, so nothing that worked before stops working --
+      // the keys still move the view, they just move what it is looking at.
+      // Scaled by distance so panning stays usable when zoomed out.
+      const float step = orbit.distance * std::min(f.dt, 0.1f);
+      glm::vec3 pan(0.0f);
+      if (f.keys[SDL_SCANCODE_W]) pan.z -= step;
+      if (f.keys[SDL_SCANCODE_S]) pan.z += step;
+      if (f.keys[SDL_SCANCODE_A]) pan.x -= step;
+      if (f.keys[SDL_SCANCODE_D]) pan.x += step;
+      if (f.keys[SDL_SCANCODE_E]) pan.y += step;
+      if (f.keys[SDL_SCANCODE_Q]) pan.y -= step;
+      if (pan != glm::vec3(0.0f)) {
+        orbit.target += pan;
+        apply_orbit();
+      }
+      return;
+    }
     const float step = cam.extent * std::min(f.dt, 0.1f);
     if (f.keys[SDL_SCANCODE_W]) cam.position.z -= step;
     if (f.keys[SDL_SCANCODE_S]) cam.position.z += step;
@@ -2614,6 +2909,22 @@ int RunWindowed(IRhiDevice& device, const Options& opt) {
                 f.dt > 0.0f ? 1.0f / f.dt : 0.0f);
     ImGui::End();
 
+    // The sun feeds the sky, so moving it re-bakes -- but only then. Compared
+    // against what was BAKED rather than against last frame's value, so a drag
+    // that returns to where it started does not leave a stale cube behind.
+    if (resolve && ibl_chain.Ready() &&
+        (baked_sun.azimuth_deg != sun.azimuth_deg ||
+         baked_sun.elevation_deg != sun.elevation_deg ||
+         baked_sun.intensity != sun.intensity)) {
+      baked_sun = sun;
+      if (RebuildIbl(device, *compiler, env.Radiance(), ibl_chain)) {
+        resolve->SetEnvironment(ibl_chain.prefiltered->CubeView(),
+                                ibl::PrefilteredCube::kMipCount,
+                                ibl_chain.lut->View(), env_intensity);
+        resolve->SetAmbient(ibl_chain.ambient_sh);
+      }
+    }
+
     if (resolve) {
       ImGui::Begin("Graphics debug");
       // ONE radio group over the whole enum, driven by the same table the CLI
@@ -2639,6 +2950,14 @@ int RunWindowed(IRhiDevice& device, const Options& opt) {
       ImGui::SliderFloat("elevation", &sun.elevation_deg, -90.0f, 90.0f);
       ImGui::ColorEdit3("color", &sun.color.x);
       ImGui::SliderFloat("intensity", &sun.intensity, 0.0f, 10.0f);
+      // THE ONE APPROVED ADDITION: a separator, an intensity slider and a
+      // source readout. Nothing else -- no colour pickers, no resolution knob,
+      // no reload button. CLAUDE.md: the feature is approved, its UI is not.
+      if (ibl_chain.Ready()) {
+        ImGui::SeparatorText("Environment");
+        ImGui::SliderFloat("env intensity", &env_intensity, 0.0f, 4.0f);
+        ImGui::Text("source: %s", env.SourceName(opt.env_path));
+      }
       ImGui::End();
     }
     ImGui::Render();
@@ -2657,6 +2976,8 @@ int RunWindowed(IRhiDevice& device, const Options& opt) {
                          cam.far_m);
       resolve->SetSun(sun);
       resolve->SetView(view);
+      resolve->SetEnvironmentIntensity(env_intensity);
+      ApplyViewRays(*resolve, cam, aspect);
       chain = {.vis = vis.get(), .resolve = resolve.get()};
     }
 

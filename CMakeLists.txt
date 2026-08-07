@@ -1738,6 +1738,18 @@ if(APPLE)
                      --width 256 --height 192
                      --out ${CMAKE_BINARY_DIR}/object_viewer_grid.png
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    # THE WHITE FURNACE: a constant environment of radiance 1, sun off, albedo 1,
+    # AO 1. Three claims, only one of which carries a tuned number -- never
+    # above what it receives; a MIRROR comes back whole (roughness 0 is the one
+    # point where the split sum has no deficit to hide behind); and energy falls
+    # monotonically as roughness rises. A loose floor underneath catches a black
+    # cube or an unbound LUT without pretending to know what the single-scatter
+    # deficit should be.
+    add_test(NAME object_viewer_ibl_furnace
+             COMMAND badlands_object_viewer --self-test-ibl
+                     --width 512 --height 256
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
     # The sphere chart, asserted through the ROUGHNESS view: fourteen spheres
     # are ONE instanced draw, so a fragment shader still writing slot 0 would
     # report the same material for all of them, and the constant pack means a
