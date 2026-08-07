@@ -1474,14 +1474,21 @@ add_test(NAME badlands_render_graph_tests COMMAND badlands_render_graph_tests
 if(APPLE)
     add_executable(badlands_rhi_metal_tests
         src/engine/tests/rhi_metal_tests.cpp
+        src/engine/tests/metal_layer_swapchain_tests.mm
         third_party/catch2/extras/catch_amalgamated.cpp
     )
+    # ARC for the one Objective-C++ case, matching the backend it exercises.
+    set_source_files_properties(src/engine/tests/metal_layer_swapchain_tests.mm
+        PROPERTIES COMPILE_FLAGS "-fobjc-arc")
     target_include_directories(badlands_rhi_metal_tests PRIVATE
         ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
         ${CMAKE_SOURCE_DIR}/third_party/glm
         ${CMAKE_SOURCE_DIR}/src/engine/tests
     )
-    target_link_libraries(badlands_rhi_metal_tests PRIVATE badlands_rhi)
+    # QuartzCore for CAMetalLayer itself: the backend only ever messages a layer
+    # handed to it, so it needs no class symbol — a test that CONSTRUCTS one does.
+    target_link_libraries(badlands_rhi_metal_tests PRIVATE badlands_rhi
+        "-framework QuartzCore")
     target_link_options(badlands_rhi_metal_tests PRIVATE "-Wl,-ld_new")
     add_test(NAME badlands_rhi_metal_tests COMMAND badlands_rhi_metal_tests
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
