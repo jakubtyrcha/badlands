@@ -833,17 +833,16 @@ class NullDevice final : public IRhiDevice {
     return std::make_unique<NullCommandEncoder>(&log_, label);
   }
   // Nothing executes, so nothing is ever in flight.
-  TextureReadbackPtr ReadTexture(ICommandEncoder& encoder, ITexture* src,
-                                uint32_t mip, uint32_t layer) override {
+  TextureReadbackPtr ReadTexture(ICommandEncoder& encoder,
+                                ITextureView* src) override {
     size_t bytes = 0;
-    if (!ValidateReadbackSource(src, mip, layer, bytes)) return nullptr;
+    uint32_t w = 0, h = 0;
+    if (!ValidateReadbackSource(src, bytes, w, h)) return nullptr;
     auto* e = dynamic_cast<NullCommandEncoder*>(&encoder);
     if (!e) {
       spdlog::error("rhi/null: ReadTexture given a foreign encoder");
       return nullptr;
     }
-    const uint32_t w = std::max(1u, src->GetWidth() >> mip);
-    const uint32_t h = std::max(1u, src->GetHeight() >> mip);
     auto rb = std::make_shared<NullTextureReadback>(
         w, h, src->GetFormat(), bytes, src->GetLabel() + ".readback", retire_);
     e->AddPendingReadback(rb->Completion());

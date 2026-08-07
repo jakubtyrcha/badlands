@@ -315,15 +315,19 @@ std::optional<TextureViewDesc> ResolveViewDesc(const TextureViewDesc& requested,
 // once, they cannot drift apart as backends are added.
 bool ValidateTextureDesc(const TextureDesc& desc);
 
-// Whether `src` can be read back from at (`mip`, `layer`), logging and
-// returning false when it cannot. On success `out_bytes` receives the tightly
-// packed size of that subresource.
+// Whether the subresource `src` names can be read back, logging and returning
+// false when it cannot. On success `out_bytes` receives its tightly packed
+// size, and `out_width`/`out_height` its extent at that mip.
+//
+// The RANGE is already resolved and validated -- ResolveViewDesc did that at
+// CreateView -- so this checks only what a readback additionally requires:
+// CopySrc on the texture, and exactly one subresource.
 //
 // A CREATION-TIME refusal (rule 13) and shared for the rule-6 reason: a
 // readback that cannot be encoded must not exist, and two backends deciding
 // that separately is two chances to disagree about what "cannot".
-bool ValidateReadbackSource(const ITexture* src, uint32_t mip, uint32_t layer,
-                            size_t& out_bytes);
+bool ValidateReadbackSource(const ITextureView* src, size_t& out_bytes,
+                            uint32_t& out_width, uint32_t& out_height);
 
 // Whether a Write() of `data` into (`mip`, `layer`) of `desc` is in bounds,
 // logging and returning false when it is not. `label` names the texture.

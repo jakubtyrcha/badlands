@@ -96,6 +96,10 @@ TEST_CASE("Null: a readback notifies exactly once", "[rhi]") {
   auto d = MakeNull();
   rhitest::CheckReadbackNotifiesExactlyOnce(*d);
 }
+TEST_CASE("Null: a readback of a multi-subresource view is refused", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckReadbackRefusesMultiSubresourceView(*d);
+}
 TEST_CASE("Null: a readback of an uncopyable source is refused", "[rhi]") {
   auto d = MakeNull();
   rhitest::CheckReadbackRefusesUncopyableSource(*d);

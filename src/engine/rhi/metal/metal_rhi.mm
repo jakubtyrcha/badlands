@@ -1732,10 +1732,11 @@ class MetalDevice final : public IRhiDevice {
     in_flight_.push_back(cmd);
   }
 
-  TextureReadbackPtr ReadTexture(ICommandEncoder& encoder, ITexture* src,
-                                uint32_t mip, uint32_t layer) override {
+  TextureReadbackPtr ReadTexture(ICommandEncoder& encoder,
+                                ITextureView* src) override {
     size_t bytes = 0;
-    if (!ValidateReadbackSource(src, mip, layer, bytes)) return nullptr;
+    uint32_t w = 0, h = 0;
+    if (!ValidateReadbackSource(src, bytes, w, h)) return nullptr;
     auto* me = dynamic_cast<MetalCommandEncoder*>(&encoder);
     if (!me) {
       spdlog::error("rhi/metal: ReadTexture given a foreign encoder");
@@ -1751,13 +1752,15 @@ class MetalDevice final : public IRhiDevice {
                                           BufferUsage::MapRead,
                                  .label = src->GetLabel() + ".readback"});
     if (!staging) return nullptr;  // CreateBuffer logged why
-    const uint32_t w = std::max(1u, src->GetWidth() >> mip);
-    const uint32_t h = std::max(1u, src->GetHeight() >> mip);
     auto rb = std::make_shared<MetalTextureReadback>(
         staging, static_cast<MetalBuffer*>(staging.get())->Handle(), w, h,
         src->GetFormat(), bytes, src->GetLabel() + ".readback", retire_);
 
-    encoder.CopyTextureToBuffer(src, mip, layer, staging.get(), 0);
+    // The view's RESOLVED range says which subresource; ValidateReadbackSource
+    // has already established it is exactly one.
+    const TextureViewDesc& d = src->GetDesc();
+    encoder.CopyTextureToBuffer(src->GetTexture(), d.base_mip, d.base_layer,
+                                staging.get(), 0);
 
     // ATTACHED NOW, BEFORE COMMIT. Metal asserts "Completed handler provided
     // after commit call", so this cannot wait until Submit -- which is exactly

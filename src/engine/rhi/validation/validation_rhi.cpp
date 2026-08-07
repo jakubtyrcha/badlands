@@ -1104,8 +1104,8 @@ class ValidationDevice final : public IRhiDevice {
   // Forwarded, with no per-call check of its own: the refusals ReadTexture
   // makes are creation-time preconditions in the shared validator, which must
   // hold in release too (rule 13) and therefore cannot live here.
-  TextureReadbackPtr ReadTexture(ICommandEncoder& encoder, ITexture* src,
-                                 uint32_t mip, uint32_t layer) override {
+  TextureReadbackPtr ReadTexture(ICommandEncoder& encoder,
+                                 ITextureView* src) override {
     auto* v = dynamic_cast<ValidationEncoder*>(&encoder);
     if (!v) {
       // Refused, not forwarded: the backend static_casts to its own encoder
@@ -1115,7 +1115,9 @@ class ValidationDevice final : public IRhiDevice {
           "ReadTexture: encoder did not come from this device -- refusing");
       return nullptr;
     }
-    return inner_->ReadTexture(*v->Inner(), src, mip, layer);
+    // Textures and views are NOT wrapped by this decorator (CreateTexture
+    // returns the backend's own), so the view passes straight through.
+    return inner_->ReadTexture(*v->Inner(), src);
   }
 
   void WaitIdle() override { inner_->WaitIdle(); }

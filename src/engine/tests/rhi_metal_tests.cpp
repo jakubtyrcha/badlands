@@ -450,6 +450,10 @@ TEST_CASE("metal: a readback notifies exactly once", "[rhi][metal]") {
   auto d = MakeMetal();
   rhitest::CheckReadbackNotifiesExactlyOnce(*d);
 }
+TEST_CASE("metal: a readback of a multi-subresource view is refused", "[rhi][metal]") {
+  auto d = MakeMetal();
+  rhitest::CheckReadbackRefusesMultiSubresourceView(*d);
+}
 TEST_CASE("metal: a readback of an uncopyable source is refused", "[rhi][metal]") {
   auto d = MakeMetal();
   rhitest::CheckReadbackRefusesUncopyableSource(*d);
@@ -518,7 +522,10 @@ TEST_CASE("metal: a readback returns the texture's own texels",
       device->BeginFrame();
       auto encoder = device->CreateCommandEncoder("rb");
       encoder->Transition(cube.get(), ResourceState::CopySrc);
-      auto rb = device->ReadTexture(*encoder, cube.get(), mip, face);
+      auto* view = cube->CreateView({.base_mip = mip, .mip_count = 1,
+                                     .base_layer = face, .layer_count = 1});
+      REQUIRE(view);
+      auto rb = device->ReadTexture(*encoder, view);
       REQUIRE(rb);
       encoder->Finish();
       device->Submit(*encoder);
@@ -568,7 +575,9 @@ TEST_CASE("metal: a readback waits for GPU work, not just for the copy call",
   REQUIRE(pass);
   pass->End();
   encoder->Transition(color.get(), ResourceState::CopySrc);
-  auto rb = device->ReadTexture(*encoder, color.get(), 0, 0);
+  auto* rb_view = color->CreateView({.mip_count = 1, .layer_count = 1});
+  REQUIRE(rb_view);
+  auto rb = device->ReadTexture(*encoder, rb_view);
   REQUIRE(rb);
   encoder->Finish();
   device->Submit(*encoder);

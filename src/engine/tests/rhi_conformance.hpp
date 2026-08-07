@@ -109,9 +109,8 @@ class FailAfterNDevice final : public IRhiDevice {
     return inner_.CreateCommandEncoder(l);
   }
   void Submit(ICommandEncoder& e) override { inner_.Submit(e); }
-  TextureReadbackPtr ReadTexture(ICommandEncoder& e, ITexture* src, uint32_t mip,
-                                 uint32_t layer) override {
-    return inner_.ReadTexture(e, src, mip, layer);
+  TextureReadbackPtr ReadTexture(ICommandEncoder& e, ITextureView* src) override {
+    return inner_.ReadTexture(e, src);
   }
   void WaitIdle() override { inner_.WaitIdle(); }
   size_t InFlightCount() override { return inner_.InFlightCount(); }
@@ -450,7 +449,12 @@ inline void CheckReadbackCompletes(IRhiDevice& device) {
   device.BeginFrame();
   auto encoder = device.CreateCommandEncoder("readback");
   REQUIRE(encoder);
-  auto readback = device.ReadTexture(*encoder, tex.get(), 0, 0);
+  // THE SAME VIEW a shader binding would take. One abstraction names a
+  // subresource in this RHI, and passing the object you would bind is what
+  // makes "read back what the shader sees" a statement rather than a hope.
+  auto* view = tex->CreateView({.mip_count = 1, .layer_count = 1});
+  REQUIRE(view);
+  auto readback = device.ReadTexture(*encoder, view);
   REQUIRE(readback);
   CHECK(readback->GetWidth() == 4);
   CHECK(readback->GetHeight() == 4);
@@ -481,7 +485,9 @@ inline void CheckReadbackNotifiesExactlyOnce(IRhiDevice& device) {
 
   device.BeginFrame();
   auto encoder = device.CreateCommandEncoder("notify");
-  auto readback = device.ReadTexture(*encoder, tex.get(), 0, 0);
+  auto* view = tex->CreateView({.mip_count = 1, .layer_count = 1});
+  REQUIRE(view);
+  auto readback = device.ReadTexture(*encoder, view);
   REQUIRE(readback);
 
   std::atomic<int> fired{0};
@@ -518,15 +524,62 @@ inline void CheckReadbackRefusesUncopyableSource(IRhiDevice& device) {
   device.BeginFrame();
   auto encoder = device.CreateCommandEncoder("refuse");
 
+  auto* view = tex->CreateView({.mip_count = 1, .layer_count = 1});
+  REQUIRE(view);
   const std::string log = CaptureLog([&] {
-    CHECK(device.ReadTexture(*encoder, tex.get(), 0, 0) == nullptr);
-    // And an out-of-range subresource, by the same rule.
-    CHECK(device.ReadTexture(*encoder, tex.get(), 7, 0) == nullptr);
-    CHECK(device.ReadTexture(*encoder, tex.get(), 0, 3) == nullptr);
-    CHECK(device.ReadTexture(*encoder, nullptr, 0, 0) == nullptr);
+    CHECK(device.ReadTexture(*encoder, view) == nullptr);
+    CHECK(device.ReadTexture(*encoder, nullptr) == nullptr);
   });
   INFO(log);
   CHECK(log.find("not_copyable") != std::string::npos);
+  device.EndFrame();
+}
+
+// A readback produces ONE tightly packed image, so a view spanning several mips
+// or layers has no single answer. Reading its base anyway would be the
+// accepted-and-ignored trap (rule 4) -- the caller would get a correct-looking
+// image of the wrong extent and nothing would say so.
+//
+// This refusal only became expressible once ReadTexture took a VIEW: a
+// (texture, mip, layer) triple cannot describe a multi-subresource request, so
+// there was nothing to refuse.
+inline void CheckReadbackRefusesMultiSubresourceView(IRhiDevice& device) {
+  auto tex = device.CreateTexture({.width = 8, .height = 8,
+                                   .array_layers = 4,
+                                   .mip_levels = 3,
+                                   .format = Format::RGBA8Unorm,
+                                   .usage = TextureUsage::CopySrc |
+                                            TextureUsage::CopyDst,
+                                   .dimension = TextureDimension::Tex2DArray,
+                                   .label = "multi_sub"});
+  REQUIRE(tex);
+  device.BeginFrame();
+  auto encoder = device.CreateCommandEncoder("multi");
+
+  // Whole-resource: three mips and four layers.
+  auto* whole = tex->GetDefaultView();
+  // One layer but every mip.
+  auto* all_mips = tex->CreateView({.base_layer = 1, .layer_count = 1});
+  // One mip but every layer.
+  auto* all_layers = tex->CreateView({.base_mip = 1, .mip_count = 1});
+
+  const std::string log = CaptureLog([&] {
+    CHECK(device.ReadTexture(*encoder, whole) == nullptr);
+    CHECK(device.ReadTexture(*encoder, all_mips) == nullptr);
+    CHECK(device.ReadTexture(*encoder, all_layers) == nullptr);
+  });
+  INFO(log);
+  CHECK(log.find("ONE subresource") != std::string::npos);
+
+  // And the single-subresource view IS accepted, so the refusal is about the
+  // range rather than about the texture.
+  auto* one = tex->CreateView({.base_mip = 2, .mip_count = 1,
+                               .base_layer = 3, .layer_count = 1});
+  REQUIRE(one);
+  auto rb = device.ReadTexture(*encoder, one);
+  REQUIRE(rb);
+  CHECK(rb->GetWidth() == 2);   // 8 >> 2
+  CHECK(rb->GetHeight() == 2);
   device.EndFrame();
 }
 

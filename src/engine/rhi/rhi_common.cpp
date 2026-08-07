@@ -395,42 +395,52 @@ std::optional<ResolvedBindingTable> ResolveBindingTable(
   return out;
 }
 
-bool ValidateReadbackSource(const ITexture* src, uint32_t mip, uint32_t layer,
-                            size_t& out_bytes) {
+bool ValidateReadbackSource(const ITextureView* src, size_t& out_bytes,
+                            uint32_t& out_width, uint32_t& out_height) {
   out_bytes = 0;
+  out_width = 0;
+  out_height = 0;
   if (!src) {
-    spdlog::error("rhi: ReadTexture was given no source texture");
+    spdlog::error("rhi: ReadTexture was given no source view");
     return false;
   }
-  if (!Has(src->GetUsage(), TextureUsage::CopySrc)) {
+  const ITexture* tex = src->GetTexture();
+  if (!tex) {
+    spdlog::error("rhi: ReadTexture on '{}': the view has no texture",
+                  src->GetLabel());
+    return false;
+  }
+  if (!Has(tex->GetUsage(), TextureUsage::CopySrc)) {
     spdlog::error(
         "rhi: ReadTexture on '{}': the texture lacks TextureUsage::CopySrc, so "
         "the copy could never be encoded",
-        src->GetLabel());
+        tex->GetLabel());
     return false;
   }
-  const uint32_t mips = std::max(1u, src->GetMipLevels());
-  const uint32_t layers = std::max(1u, src->GetArrayLayers());
-  if (mip >= mips) {
-    spdlog::error("rhi: ReadTexture on '{}': mip {} is out of range ({} level(s))",
-                  src->GetLabel(), mip, mips);
-    return false;
-  }
-  if (layer >= layers) {
+
+  // ONE SUBRESOURCE. A readback produces one tightly packed image, so a view
+  // spanning several mips or layers has no single answer -- and silently
+  // reading its base would be the accepted-and-ignored trap (rule 4). The
+  // range itself needs no bounds check: ResolveViewDesc validated it at
+  // CreateView, and a resolved desc never carries a 0 count.
+  const TextureViewDesc& d = src->GetDesc();
+  if (d.mip_count != 1 || d.layer_count != 1) {
     spdlog::error(
-        "rhi: ReadTexture on '{}': layer {} is out of range ({} layer(s))",
-        src->GetLabel(), layer, layers);
+        "rhi: ReadTexture on '{}': a readback names ONE subresource, but this "
+        "view covers {} mip(s) and {} layer(s)",
+        src->GetLabel(), d.mip_count, d.layer_count);
     return false;
   }
-  const uint32_t w = std::max(1u, src->GetWidth() >> mip);
-  const uint32_t h = std::max(1u, src->GetHeight() >> mip);
-  const uint32_t texel = FormatByteSize(src->GetFormat());
+
+  const uint32_t texel = FormatByteSize(tex->GetFormat());
   if (texel == 0) {
     spdlog::error("rhi: ReadTexture on '{}': format {} has no byte size",
-                  src->GetLabel(), ToString(src->GetFormat()));
+                  src->GetLabel(), ToString(tex->GetFormat()));
     return false;
   }
-  out_bytes = size_t(w) * h * texel;
+  out_width = std::max(1u, tex->GetWidth() >> d.base_mip);
+  out_height = std::max(1u, tex->GetHeight() >> d.base_mip);
+  out_bytes = size_t(out_width) * out_height * texel;
   return true;
 }
 
