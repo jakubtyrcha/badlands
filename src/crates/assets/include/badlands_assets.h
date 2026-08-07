@@ -35,6 +35,18 @@ typedef struct BadlandsImage16 {
   uint32_t height;
 } BadlandsImage16;
 
+// A decoded linear-float image: `rgb` points at `width * height * 3` floats
+// owned by this struct. THREE channels, not four — the source format has no
+// alpha and a padded fourth would double the transfer for a constant.
+//
+// On failure (missing/unreadable file, decode error, or an internal panic),
+// `rgb` is NULL and `width`/`height` are both 0.
+typedef struct BadlandsImageF32 {
+  float* rgb;
+  uint32_t width;
+  uint32_t height;
+} BadlandsImageF32;
+
 // The three PBR texture URIs (relative to the glTF file's directory)
 // resolved from a glTF pack's first material, by texture *URI* — not the
 // glTF image `name` field, which authoring tools are known to leave
@@ -91,6 +103,25 @@ BadlandsImage16 badlands_decode_image16(const char* path);
 // Free the sample buffer of a BadlandsImage16 previously returned by
 // badlands_decode_image16(). Safe to call on a failure result (NULL `luma`).
 void badlands_image16_free(BadlandsImage16 image);
+
+// Decode the Radiance .hdr file at `path` to linear float RGB — the equirect
+// format HDRI environment maps ship in.
+//
+// NOT format-autodetecting, unlike badlands_decode_image(): the caller wants
+// floating-point radiance specifically. Silently accepting a PNG here would
+// hand back an environment quantized to 0..1, which looks merely dull rather
+// than wrong — every value above 1 is the entire point of an HDRI.
+//
+// .exr is deliberately not supported; that is a separate format decision.
+//
+// Returns a BadlandsImageF32 owned by the caller; free its sample buffer with
+// badlands_image_f32_free(). On failure, `rgb` is NULL and `width`/`height`
+// are both 0.
+BadlandsImageF32 badlands_decode_hdr(const char* path);
+
+// Free the sample buffer of a BadlandsImageF32 previously returned by
+// badlands_decode_hdr(). Safe to call on a failure result (NULL `rgb`).
+void badlands_image_f32_free(BadlandsImageF32 image);
 
 // Resolve the base color / normal / metallic-roughness texture URIs of the
 // first material in the glTF document at `gltf_path`.

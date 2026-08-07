@@ -14,7 +14,10 @@ edition = "2024"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+# `hdr` is Radiance .hdr, the equirect format HDRI environment maps ship in.
+# `.exr` is deliberately NOT enabled: it is a separate format decision and
+# nothing asks for it yet.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "hdr"] }
 gltf = { version = "1.4", default-features = false }
 
 # Default to panic=abort; Corrosion overrides this back to unwind at the

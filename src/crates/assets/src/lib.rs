@@ -55,6 +55,26 @@ fn decode_luma16(path: &str) -> Option<(Vec<u16>, u32, u32)> {
     decode_bytes_luma16(&bytes)
 }
 
+/// Decode a Radiance `.hdr` to linear f32 RGB (3 floats per texel, NOT 4).
+///
+/// HDR environment maps carry real radiance, so the decode must stay
+/// floating-point: routing one through `decode` would quantize it to RGBA8 and
+/// throw away every value above 1, which is the entire point of an HDRI. Three
+/// channels rather than four because there is no alpha in the format and a
+/// padded fourth would double the transfer for a constant.
+fn decode_hdr(path: &str) -> Option<(Vec<f32>, u32, u32)> {
+    let bytes = std::fs::read(path).ok()?;
+    decode_bytes_hdr(&bytes)
+}
+
+fn decode_bytes_hdr(bytes: &[u8]) -> Option<(Vec<f32>, u32, u32)> {
+    let reader = image::codecs::hdr::HdrDecoder::new(std::io::Cursor::new(bytes)).ok()?;
+    let img = image::DynamicImage::from_decoder(reader).ok()?;
+    let rgb = img.into_rgb32f();
+    let (width, height) = (rgb.width(), rgb.height());
+    Some((rgb.into_raw(), width, height))
+}
+
 /// Resolve the texture URI referenced by a glTF `Texture`, if any. Only
 /// `Source::Uri` images are supported (external files) — embedded
 /// `Source::View` (glb-bufferview) images have no URI to resolve.
@@ -123,6 +143,27 @@ fn failed_image() -> BadlandsImage {
 fn failed_image16() -> BadlandsImage16 {
     BadlandsImage16 {
         luma: ptr::null_mut(),
+        width: 0,
+        height: 0,
+    }
+}
+
+/// C-ABI-compatible linear-float image: `rgb` points at `width * height * 3`
+/// f32 samples owned by this struct. On failure `rgb` is NULL and
+/// `width`/`height` are both 0.
+///
+/// THREE channels, not four. The format has no alpha, and the one consumer
+/// (the IBL environment ingest) samples radiance.
+#[repr(C)]
+pub struct BadlandsImageF32 {
+    pub rgb: *mut f32,
+    pub width: u32,
+    pub height: u32,
+}
+
+fn failed_image_f32() -> BadlandsImageF32 {
+    BadlandsImageF32 {
+        rgb: ptr::null_mut(),
         width: 0,
         height: 0,
     }
@@ -251,6 +292,71 @@ pub unsafe extern "C" fn badlands_decode_image16(path: *const c_char) -> Badland
             eprintln!("badlands_decode_image16: panicked");
             failed_image16()
         }
+    }
+}
+
+/// Decode the Radiance `.hdr` file at `path` to linear f32 RGB across the C
+/// ABI. Same panic-safe wrapping and null-on-error contract as
+/// `badlands_decode_image16`.
+///
+/// Unlike `badlands_decode_image`, this does NOT auto-detect: `.hdr` is asked
+/// for by name because the caller wants floating-point radiance specifically,
+/// and silently accepting a PNG here would hand back a quantized environment
+/// that looks merely dull rather than wrong.
+///
+/// # Safety
+/// `path` must be a valid NUL-terminated C string.
+///
+/// # Returns
+/// On success, `rgb` points at a malloc'd buffer of `width * height * 3`
+/// f32 samples, owned by the caller and freed with `badlands_image_f32_free`.
+/// On failure (invalid input, missing file, decode error, or an internal
+/// panic), `rgb` is NULL and `width`/`height` are both 0.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn badlands_decode_hdr(path: *const c_char) -> BadlandsImageF32 {
+    let result = panic::catch_unwind(|| {
+        if path.is_null() {
+            return None;
+        }
+        let path = unsafe { CStr::from_ptr(path) }.to_str().ok()?;
+        decode_hdr(path)
+    });
+
+    match result {
+        Ok(Some((rgb, width, height))) => {
+            // Same leak-to-caller contract as badlands_decode_image16: the
+            // Vec's buffer is handed over and reconstructed by the matching
+            // free with the same length and capacity.
+            let mut rgb = std::mem::ManuallyDrop::new(rgb);
+            let ptr = rgb.as_mut_ptr();
+            BadlandsImageF32 { rgb: ptr, width, height }
+        }
+        Ok(None) => failed_image_f32(),
+        Err(_) => {
+            eprintln!("badlands_decode_hdr: panicked");
+            failed_image_f32()
+        }
+    }
+}
+
+/// Free the sample buffer of a `BadlandsImageF32` returned by
+/// `badlands_decode_hdr`. Safe to call on a failure result (NULL `rgb`).
+///
+/// # Safety
+/// `image.rgb` must be either NULL or a pointer previously returned by
+/// `badlands_decode_hdr` (with matching `width`/`height`) that has not already
+/// been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn badlands_image_f32_free(image: BadlandsImageF32) {
+    if panic::catch_unwind(|| {
+        if !image.rgb.is_null() {
+            let n = (image.width as usize) * (image.height as usize) * 3;
+            drop(unsafe { Vec::from_raw_parts(image.rgb, n, n) });
+        }
+    })
+    .is_err()
+    {
+        eprintln!("badlands_image_f32_free: panicked");
     }
 }
 
@@ -564,6 +670,66 @@ mod tests {
         assert_eq!(got, vals.to_vec(), "16-bit precision must survive the C ABI");
         unsafe { badlands_image16_free(img) };
         let _ = std::fs::remove_file(&path);
+    }
+
+    // A Radiance .hdr encoded here, not shipped. The point of the format is
+    // values ABOVE 1, so the fixture carries some -- a decode that quantized
+    // through RGBA8 would clamp them and still return a plausible image.
+    fn hdr_fixture(texels: &[[f32; 3]], w: u32, h: u32) -> Vec<u8> {
+        let pixels: Vec<image::Rgb<f32>> = texels.iter().map(|t| image::Rgb(*t)).collect();
+        let mut bytes: Vec<u8> = Vec::new();
+        let encoder = image::codecs::hdr::HdrEncoder::new(&mut bytes);
+        encoder
+            .encode(&pixels, w as usize, h as usize)
+            .expect("encode hdr");
+        bytes
+    }
+
+    #[test]
+    fn decode_bytes_hdr_keeps_values_above_one() {
+        let texels = [
+            [4.0f32, 2.0, 1.0],
+            [0.5, 0.25, 0.125],
+            [16.0, 8.0, 32.0],
+            [0.0, 0.0, 0.0],
+        ];
+        let bytes = hdr_fixture(&texels, 2, 2);
+        let (rgb, w, h) = decode_bytes_hdr(&bytes).expect("decode hdr");
+        assert_eq!((w, h), (2, 2));
+        assert_eq!(rgb.len(), 12, "three channels per texel, not four");
+        // Radiance is a shared-exponent format, so exact equality is not on
+        // offer; what must survive is the RANGE. An RGBA8 path would pin every
+        // one of these to 1.0.
+        assert!(rgb[0] > 3.5 && rgb[0] < 4.5, "got {}", rgb[0]);
+        assert!(rgb[8] > 30.0, "the brightest channel survives: {}", rgb[8]);
+        assert!(rgb[3] < 1.0, "and a dark one is not lifted: {}", rgb[3]);
+    }
+
+    #[test]
+    fn ffi_decode_hdr_roundtrip() {
+        let texels = [[8.0f32, 4.0, 2.0], [0.25, 0.5, 0.75]];
+        let dir = std::env::temp_dir().join("badlands_hdr_ffi");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("env.hdr");
+        std::fs::write(&path, hdr_fixture(&texels, 2, 1)).expect("write hdr");
+
+        let c = CString::new(path.to_str().unwrap()).unwrap();
+        let img = unsafe { badlands_decode_hdr(c.as_ptr()) };
+        assert!(!img.rgb.is_null(), "hdr decode should succeed");
+        assert_eq!((img.width, img.height), (2, 1));
+        let got = unsafe { std::slice::from_raw_parts(img.rgb, 6) }.to_vec();
+        assert!(got[0] > 7.0, "HDR range must survive the C ABI: {}", got[0]);
+        unsafe { badlands_image_f32_free(img) };
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn ffi_decode_hdr_missing_file_returns_null() {
+        let c = CString::new("/nonexistent/nope.hdr").unwrap();
+        let img = unsafe { badlands_decode_hdr(c.as_ptr()) };
+        assert!(img.rgb.is_null());
+        assert_eq!((img.width, img.height), (0, 0));
+        unsafe { badlands_image_f32_free(img) };  // safe on a failure result
     }
 
     #[test]

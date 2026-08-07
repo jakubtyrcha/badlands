@@ -231,6 +231,25 @@ target_compile_definitions(badlands_rhi PUBLIC GLM_FORCE_DEPTH_ZERO_TO_ONE)
 add_library(badlands_render_graph STATIC src/engine/graph/render_graph.cpp)
 target_link_libraries(badlands_render_graph PUBLIC badlands_rhi)
 
+# badlands_camera: Camera plus the controllers that drive it. glm ONLY — no
+# Dawn, no SDL, no RHI.
+#
+# Split out of badlands_engine because that target links Dawn, so an RHI-era app
+# could not reach the orbit controller without dragging a second graphics API
+# into its link line. The code was already Dawn-free (camera.hpp is header-only
+# glm and the controllers include nothing else); only the target boundary was
+# wrong.
+add_library(badlands_camera STATIC
+    src/engine/app/orbit_camera_controller.cpp
+    src/engine/app/game_camera_controller.cpp)
+target_include_directories(badlands_camera PUBLIC
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/spdlog/include)
+# The reversed-Z convention travels with the header: Camera::GetProj maps
+# near->1, and a consumer built without this silently disagrees about depth.
+target_compile_definitions(badlands_camera PUBLIC GLM_FORCE_DEPTH_ZERO_TO_ONE)
+
 # badlands_rhi_app: the windowed render loop on the RHI, shared by every app
 # that opens a window. Separate from badlands_rhi so the RHI itself never links
 # SDL — the RHI runs headless, and a swapchain is only one of its consumers.
@@ -427,8 +446,6 @@ add_library(badlands_engine STATIC
     src/engine/app/imgui_mouse_input.cpp
     src/engine/app/screenshot.cpp
     src/engine/app/screenshot_recorder.cpp
-    src/engine/app/orbit_camera_controller.cpp
-    src/engine/app/game_camera_controller.cpp
     src/engine/app/sdl_input_util.cpp
     src/engine/core/ray.cpp
     # Skeletal animation runtime (ozz): loading, sampling, blending and the
@@ -451,7 +468,7 @@ add_library(badlands_engine STATIC
     ${imgui_SOURCE_DIR}/imgui_demo.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp
 )
-target_link_libraries(badlands_engine PUBLIC SDL3::SDL3 webgpu wesl_ffi assets ui nlohmann_json::nlohmann_json
+target_link_libraries(badlands_engine PUBLIC badlands_camera SDL3::SDL3 webgpu wesl_ffi assets ui nlohmann_json::nlohmann_json
     # USD import (src/engine/assets). PUBLIC because usd_mesh_adapter.hpp is an
     # engine header that exposes UsdSceneData/UsdMaterialBinding by value, so
     # every consumer needs those declarations. The dependency points this way
@@ -2352,10 +2369,9 @@ add_executable(badlands_ray_tests
     src/engine/tests/ray_tests.cpp
     src/engine/tests/game_camera_controller_tests.cpp
     src/engine/core/ray.cpp
-    src/engine/app/game_camera_controller.cpp
-    src/engine/app/orbit_camera_controller.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
+target_link_libraries(badlands_ray_tests PRIVATE badlands_camera)
 target_include_directories(badlands_ray_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/third_party/glm
