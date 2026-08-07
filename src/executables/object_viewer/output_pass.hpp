@@ -12,20 +12,22 @@
 //   authored for encoded-space blending and there is no flag that fixes that
 //   after the fact.
 //
-// So every pass draws into an offscreen target in ENCODED sRGB space, exactly
-// as it did when the surface was 8-bit, and this pass performs the one
-// conversion. The engine reached the same conclusion independently:
-// shaders/common/ui_composite.wesl composites in encoded space and
-// shaders/passes/tonemapping.wesl converts primaries only afterwards.
+// So the UI draws into its OWN overlay -- RGBA8Unorm, encoded, premultiplied --
+// while the scene target is RGBA16Float and LINEAR, and this pass tonemaps the
+// scene, composites the overlay over it, and converts once. The engine reached
+// the same arrangement independently: shaders/common/ui_composite.wesl
+// composites in encoded space and shaders/passes/tonemapping.wesl converts
+// primaries only afterwards.
 //
-// STAGE 4D changes the target's format to RGBA16Float and gives this pass the
-// tonemap. The conversion below does not change: a tonemap's job ends exactly
-// where this one begins.
+// The composite runs only where the overlay actually covers, and in LINEAR
+// space on an extended-range surface -- encoding clamps, so an encoded
+// composite destroyed the scene's headroom at any non-zero alpha.
 
 #include <memory>
 
 #include "engine/graph/render_graph.hpp"
 #include "engine/rhi/rhi_device.hpp"
+#include "engine/rhi/rhi_frame_allocator.hpp"
 #include "engine/slang/slang_compiler.hpp"
 
 namespace badlands::object_viewer {
@@ -59,17 +61,34 @@ class OutputPass {
   // and PREMULTIPLIED. `tonemap` applies the tone curve to the scene -- true for
   // a lit image, FALSE for a debug view, whose value is already display-referred
   // and would be silently re-graded by it.
+  // Recycles this frame's allocator slot. Call once per frame, after
+  // IRhiDevice::BeginFrame -- a SKIPPED frame still consumes its slot.
+  void BeginFrame(uint64_t frame_index);
+
   bool AddToGraph(graph::RenderGraph& graph, graph::ResourceHandle scene,
                   rhi::ITexture* scene_texture, graph::ResourceHandle ui,
                   rhi::ITexture* ui_texture, graph::ResourceHandle surface,
                   rhi::ColorSpace mode, bool tonemap);
+
+  // Where this frame's params landed. Same test hook as the other two passes.
+  uint32_t LastFrameOffset() const { return params_offset_; }
 
  private:
   rhi::IRhiDevice* device_ = nullptr;
   rhi::ShaderModulePtr vs_, fs_;
   rhi::RenderPipelinePtr pipeline_;
   rhi::SamplerPtr sampler_;
-  rhi::BufferPtr params_;
+  // A RING, like the visbuffer and resolve uniforms.
+  //
+  // This was a plain buffer written in place, under a comment claiming that
+  // writing only on CHANGE made it safe. It does not: it makes the race rare.
+  // Flipping the Graphics debug radio group changes `tonemap` mid-frame, and
+  // the memcpy then lands in bytes that two already-submitted frames are still
+  // reading -- so those frames present a lit image un-tonemapped, or a debug
+  // view Reinhard-compressed, for a frame or two.
+  std::unique_ptr<rhi::FrameAllocator> alloc_;
+  rhi::IBuffer* params_buffer_ = nullptr;
+  uint32_t params_offset_ = 0;
 
   // Rebuilt when the scene texture changes, which it does on every resize.
   // Cached rather than rebuilt per frame because a binding table is immutable
@@ -77,9 +96,7 @@ class OutputPass {
   rhi::BindingTablePtr table_;
   rhi::ITexture* table_scene_ = nullptr;
   rhi::ITexture* table_ui_ = nullptr;
-  rhi::ColorSpace written_mode_ = rhi::ColorSpace::Srgb;
-  bool written_tonemap_ = false;
-  bool params_written_ = false;
+  rhi::IBuffer* table_params_ = nullptr;
 };
 
 }  // namespace badlands::object_viewer

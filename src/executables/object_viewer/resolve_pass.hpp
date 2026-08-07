@@ -84,7 +84,9 @@ glm::vec3 SunDirection(const SunSettings& sun);
 class ResolvePass {
  public:
   // `target_format` must match the attachment this renders into -- the SCENE
-  // target, which is 8-bit encoded regardless of what is being presented.
+  // target, which is RGBA16Float and LINEAR regardless of what is being
+  // presented. The lit view therefore emits SCENE-REFERRED values that may
+  // exceed 1; the tonemap lives in the output pass.
   static std::unique_ptr<ResolvePass> Create(rhi::IRhiDevice& device,
                                              slang::SlangCompiler& compiler,
                                              const MaterialPack& pack,

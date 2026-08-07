@@ -72,30 +72,45 @@ float4 fs_output(VOut i) : SV_Target
     let hdr = scene.Load(px);
     let overlay = ui.Load(px);
 
-    // THE TONE CURVE IS A FIT TO THE DISPLAY'S RANGE, so an extended-range
-    // display needs none.
-    //
-    // Reinhard maps every input into [0,1) BY CONSTRUCTION -- x/(x+1) < 1 for
-    // all x -- so running it on the EDR path would destroy exactly the headroom
-    // the float target exists to carry, and the surface would never show a value
-    // above SDR white no matter how bright the scene. On an 8-bit surface the
-    // curve is what stops bright content clipping flat, so it stays there.
-    // shaders/passes/tonemapping.wesl reaches the same split.
-    //
-    // The flag is also OFF for every debug view, whose value is already
-    // display-referred: curving it would turn "roughness is 0.35" into a preview
-    // showing 0.26.
-    let extended = uint(params.mode.x) == kOutputExtendedLinearP3;
+    // The tone curve, decided by AppliesTonemap so the CPU oracles can predict
+    // the same thing. It is off on an extended-range surface (which needs no
+    // fit to a range it does not have) and off for every debug view (whose
+    // value is already display-referred -- curving it would turn "roughness is
+    // 0.35" into a preview showing 0.26).
+    let mode = uint(params.mode.x);
+    let scene_is_referred = params.mode.y > 0.5;
     var lin = hdr.rgb;
-    if (params.mode.y > 0.5 && !extended) { lin = lin / (lin + 1.0); }
+    if (AppliesTonemap(scene_is_referred, mode)) { lin = lin / (lin + 1.0); }
 
-    // Guarded, because the composite is what costs the headroom: encoding
-    // clamps, so a texel the UI does not cover must not go through it.
+    // THE COMPOSITE, IN THE SPACE THE SURFACE CAN ACTUALLY HOLD.
+    //
+    // On an 8-bit surface, encoded: that is what hardware blending would have
+    // done had the UI drawn straight onto it, and it is the space UI is
+    // authored for.
+    //
+    // On an extended-range surface, LINEAR -- because encoding CLAMPS. The
+    // encoded form guarded on `overlay.a > 0` and so destroyed the scene's
+    // headroom at ANY non-zero alpha: a 1/255 antialias fringe on a glyph edge
+    // crushed a scene value of 4.0 to 1.0 while the UI contributed 2% of the
+    // texel, drawing a hard dark ring around every window, separator, letter
+    // and debug line. Linear "over" never encodes, so the scene keeps its value
+    // scaled by coverage, and there is no 8-bit reference behaviour to match on
+    // a surface that has none.
+    //
+    // The overlay's OWN blending is untouched either way -- that already
+    // happened inside the 8-bit overlay, in encoded space.
     if (overlay.a > 0.0)
     {
-        let scene_enc = LinearToSrgb(clamp(lin, 0.0, 1.0));
-        lin = SrgbToLinear(CompositeUiOverEncoded(scene_enc, overlay));
+        if (OutputIsExtendedRange(mode))
+        {
+            lin = SrgbToLinear(overlay.rgb) + lin * (1.0 - overlay.a);
+        }
+        else
+        {
+            let scene_enc = LinearToSrgb(clamp(lin, 0.0, 1.0));
+            lin = SrgbToLinear(CompositeUiOverEncoded(scene_enc, overlay));
+        }
     }
 
-    return EncodeOutput(lin, 1.0, uint(params.mode.x));
+    return EncodeOutput(lin, 1.0, mode);
 }

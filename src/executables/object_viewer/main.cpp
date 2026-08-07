@@ -140,6 +140,16 @@ struct Options {
   // read/write race is invisible in an image, so it is asserted structurally.
   bool self_test_frame_ring = false;
 
+  // TEST SCAFFOLDING, not a scene. Draws the debug grid into the overlay ON TOP
+  // of the lit plane, which no user-facing scene does -- --scene plane is
+  // deliberately plane-only, and SceneHasLines keeps it that way for both the
+  // windowed and the headless path.
+  //
+  // The HDR self-test needs the one combination nothing else produces: a
+  // SCENE-REFERRED image above SDR white with a PARTIALLY-covering overlay over
+  // it. Without both, the composite's headroom behaviour cannot be observed.
+  bool force_overlay = false;
+
   // Sun intensity, so the lit oracle can turn the sun OFF and isolate the SH
   // ambient. Not a UI knob: with the sun at its default the ambient is a small
   // fraction of the result, and a wrong SH convention moved the centre texel by
@@ -557,8 +567,13 @@ rhi::TexturePtr MakeUiTarget(IRhiDevice& device, uint32_t w, uint32_t h) {
   return device.CreateTexture({.width = w,
                                .height = h,
                                .format = kUiFormat,
+                               // CopySrc so a headless run can read back WHAT
+                               // THE UI COVERED -- the two composites agree at
+                               // alpha 0 and 1 and differ only in between, so a
+                               // test cannot check either claim without it.
                                .usage = TextureUsage::RenderTarget |
-                                        TextureUsage::Sampled,
+                                        TextureUsage::Sampled |
+                                        TextureUsage::CopySrc,
                                .label = "ui"});
 }
 
@@ -632,6 +647,10 @@ float HalfToFloat(uint16_t h) {
 struct Frame {
   std::vector<float> rgba;  // width * height * 4
   uint32_t width = 0, height = 0;
+  // The UI overlay, read back alongside the sink. Needed because the two
+  // composites agree at alpha 0 and alpha 1 and differ only in between, so a
+  // test has to know which texels are partially covered.
+  std::vector<float> overlay;  // width * height * 4, encoded premultiplied
   // How many passes the graph compiled. Reported so a test can assert on the
   // SHAPE of the frame and not only its pixels -- which is how a stray pass
   // gets caught. The windowed path once added a debug-line pass to --scene
@@ -659,13 +678,17 @@ bool RenderOnce(IRhiDevice& device, const Options& opt, rhi::ColorSpace mode,
       {.size = uint64_t(opt.width) * opt.height * texel_bytes,
        .usage = BufferUsage::CopyDst | BufferUsage::MapRead,
        .label = "readback"});
-  if (!scene || !ui || !sink || !readback) return false;
+  auto ui_readback = device.CreateBuffer(
+      {.size = uint64_t(opt.width) * opt.height * 4,
+       .usage = BufferUsage::CopyDst | BufferUsage::MapRead,
+       .label = "ui_readback"});
+  if (!scene || !ui || !sink || !readback || !ui_readback) return false;
 
   auto output = OutputPass::Create(device, compiler, sink_format);
   if (!output) return false;
 
   std::unique_ptr<LinePass> lines;
-  if (SceneHasLines(opt.scene)) {
+  if (SceneHasLines(opt.scene) || opt.force_overlay) {
     // Targets the OVERLAY, which is 8-bit encoded -- not the scene, which is
     // linear float, and not the surface.
     lines = LinePass::Create(device, compiler, kUiFormat);
@@ -717,12 +740,15 @@ bool RenderOnce(IRhiDevice& device, const Options& opt, rhi::ColorSpace mode,
   // writes into it.
   if (vis) vis->BeginFrame(device.CurrentFrame());
   if (resolve) resolve->BeginFrame(device.CurrentFrame());
+  output->BeginFrame(device.CurrentFrame());
   if (lines) {
     lines->BeginFrame(device.CurrentFrame());
-    const Camera cam = CameraFor(opt.scene);
+    // The PLANE's camera when the plane chain is active, so the overlay lands
+    // over the lit geometry rather than somewhere else entirely.
+    const Camera cam = chain.Active() ? plane_cam : CameraFor(opt.scene);
     const float aspect = float(opt.width) / float(opt.height);
     const DebugLineBuffer buf =
-        opt.scene == Scene::Grid ? GridScene() : LineScene();
+        opt.scene == Scene::Lines ? LineScene() : GridScene();
     if (!lines->Upload(buf, cam.View(), cam.Proj(aspect),
                        {float(opt.width), float(opt.height)}, cam.position)) {
       return false;
@@ -746,6 +772,9 @@ bool RenderOnce(IRhiDevice& device, const Options& opt, rhi::ColorSpace mode,
   encoder->Transition(sink.get(), ResourceState::CopySrc);
   encoder->Transition(readback.get(), ResourceState::CopyDst);
   encoder->CopyTextureToBuffer(sink.get(), 0, 0, readback.get(), 0);
+  encoder->Transition(ui.get(), ResourceState::CopySrc);
+  encoder->Transition(ui_readback.get(), ResourceState::CopyDst);
+  encoder->CopyTextureToBuffer(ui.get(), 0, 0, ui_readback.get(), 0);
   encoder->Finish();
   device.Submit(*encoder);
   }  // the frame ends HERE, on every path out of the block above
@@ -761,6 +790,16 @@ bool RenderOnce(IRhiDevice& device, const Options& opt, rhi::ColorSpace mode,
   if (!readback->Read(0, raw)) {
     spdlog::error("object_viewer: readback failed");
     return false;
+  }
+
+  std::vector<uint8_t> ui_raw(size_t(opt.width) * opt.height * 4, 0);
+  if (!ui_readback->Read(0, ui_raw)) {
+    spdlog::error("object_viewer: overlay readback failed");
+    return false;
+  }
+  out.overlay.assign(ui_raw.size(), 0.0f);
+  for (size_t i = 0; i < ui_raw.size(); ++i) {
+    out.overlay[i] = float(ui_raw[i]) / 255.0f;
   }
 
   out.width = opt.width;
@@ -788,6 +827,34 @@ bool RenderOnce(IRhiDevice& device, const Options& opt, rhi::ColorSpace mode,
 // the two sinks would have blended in different spaces and only opaque pixels
 // would have been comparable.
 int RunOutputSelfTest(IRhiDevice& device, const Options& opt) {
+  // A TONE-MAPPED SCENE IS NOT COMPARABLE ACROSS THE TWO SINKS, by design: the
+  // curve is a fit to the display's range, so the 8-bit render is Reinhard-
+  // compressed and the float one deliberately is not. Comparing them would
+  // blame the output transform for the difference the curve exists to make.
+  //
+  // Refused rather than silently skipped: --self-test-output --scene plane
+  // otherwise reported a failure of a transform that is behaving correctly.
+  if (SceneNeedsTonemap(opt)) {
+    spdlog::error(
+        "object_viewer: --self-test-output compares the two sinks against each "
+        "other, which only holds where NEITHER is tone-mapped -- and a lit "
+        "plane is. Use a debug view, or a scene that is already "
+        "display-referred.");
+    return 1;
+  }
+  // AND NO OVERLAY. The two composites agree at alpha 0 and alpha 1 and differ
+  // BY DESIGN in between: linear on the extended-range path (which is what
+  // preserves the scene's headroom) and encoded on the 8-bit one. An antialias
+  // fringe is exactly the partial-alpha case, so a scene with debug lines makes
+  // this test fail on a difference that is correct.
+  if (SceneHasLines(opt.scene)) {
+    spdlog::error(
+        "object_viewer: --self-test-output needs a scene with no UI overlay -- "
+        "the two composites differ at PARTIAL alpha by design, and a line's "
+        "antialias fringe is exactly that. Use --scene plane with a debug "
+        "view.");
+    return 1;
+  }
   auto compiler = MakeCompiler();
   if (!compiler) return 1;
 
@@ -1013,11 +1080,15 @@ int RunPlaneVisbufferCheck(IRhiDevice& device, const Options& opt) {
       // Neighbouring triangles are one apart within a quad and 2/16 apart
       // across one, so an exact match is required in the interior and only the
       // ray/raster edge disagreement is tolerated.
-      if (int(prim) != want &&
-          PlaneTriangleUnderPixel(cam, x, y, opt.width, opt.height,
-                                  kHalfExtent) == want) {
-        // Re-checked at the same pixel: only fail if the oracle is stable, so a
-        // pixel exactly on an edge does not decide the test.
+      if (int(prim) != want) {
+        // The oracle must be STABLE around this pixel before a mismatch counts:
+        // a pixel whose centre falls on a triangle edge is one the ray and the
+        // rasterizer may legitimately assign differently.
+        //
+        // (This used to re-call PlaneTriangleUnderPixel with identical
+        // arguments and compare it to `want` -- which is that same call's
+        // result. A tautology, plus a per-pixel glm::inverse on the failure
+        // path.)
         const int l = PlaneTriangleUnderPixel(cam, x ? x - 1 : x, y, opt.width,
                                               opt.height, kHalfExtent);
         const int r = PlaneTriangleUnderPixel(cam, x + 1 < opt.width ? x + 1 : x,
@@ -1454,7 +1525,13 @@ int RunDebugViewCheck(IRhiDevice& device, const Options& opt) {
           byte01(kv.metallic), 1.0f, glm::vec3(0.0f),
           badlands::object_viewer::SunDirection(sun),
           sun.color * sun.intensity, sh);
-      const glm::vec3 mapped = lit / (lit + 1.0f);  // Reinhard, as the shader
+      // THROUGH THE SHARED PREDICATE, not unconditionally. The shader skips
+      // the curve on an extended-range surface, so an oracle that always
+      // applied it failed --present edr while accusing the ported BRDF.
+      const glm::vec3 mapped =
+          badlands::color::AppliesTonemap(true, ToCpuMode(local.present))
+              ? lit / (lit + 1.0f)
+              : lit;
       if (!agrees({badlands::color::LinearToSrgb(mapped.x),
                    badlands::color::LinearToSrgb(mapped.y),
                    badlands::color::LinearToSrgb(mapped.z)},
@@ -1480,7 +1557,10 @@ int RunDebugViewCheck(IRhiDevice& device, const Options& opt) {
             albedo_linear, N, V, byte01(kv.roughness), byte01(kv.ao),
             byte01(kv.metallic), 1.0f, glm::vec3(0.0f),
             badlands::object_viewer::SunDirection(sun), glm::vec3(0.0f), sh);
-        const glm::vec3 amb_mapped = amb / (amb + 1.0f);
+        const glm::vec3 amb_mapped =
+            badlands::color::AppliesTonemap(true, ToCpuMode(local.present))
+                ? amb / (amb + 1.0f)
+                : amb;
         const badlands::color::Rgb want = badlands::color::EncodeOutputFromSrgb(
             {badlands::color::LinearToSrgb(amb_mapped.x),
              badlands::color::LinearToSrgb(amb_mapped.y),
@@ -1657,6 +1737,54 @@ int RunHdrSelfTest(IRhiDevice& device, const Options& opt) {
   spdlog::info("object_viewer: EDR peak {:.3f} at sun 40, {:.3f} at sun 0.2",
                bright_peak, dim_peak);
 
+  // THE OVERLAY MUST NOT COST HEADROOM WHERE IT BARELY COVERS.
+  //
+  // Compositing in ENCODED space requires encoding the scene, and encoding
+  // CLAMPS -- so the guarded-on-any-alpha version destroyed a texel's entire
+  // HDR value for a 1/255 antialias fringe, drawing a hard dark ring around
+  // every ImGui window, letter and debug line on an HDR display. The extended
+  // -range path composites in linear instead, so the scene keeps its value
+  // scaled by coverage.
+  //
+  // Asserted at PARTIAL alpha specifically: the two composites agree at 0 and
+  // at 1, so a test that only looked at covered-or-not would pass either way.
+  {
+    Options with_ui = bright;
+    with_ui.force_overlay = true;  // the grid OVER the lit plane
+    Frame overlaid;
+    if (!RenderOnce(device, with_ui, with_ui.present, *compiler, overlaid)) {
+      return 1;
+    }
+    size_t partial = 0, kept_headroom = 0;
+    float worst = 0.0f;
+    for (size_t i = 0; i < overlaid.rgba.size(); i += 4) {
+      const float a = overlaid.overlay[i + 3];
+      if (a <= 0.0f || a >= 1.0f) continue;  // agree by construction
+      ++partial;
+      const float v = std::max({overlaid.rgba[i], overlaid.rgba[i + 1],
+                                overlaid.rgba[i + 2]});
+      if (v > 1.0f) ++kept_headroom;
+      worst = std::max(worst, v);
+    }
+    if (partial == 0) {
+      spdlog::error(
+          "object_viewer: no partially-covered texel in the overlay -- this "
+          "check would assert nothing about the case it exists for");
+      return 1;
+    }
+    if (kept_headroom == 0) {
+      spdlog::error(
+          "object_viewer: all {} partially-covered texels are at or below SDR "
+          "white (brightest {:.3f}) -- the overlay composite is clamping the "
+          "scene's headroom wherever the UI touches it at all",
+          partial, worst);
+      return 1;
+    }
+    spdlog::info(
+        "object_viewer: {} of {} partially-covered texels keep headroom "
+        "(brightest {:.3f})", kept_headroom, partial, worst);
+  }
+
   if (!(bright_peak > 1.0f)) {
     spdlog::error(
         "object_viewer: the brightest texel is {:.3f} -- nothing exceeds SDR "
@@ -1695,16 +1823,18 @@ int RunFrameRingSelfTest(IRhiDevice& device, const Options& opt) {
   auto vis = VisbufferPass::Create(device, *compiler, BuildPlaneMesh(),
                                    opt.width, opt.height);
   auto resolve = ResolvePass::Create(device, *compiler, *pack, kSceneFormat);
-  if (!vis || !resolve) return 1;
+  auto output = OutputPass::Create(device, *compiler, Format::RGBA8Unorm);
+  if (!vis || !resolve || !output) return 1;
 
   const Camera cam = CameraFor(Scene::Plane);
   const float aspect = float(opt.width) / float(opt.height);
 
-  std::vector<uint32_t> vis_offsets, resolve_offsets;
+  std::vector<uint32_t> vis_offsets, resolve_offsets, output_offsets;
   for (int i = 0; i < 3; ++i) {
     device.BeginFrame();
     vis->BeginFrame(device.CurrentFrame());
     resolve->BeginFrame(device.CurrentFrame());
+    output->BeginFrame(device.CurrentFrame());
     // A DIFFERENT camera each frame, because a ring that reuses one slot is
     // only observable when the CONTENTS differ -- which is exactly the case
     // that corrupts, and exactly what moving the camera produces.
@@ -1728,8 +1858,34 @@ int RunFrameRingSelfTest(IRhiDevice& device, const Options& opt) {
       device.EndFrame();
       return 1;
     }
+    // The output params too. Its value CHANGES per frame here (the tonemap
+    // flag alternates), which is exactly the case that used to race: the flag
+    // flips when the user picks a different debug view, and the write landed in
+    // bytes two submitted frames were still reading.
+    auto ui = MakeUiTarget(device, opt.width, opt.height);
+    auto sink = device.CreateTexture({.width = opt.width,
+                                      .height = opt.height,
+                                      .format = Format::RGBA8Unorm,
+                                      .usage = TextureUsage::RenderTarget,
+                                      .label = "ring_sink"});
+    if (!ui || !sink) { device.EndFrame(); return 1; }
+    auto ui_h = graph.ImportTexture(ui.get(), ResourceState::Undefined, "ui");
+    auto sink_h =
+        graph.ImportTexture(sink.get(), ResourceState::Undefined, "sink");
+    const float transparent[4] = {0, 0, 0, 0};
+    graph.AddRasterPass("ui_clear")
+        .ColorTarget(ui_h, LoadOp::Clear, StoreOp::Store, transparent)
+        .Execute([](const RasterContext&) {});
+    if (!ui_h.IsValid() || !sink_h.IsValid() ||
+        !output->AddToGraph(graph, scene_h, scene.get(), ui_h, ui.get(),
+                            sink_h, rhi::ColorSpace::DisplayP3, i % 2 == 0)) {
+      device.EndFrame();
+      return 1;
+    }
+
     vis_offsets.push_back(vis->LastFrameOffset());
     resolve_offsets.push_back(resolve->LastFrameOffset());
+    output_offsets.push_back(output->LastFrameOffset());
     device.EndFrame();
   }
   device.WaitIdle();
@@ -1751,11 +1907,13 @@ int RunFrameRingSelfTest(IRhiDevice& device, const Options& opt) {
   };
   if (!distinct(vis_offsets, "visbuffer")) return 1;
   if (!distinct(resolve_offsets, "resolve")) return 1;
+  if (!distinct(output_offsets, "output params")) return 1;
   spdlog::info(
       "object_viewer: 3 frames used distinct ring offsets -- visbuffer {} {} "
-      "{}, resolve {} {} {}",
+      "{}, resolve {} {} {}, output {} {} {}",
       vis_offsets[0], vis_offsets[1], vis_offsets[2], resolve_offsets[0],
-      resolve_offsets[1], resolve_offsets[2]);
+      resolve_offsets[1], resolve_offsets[2], output_offsets[0],
+      output_offsets[1], output_offsets[2]);
   return 0;
 }
 
@@ -1907,18 +2065,27 @@ int RunHeadless(IRhiDevice& device, const Options& opt) {
                         p[3] == 255;
       if (core) continue;
       found_fringe = true;
-      if (p[3] != 255) {
+      // THE COLOUR, not the alpha.
+      //
+      // There used to be an `alpha != 255` check here, described as the one
+      // place blending was observable. It is dead twice over: the output pass
+      // writes alpha 1.0 unconditionally, so the sink's alpha is always 255 --
+      // and the overlay is cleared TRANSPARENT, so a single premultiplied draw
+      // with blending disabled writes exactly what blending would have
+      // produced. Only OVERLAPPING draws distinguish the two, which is why the
+      // overlay's blend state is asserted in imgui_rhi_tests instead.
+      //
+      // What this checks is narrower and still worth having: that a fringe
+      // EXISTS and is a gradient between the background and the core, which is
+      // what catches the alpha ramp regressing to a hard edge.
+      const bool between_bg_and_core =
+          p[0] > want[0] && p[0] < core_want[0];
+      if (!between_bg_and_core) {
         spdlog::error(
-            "object_viewer: fringe texel at y={} has alpha {} -- the shader's "
-            "alpha reached the target unblended",
-            y, p[3]);
-        return 1;
-      }
-      if (p[0] <= want[0] || p[0] >= 255) {
-        spdlog::error(
-            "object_viewer: fringe texel at y={} is rgba({},{},{},{}), not a "
-            "blend of the line colour and the clear colour",
-            y, p[0], p[1], p[2], p[3]);
+            "object_viewer: fringe texel at y={} is rgba({},{},{},{}), which is "
+            "not between the background red {} and the line's core red {} -- "
+            "it is not a blend of the two",
+            y, p[0], p[1], p[2], p[3], want[0], core_want[0]);
         return 1;
       }
     }
@@ -2126,6 +2293,7 @@ int RunWindowed(IRhiDevice& device, const Options& opt) {
     if (lines) lines->BeginFrame(frame_index);
     if (vis) vis->BeginFrame(frame_index);
     if (resolve) resolve->BeginFrame(frame_index);
+    output->BeginFrame(frame_index);
     ImGui_ImplRHI_NewFrame(frame_index);
   };
   cb.OnRender = [&](ITextureView* target, const rhi_app::FrameInfo& f) {

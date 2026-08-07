@@ -60,12 +60,16 @@ std::unique_ptr<OutputPass> OutputPass::Create(IRhiDevice& device,
                                          .address_u = AddressMode::ClampToEdge,
                                          .address_v = AddressMode::ClampToEdge,
                                          .label = "output"});
-  pass->params_ = device.CreateBuffer(
-      {.size = sizeof(OutputParamsUniform),
-       .usage = BufferUsage::Uniform | BufferUsage::CopyDst,
-       .label = "output_params"});
-  if (!pass->sampler_ || !pass->params_) return nullptr;
+  pass->alloc_ = FrameAllocator::Create(
+      device, {.block_size = 64 * 1024,
+               .usage = BufferUsage::Uniform,
+               .label = "output_params"});
+  if (!pass->sampler_ || !pass->alloc_) return nullptr;
   return pass;
+}
+
+void OutputPass::BeginFrame(uint64_t frame_index) {
+  alloc_->BeginFrame(frame_index);
 }
 
 bool OutputPass::AddToGraph(graph::RenderGraph& graph,
@@ -80,29 +84,34 @@ bool OutputPass::AddToGraph(graph::RenderGraph& graph,
     return false;
   }
 
-  // Written only when it CHANGES. A per-frame write of an unchanged 16 bytes is
-  // a copy the frame does not need, and worse, it is a write to a buffer a
-  // frame still in flight may be reading.
-  if (mode != written_mode_ || tonemap != written_tonemap_ || !params_written_) {
-    OutputParamsUniform p;
-    p.mode[0] = float(uint8_t(mode));
-    p.mode[1] = tonemap ? 1.0f : 0.0f;
-    params_->Write(0, {reinterpret_cast<const uint8_t*>(&p), sizeof(p)});
-    written_mode_ = mode;
-    written_tonemap_ = tonemap;
-    params_written_ = true;
+  // WRITTEN EVERY FRAME, into this frame's own slice. Writing only on change
+  // was the previous arrangement, and it did not remove the race -- it only
+  // made it fire on the frame the user changed something, which is the worst
+  // possible timing for a visible artifact.
+  OutputParamsUniform p;
+  p.mode[0] = float(uint8_t(mode));
+  p.mode[1] = tonemap ? 1.0f : 0.0f;
+  auto slice = alloc_->Write({reinterpret_cast<const uint8_t*>(&p), sizeof(p)});
+  if (!slice) {
+    spdlog::error("object_viewer: could not allocate the output params");
+    return false;
   }
+  params_offset_ = uint32_t(slice->offset);
+  params_buffer_ = slice->buffer;
 
   // The scene texture is recreated on every resize, and a binding table is
   // immutable -- so a table built against the old one would sample a destroyed
   // texture. Keyed on the pointer rather than rebuilt per frame, because
   // rebuilding per frame is the record-path allocation rule 11 bans.
-  if (table_scene_ != scene_texture || table_ui_ != ui_texture || !table_) {
+  if (table_scene_ != scene_texture || table_ui_ != ui_texture ||
+      table_params_ != params_buffer_ || !table_) {
     auto table = device_->CreateBindingTable(
         {.render_pipeline = pipeline_.get(),
          .entries = {{.slot = kParamsSlot,
                       .kind = BindingKind::UniformBuffer,
-                      .buffer = params_.get()},
+                      .buffer = params_buffer_,
+                      // The ring moves the params every frame.
+                      .dynamic_offset = true},
                      {.slot = kSceneSlot,
                       .kind = BindingKind::SampledTexture,
                       .texture_view = scene_texture->GetDefaultView()},
@@ -117,6 +126,7 @@ bool OutputPass::AddToGraph(graph::RenderGraph& graph,
     table_ = std::move(table);
     table_scene_ = scene_texture;
     table_ui_ = ui_texture;
+    table_params_ = params_buffer_;
   }
 
   // Declared to the graph, not just bound. Every resource a table names needs a
@@ -124,7 +134,8 @@ bool OutputPass::AddToGraph(graph::RenderGraph& graph,
   // uniform buffer is written by the CPU outside any pass, so Undefined is its
   // honest entry state.
   auto params_h =
-      graph.ImportBuffer(params_.get(), ResourceState::Undefined, "output_params");
+      graph.ImportBuffer(params_buffer_, ResourceState::Undefined,
+                         "output_params");
   if (!params_h.IsValid()) return false;
 
   graph.AddRasterPass("output")
@@ -133,8 +144,9 @@ bool OutputPass::AddToGraph(graph::RenderGraph& graph,
       .Reads(ui)
       .Reads(params_h)
       .Execute([this](const graph::RasterContext& ctx) {
+        const uint32_t offsets[1] = {params_offset_};
         ctx.pass->SetPipeline(pipeline_.get());
-        ctx.pass->SetBindingTable(0, table_.get(), {});
+        ctx.pass->SetBindingTable(0, table_.get(), offsets);
         ctx.pass->Draw(3);  // one fullscreen triangle
       });
   return true;

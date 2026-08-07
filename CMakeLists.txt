@@ -1705,13 +1705,33 @@ if(APPLE)
     # THE TWO-SINK TEST: the whole HDR/LDR rule in one check, and the only one
     # that can fail for the right reason on a machine with no HDR display. The
     # same frame goes into an 8-bit Display-P3 sink and a float extended-linear
-    # one; both derive from the same encoded scene target, so every texel must
-    # agree through the transform -- blended ones included, which is what the
-    # offscreen-target design bought.
+    # one and every texel must agree through the transform.
+    #
+    # ON THE RESOLVED PLANE, not the line scene. The two sinks are comparable
+    # only where NEITHER is tone-mapped and NOTHING overlays: the tone curve is
+    # deliberately absent on the extended-range path, and the overlay composite
+    # is deliberately linear there, so a lit scene or an antialias fringe makes
+    # them differ correctly. A debug view over the plane is neither, and gives
+    # far richer content than a single red segment. The run REFUSES either
+    # unsuitable combination rather than failing on a difference that is right.
     add_test(NAME object_viewer_two_sink
+             COMMAND badlands_object_viewer --self-test-output --scene plane
+                     --debug-view triangle-id --width 128 --height 96
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+    # ...and the refusals themselves, so the guards cannot rot into no-ops.
+    add_test(NAME object_viewer_two_sink_refuses_tonemapped
+             COMMAND badlands_object_viewer --self-test-output --scene plane
+                     --debug-view lit --width 64 --height 64
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    set_tests_properties(object_viewer_two_sink_refuses_tonemapped
+                         PROPERTIES WILL_FAIL TRUE)
+    add_test(NAME object_viewer_two_sink_refuses_overlay
              COMMAND badlands_object_viewer --self-test-output --scene lines
                      --width 64 --height 64
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    set_tests_properties(object_viewer_two_sink_refuses_overlay
+                         PROPERTIES WILL_FAIL TRUE)
 
     # The VISIBILITY BUFFER, asserted with no resolve at all: the R32Uint target
     # is read back and every covered texel compared against a CPU ray/plane

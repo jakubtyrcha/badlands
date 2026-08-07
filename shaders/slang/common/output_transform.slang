@@ -21,6 +21,30 @@ public static const uint kOutputSrgb = 0u;
 public static const uint kOutputDisplayP3 = 1u;
 public static const uint kOutputExtendedLinearP3 = 2u;
 
+// True when a surface can carry values above 1. The one predicate behind both
+// mode-dependent decisions below, so they cannot disagree about which surface
+// they are writing to.
+public bool OutputIsExtendedRange(uint mode)
+{
+    return mode == kOutputExtendedLinearP3;
+}
+
+// Does the tone curve run?
+//
+// A tone curve is a FIT TO THE DISPLAY'S RANGE, so an extended-range display
+// needs none -- and Reinhard in particular maps every input into [0,1) by
+// construction, so running it there would destroy exactly the headroom the
+// float target exists to carry.
+//
+// SHARED WITH THE CPU (badlands::color::AppliesTonemap) because the headless
+// oracles have to predict it. When only the shader knew, the lit oracle kept
+// applying Reinhard under --present edr and failed the run while accusing the
+// ported BRDF -- the one assertion whose whole job is to be trustworthy.
+public bool AppliesTonemap(bool scene_is_referred, uint mode)
+{
+    return scene_is_referred && !OutputIsExtendedRange(mode);
+}
+
 // The IEC 61966-2-1 curve, not the 2.2 power approximation. Display P3 reuses
 // it exactly, which is why an 8-bit surface changes gamut without changing
 // encoding -- and why one function serves both 8-bit modes.

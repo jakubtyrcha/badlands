@@ -55,10 +55,19 @@ would pass just as well against a graph that recorded no pass at all.
 - **`--scene clear|lines|grid|plane`, and each scene carries its OWN assertion.** "Every
   texel is the clear colour" and "a segment covers these texels" are different claims; a run
   that could not say which it checked would be checking neither.
-- **Every pass draws into an offscreen SCENE target in encoded sRGB; ONE output pass
-  converts to the surface.** Alpha blending happens in the target's space, so ImGui drawn
-  straight into an extended-linear EDR surface blends in linear and washes out every
-  translucent panel. The engine reached the same conclusion in `common/ui_composite.wesl`.
+- **THREE targets, and the split is the design.** `scene` is RGBA16Float and LINEAR, so
+  lighting keeps its headroom; `ui` is RGBA8Unorm, ENCODED and PREMULTIPLIED, because that
+  is the space UI blending is authored for; one output pass tonemaps, composites and
+  converts. Drawing ImGui straight into a linear surface lands a 50%-alpha panel at encoded
+  0.735 instead of 0.5. The engine reached the same arrangement in `common/ui_composite.wesl`.
+- **The overlay composite is LINEAR on an extended-range surface and ENCODED on an 8-bit
+  one.** Encoding clamps, so the encoded form destroyed the scene's headroom at ANY
+  non-zero alpha — a 1/255 glyph fringe drew a dark ring around every window on an HDR
+  display. The two agree at alpha 0 and 1 and differ only in between, which is why
+  `--self-test-output` refuses a scene with an overlay.
+- **The tone curve is a fit to the display's range, so the EDR path has none.** Reinhard
+  maps every input into [0,1) by construction. `AppliesTonemap` is shared by the shader and
+  the CPU oracles so they cannot disagree about it.
 - **`--present srgb|p3|edr`** picks the surface's colour space (`edr` also makes the sink
   `RGBA16Float`, which is how the extended-range path is reachable with no HDR display).
   Windowed asks for P3 and upgrades to EDR when the display reports HDR.

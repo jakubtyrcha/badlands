@@ -1153,6 +1153,19 @@ inline void CheckUntaggedExtendedRangeSurfaceIsRefused(IRhiDevice& device) {
        .color_space = ColorSpace::Srgb,
        .label = "untagged_float"});
   CHECK(sc == nullptr);
+
+  // AND THE MIRROR IMAGE. An 8-bit surface tagged extended-linear has the
+  // compositor read sRGB-encoded bytes as linear intensities -- wrong in the
+  // same way and for the same reason, and the validator originally checked only
+  // one direction.
+  auto linear_8bit = device.CreateSwapchain(
+      {.native_window = &not_a_window,
+       .width = 32,
+       .height = 32,
+       .format = Format::BGRA8Unorm,
+       .color_space = ColorSpace::ExtendedLinearDisplayP3,
+       .label = "linear_8bit"});
+  CHECK(linear_8bit == nullptr);
 }
 
 // A swapchain's FORMAT is fixed once it has been reported. Resize may re-tag

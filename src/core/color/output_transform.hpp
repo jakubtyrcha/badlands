@@ -69,6 +69,31 @@ inline Rgb LinearSrgbToLinearP3(Rgb c) {
           0.0170826307f * c.r + 0.0723974406f * c.g + 0.9105199285f * c.b};
 }
 
+// True when a surface can carry values above 1. Mirrors
+// OutputIsExtendedRange in shaders/slang/common/output_transform.slang.
+inline bool OutputIsExtendedRange(OutputMode mode) {
+  return mode == OutputMode::ExtendedLinearP3;
+}
+
+// Does the tone curve run? Mirrors AppliesTonemap in the Slang module.
+//
+// SHARED BECAUSE THE ORACLES HAVE TO PREDICT IT. When only the shader knew,
+// the lit oracle applied Reinhard unconditionally and failed under
+// `--present edr` while accusing the ported BRDF -- the one assertion whose
+// whole job is to be trustworthy -- and the two-sink test compared a
+// tone-curved 8-bit render against an uncurved float one and blamed the output
+// transform for a defect that did not exist.
+inline bool AppliesTonemap(bool scene_is_referred, OutputMode mode) {
+  return scene_is_referred && !OutputIsExtendedRange(mode);
+}
+
+// Reinhard, matching fs_output. Here so a caller cannot apply a different
+// curve than the shader does and call the difference a failure.
+inline Rgb Tonemap(Rgb linear) {
+  return {linear.r / (linear.r + 1.0f), linear.g / (linear.g + 1.0f),
+          linear.b / (linear.b + 1.0f)};
+}
+
 // `linear_display` is display-referred and LINEAR, in sRGB primaries.
 inline Rgb EncodeOutput(Rgb linear_display, OutputMode mode) {
   if (mode == OutputMode::ExtendedLinearP3) {
@@ -134,22 +159,19 @@ inline uint8_t ToByte(float v) {
   return uint8_t(std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f));
 }
 
-// What an 8-bit sink holds for a colour authored as `srgb_encoded`, INCLUDING
-// the scene target's own quantization -- the value passes through 8 bits twice
-// on this path, and an oracle that quantized once would be off by an LSB in
-// exactly the places a tolerance is meant to be catching real errors.
+// What an 8-bit sink holds for a colour authored as `srgb_encoded`.
 //
-// Stage 4d makes the scene target float and the first quantization disappears;
-// this function is where that change gets noticed.
+// ONE QUANTIZATION, at the sink. The scene target is RGBA16Float, so the value
+// no longer passes through 8 bits on the way -- this used to pre-quantize to
+// model a scene target that was 8-bit, which after the float change put the
+// oracle an LSB out in exactly the places a tolerance is meant to be catching
+// real errors.
 struct Rgba8 {
   uint8_t r = 0, g = 0, b = 0, a = 255;
 };
 
 inline Rgba8 ExpectedSinkByte(Rgb authored_srgb, float alpha, OutputMode mode) {
-  const Rgb quantized{float(ToByte(authored_srgb.r)) / 255.0f,
-                      float(ToByte(authored_srgb.g)) / 255.0f,
-                      float(ToByte(authored_srgb.b)) / 255.0f};
-  const Rgb out = EncodeOutputFromSrgb(quantized, mode);
+  const Rgb out = EncodeOutputFromSrgb(authored_srgb, mode);
   return {ToByte(out.r), ToByte(out.g), ToByte(out.b), ToByte(alpha)};
 }
 

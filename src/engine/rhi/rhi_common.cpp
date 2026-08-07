@@ -88,6 +88,21 @@ bool ValidateSwapchainDesc(const SwapchainDesc& d) {
         d.label, ToString(d.format), ToString(d.color_space));
     return false;
   }
+  // THE MIRROR IMAGE, and just as wrong. An 8-bit surface holds sRGB-ENCODED
+  // bytes; tagging it extended-LINEAR tells the compositor to read those bytes
+  // as linear intensities and turns on EDR for a format that cannot carry it.
+  // The result is a visibly wrong image with no diagnostic anywhere, which is
+  // exactly what the other direction was refused for.
+  if (!IsExtendedRangeFormat(d.format) &&
+      d.color_space == ColorSpace::ExtendedLinearDisplayP3) {
+    spdlog::error(
+        "rhi: swapchain '{}' asks for colour space {} with format {} -- an "
+        "8-bit surface holds encoded bytes, so tagging it extended-linear "
+        "would have the compositor read them as linear. Use DisplayP3, or a "
+        "float format.",
+        d.label, ToString(d.color_space), ToString(d.format));
+    return false;
+  }
   return true;
 }
 
