@@ -35,6 +35,19 @@ public struct ResolveFrame {
     public float4 sun_direction;  // xyz, normalized, pointing TOWARD the sun
     public float4 sun_color;      // rgb, already scaled by intensity
     public float4 params;         // x = debug view, y = near, z = far
+    // x = prefiltered mip count, y = environment intensity, z = 1 when the IBL
+    // textures hold a real environment. z EXISTS BECAUSE A BINDING CANNOT BE
+    // ABSENT: the table always names a cube, so without a flag a 1x1 dummy and
+    // a real environment are indistinguishable and the viewer would silently
+    // light everything with black.
+    public float4 ibl;
+    // The frustum basis: forward at the centre, plus the half-extents at the
+    // near plane. THREE VECTORS RATHER THAN AN INVERSE VIEW-PROJECTION, because
+    // this pass deliberately has no matrix inverse (see the header) and the
+    // background only needs a direction, not a world position.
+    public float4 ray_forward;
+    public float4 ray_right;
+    public float4 ray_up;
     public float4 ambient_sh[9];  // L2 SH, ENGINE convention (pre-convolved)
 }
 
@@ -62,6 +75,17 @@ Texture2D<float4> normal_map;
 Texture2D<float4> arm_map;        // R = AO, G = roughness, B = metallic
 Texture2D<float4> disp_map;
 SamplerState material_sampler;
+TextureCube<float4> prefiltered_env;
+Texture2D<float2> brdf_lut;
+SamplerState ibl_sampler;
+
+// The view ray through a pixel, from the frustum basis. `uv` is the VOut's,
+// which runs 0 at the TOP -- so the vertical NDC is 1 - 2*uv.y.
+float3 BackgroundRay(float2 uv) {
+    return frame.ray_forward.xyz + frame.ray_right.xyz * (uv.x * 2.0 - 1.0) +
+           frame.ray_up.xyz * (1.0 - uv.y * 2.0);
+}
+
 
 struct VOut {
     float4 pos : SV_Position;
@@ -166,8 +190,21 @@ float4 fs_resolve(VOut i) : SV_Target
     let px = int2(int(i.uv.x * float(w)), int(i.uv.y * float(h)));
     let packed = visbuffer.Load(int3(px, 0));
 
-    // The background, as the linear equivalent of its code value.
+    // THE BACKGROUND, and it is view-dependent in exactly one direction.
+    //
+    // Under Lit it is the environment along the view ray, so what lights the
+    // spheres is visible behind them. Under every OTHER view it stays the flat
+    // constant it has always been -- the nine debug-view oracles assert on that
+    // background, and sampling the environment there would silently change what
+    // nine existing tests mean.
     if (packed == kVisEmpty) {
+        if (uint(frame.params.x) == kViewLit && frame.ibl.z > 0.5) {
+            // Mip 0: the SOURCE environment, not a roughness-convolved level.
+            // The sky is what it is; only a surface reflecting it is blurred.
+            let dir = normalize(BackgroundRay(i.uv));
+            let env = prefiltered_env.SampleLevel(ibl_sampler, dir, 0.0).rgb;
+            return float4(env * frame.ibl.y, 1.0);
+        }
         return float4(SrgbToLinear(float3(0.05, 0.06, 0.09)), 1.0);
     }
 
@@ -273,11 +310,35 @@ float4 fs_resolve(VOut i) : SV_Target
     if (view == kViewDisplacement) { return float4(SrgbToLinear(float3(disp.r)), 1.0); }
     if (view == kViewAo) { return float4(SrgbToLinear(float3(ao)), 1.0); }
 
-    // Lit. shadow = 1 and ambientSpecular = 0: no shadow maps and no IBL in
-    // this stage, and the parameters stay so the port matches its WESL original
-    // line for line.
+    // THE SPLIT SUM. The prefiltered cube supplies the pre-integrated incoming
+    // radiance for this roughness; the LUT supplies the BRDF's scale and bias
+    // for this angle. Multiplying them is the whole approximation.
+    //
+    // LINEAR MIP PARAMETERIZATION, matching PrefilteredCube::MipForRoughness
+    // exactly -- alpha = roughness^2 belongs inside the GGX distribution during
+    // prefiltering, not here. Asking for roughness^2 against a linearly
+    // convolved chain reads as everything being uniformly too sharp.
+    float3 ambientSpecular = float3(0.0);
+    if (frame.ibl.z > 0.5) {
+        let F0 = lerp(kF0Dielectric, albedo_srgb.rgb, metallic);
+        let R = reflect(-V, N);
+        let lod = roughness * max(frame.ibl.x - 1.0, 0.0);
+        let radiance =
+            prefiltered_env.SampleLevel(ibl_sampler, R, lod).rgb * frame.ibl.y;
+        let ab = brdf_lut.SampleLevel(ibl_sampler,
+                                      float2(max(dot(N, V), 0.0), roughness), 0.0);
+        // Specular occlusion keeps ambient specular out of AO cracks, which is
+        // what ComputeSpecularOcclusion exists for and why it is applied here
+        // rather than folded into ao above.
+        ambientSpecular = radiance * (F0 * ab.x + ab.y) *
+                          ComputeSpecularOcclusion(max(dot(N, V), 0.0), ao, roughness);
+    }
+
+    // Lit. shadow = 1: no shadow maps in this stage, and the parameter stays so
+    // it can be filled in without touching ShadeStandard's signature -- which
+    // is exactly how ambientSpecular arrived.
     let lit = ShadeStandard(albedo_srgb.rgb, N, V, roughness, ao, metallic,
-                            1.0, float3(0.0), frame.sun_direction.xyz,
+                            1.0, ambientSpecular, frame.sun_direction.xyz,
                             frame.sun_color.rgb, frame.ambient_sh);
     // SCENE-REFERRED and unclamped. The tonemap belongs to the output pass --
     // putting it here would clamp the headroom before anything could use it,

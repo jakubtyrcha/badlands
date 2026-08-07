@@ -1803,9 +1803,15 @@ if(APPLE)
     foreach(view lit triangle-id barycentric depth albedo normal
                  roughness metallic displacement ao)
         string(REPLACE "-" "_" view_name "${view}")
+        # --env none, and it matters for exactly one of the ten. The lit view's
+        # oracle is a CPU port of ShadeStandard that passes ambientSpecular = 0,
+        # so it asserts the DIRECT lighting exactly; matching an environment
+        # would mean porting the split sum to the CPU, which is a second
+        # implementation of the thing under test. IBL gets its own assertion
+        # (the white furnace), where the answer is a closed form.
         add_test(NAME object_viewer_view_${view_name}
                  COMMAND badlands_object_viewer --headless --debug-view ${view}
-                         --width 256 --height 192
+                         --env none --width 256 --height 192
                          --out ${CMAKE_BINARY_DIR}/ov_view_${view_name}.png
                  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     endforeach()

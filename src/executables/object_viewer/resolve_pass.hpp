@@ -62,9 +62,23 @@ struct ResolveFrameUniform {
   glm::vec4 sun_direction{0.0f, 1.0f, 0.0f, 0.0f};
   glm::vec4 sun_color{1.0f};
   glm::vec4 params{0.0f};  // x = debug view, y = near, z = far
+  // x = prefiltered mip count, y = environment intensity, z = 1 when the IBL
+  // textures hold a real environment.
+  //
+  // z EXISTS BECAUSE A BINDING CANNOT BE ABSENT. The table always names a cube,
+  // so a 1x1 dummy and a real environment are indistinguishable to the shader;
+  // without the flag the viewer would light everything with black and look
+  // merely dark rather than broken.
+  glm::vec4 ibl{5.0f, 1.0f, 0.0f, 0.0f};
+  // The frustum basis the background ray is built from. Three vectors rather
+  // than an inverse view-projection, because the resolve deliberately has no
+  // matrix inverse and a background needs a direction, not a position.
+  glm::vec4 ray_forward{0.0f, 0.0f, -1.0f, 0.0f};
+  glm::vec4 ray_right{1.0f, 0.0f, 0.0f, 0.0f};
+  glm::vec4 ray_up{0.0f, 1.0f, 0.0f, 0.0f};
   glm::vec4 ambient_sh[9]{};
 };
-static_assert(sizeof(ResolveFrameUniform) == 64 + 16 * 4 + 16 * 9);
+static_assert(sizeof(ResolveFrameUniform) == 64 + 16 * 8 + 16 * 9);
 
 // What the Scene lighting window drives. Angles rather than a vector, because
 // that is what the window exposes and a vector would have to be re-derived from
@@ -100,6 +114,17 @@ class ResolvePass {
                  glm::vec3 camera_world_pos, float near_m, float far_m);
   void SetSun(const SunSettings& sun);
   void SetAmbient(const glm::vec4 sh[9]);
+
+  // The IBL chain this frame samples. Passing null for either texture CLEARS
+  // the flag rather than leaving a stale one set -- a resolve pointed at a
+  // destroyed cube is worse than one with no environment at all.
+  void SetEnvironment(rhi::ITextureView* prefiltered, uint32_t mip_count,
+                      rhi::ITextureView* brdf_lut, float intensity);
+
+  // The camera basis the background ray uses. Separate from SetCamera because
+  // the viewer's Camera carries the projection parameters and this pass does
+  // not -- deriving it here would need a second copy of the fov and aspect.
+  void SetViewRays(glm::vec3 forward, glm::vec3 right, glm::vec3 up);
   void SetView(DebugView view) { view_ = view; }
   DebugView View() const { return view_; }
 
@@ -134,6 +159,13 @@ class ResolvePass {
   // raster that produced the visibility buffer it is reading.
   std::unique_ptr<rhi::FrameAllocator> alloc_;
   rhi::BindingTablePtr table_;
+  rhi::SamplerPtr ibl_sampler_;
+  // The 1x1 stand-ins bound when there is no environment. A table entry cannot
+  // be empty, and binding a destroyed view is a validation error -- so "no IBL"
+  // is a real (tiny) texture plus the flag above, not a missing binding.
+  rhi::TexturePtr dummy_cube_, dummy_lut_;
+  rhi::ITextureView* env_view_ = nullptr;
+  rhi::ITextureView* lut_view_ = nullptr;
   rhi::ITexture* table_visbuffer_ = nullptr;
   rhi::IBuffer* table_frame_buffer_ = nullptr;
   rhi::IBuffer* frame_buffer_ = nullptr;

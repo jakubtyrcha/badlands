@@ -38,6 +38,8 @@
 #include "executables/object_viewer/material_pack.hpp"
 #include "executables/object_viewer/plane_mesh.hpp"
 #include "executables/object_viewer/sphere_grid.hpp"
+#include "engine/ibl/environment.hpp"
+#include "engine/ibl/prefiltered_cube.hpp"
 #include "executables/object_viewer/resolve_pass.hpp"
 #include "executables/object_viewer/shading_cpu.hpp"
 #include "executables/object_viewer/visbuffer_pass.hpp"
@@ -66,6 +68,7 @@ using badlands::object_viewer::MakeConstantPack;
 using badlands::object_viewer::MakeCheckerPack;
 using badlands::color::OutputMode;
 namespace cpu = badlands::object_viewer::cpu;
+namespace ibl = badlands::ibl;
 
 namespace {
 
@@ -83,6 +86,11 @@ struct Options {
   // survives an ImGui panel holding keyboard focus, which is what broke it.
   bool self_test_escape = false;
   Scene scene = Scene::Clear;
+  // Empty means the procedural sky. A PATH is a Radiance .hdr, and a file that
+  // cannot be decoded is a refusal rather than a silent fall back to the sky.
+  std::string env_path;
+  bool env_none = false;
+  float env_intensity = 1.0f;
   uint32_t width = 1280;
   uint32_t height = 720;
   std::string out = "object_viewer.png";
@@ -255,6 +263,17 @@ bool ParseArgs(int argc, char** argv, Options& opt) {
       if (!value(v)) return false;
       opt.pack = v;
       opt.pack_explicit = true;
+    } else if (a == "--env") {
+      if (!value(v)) return false;
+      // "none" is a MODE, not a filename. The direct-lighting oracle needs a
+      // frame with no ambient specular at all -- its CPU port of ShadeStandard
+      // passes ambientSpecular = 0, and porting the split sum to the CPU to
+      // match would be a second implementation of the thing under test.
+      // Spelling it out beats an intensity of 0, which would reach the same
+      // number by coincidence and leave the background sampling an environment
+      // the run says it does not have.
+      opt.env_path = v;
+      opt.env_none = std::strcmp(v, "none") == 0;
     } else if (a == "--near-plane-camera") {
       opt.near_plane_camera = true;
     } else if (a == "--self-test-frame-ring") {
@@ -394,6 +413,20 @@ Camera SphereCamera(float aspect) {
   return cam;
 }
 
+// The frustum basis the resolve's background ray is built from.
+//
+// Derived from the camera rather than stored on it, so a camera the app moves
+// cannot get out of step with the rays -- and both the headless and the
+// windowed path call this rather than each deriving its own.
+void ApplyViewRays(ResolvePass& resolve, const Camera& cam, float aspect) {
+  const glm::vec3 forward = cam.Forward();
+  const glm::vec3 right =
+      glm::normalize(glm::cross(forward, glm::vec3(0, 1, 0)));
+  const glm::vec3 up = glm::cross(right, forward);
+  const float half = std::tan(glm::radians(cam.fov_deg) * 0.5f);
+  resolve.SetViewRays(forward, right * half * aspect, up * half);
+}
+
 // The camera each scene is asserted under. The line scene MUST stay unrotated:
 // its assertion is a closed form ("half the width, middle row"), and that only
 // holds looking straight down -Z.
@@ -495,6 +528,67 @@ bool SceneHasLines(Scene scene) {
 // `== Scene::Plane` repeated at six call sites, because that is exactly the
 // shape that got the windowed path drawing a different scene from the one the
 // assertions covered once before (see SceneHasLines).
+// The IBL chain, and the one place that knows how to rebuild it.
+//
+// REBUILT ONLY ON DEMAND. Baking the cube is 128^2 x 6 CPU evaluations plus a
+// thirty-draw prefilter; the sun sliders feed the sky, so dragging one has to
+// re-bake -- but an UNCONDITIONAL per-frame rebuild is what the Dawn-side
+// light_environment.hpp note warns about.
+struct IblChain {
+  rhi::TexturePtr source;              // the sun-free environment cube
+  std::unique_ptr<ibl::PrefilteredCube> prefiltered;
+  std::unique_ptr<ibl::BrdfLut> lut;
+  rhi::SamplerPtr sampler;
+  glm::vec4 ambient_sh[9]{};
+  bool Ready() const { return source && prefiltered && lut; }
+};
+
+// Builds the whole chain from a radiance function. The LUT survives a rebuild
+// -- its integral depends on neither the environment nor the sun, so
+// regenerating it on every slider drag would be pure waste.
+bool RebuildIbl(IRhiDevice& device, slang::SlangCompiler& compiler,
+                const ibl::RadianceFn& radiance, IblChain& chain) {
+  chain.source = ibl::BuildEnvironmentCube(device, radiance);
+  if (!chain.source) return false;
+  if (!chain.sampler) {
+    chain.sampler = device.CreateSampler(
+        {.address_u = AddressMode::ClampToEdge,
+         .address_v = AddressMode::ClampToEdge,
+         .label = "ibl_source"});
+    if (!chain.sampler) return false;
+  }
+  if (!chain.prefiltered) {
+    chain.prefiltered = ibl::PrefilteredCube::Create(device, compiler);
+    if (!chain.prefiltered) return false;
+  }
+  if (!chain.prefiltered->Generate(chain.source.get(), chain.sampler.get())) {
+    return false;
+  }
+  if (!chain.lut) {
+    chain.lut = ibl::BrdfLut::Create(device, compiler);
+    if (!chain.lut) return false;
+  }
+  // The SAME radiance function the cube was filled from, so the diffuse and
+  // specular halves describe one environment.
+  ibl::ProjectIrradiance(radiance, chain.ambient_sh);
+  return true;
+}
+
+// The environment the viewer is showing: procedural unless --env named a file.
+// Returned by value so it stays valid for the whole run -- the equirect image
+// is captured by reference inside the radiance function, so it has to outlive
+// every rebuild.
+struct Environment {
+  std::unique_ptr<ibl::EquirectImage> image;  // null for the procedural sky
+  ibl::SkySettings sky;
+  ibl::RadianceFn Radiance() const {
+    return image ? ibl::EquirectRadiance(*image) : ibl::ProceduralSky(sky);
+  }
+  const char* SourceName(const std::string& path) const {
+    return image ? path.c_str() : "procedural";
+  }
+};
+
 bool SceneUsesVisbuffer(Scene scene) {
   return scene == Scene::Plane || scene == Scene::Spheres;
 }
@@ -590,6 +684,7 @@ std::unique_ptr<slang::SlangCompiler> MakeCompiler() {
   // ImGui one, each resolving its own imports.
   const std::vector<std::string> paths = {"shaders/slang/common",
                                           "shaders/slang/object_viewer",
+                                          "shaders/slang/ibl",
                                           "shaders/slang/ui"};
   return slang::CreateSlangCompiler(paths);
 }
@@ -760,6 +855,12 @@ bool RenderOnce(IRhiDevice& device, const Options& opt, rhi::ColorSpace mode,
   std::unique_ptr<MaterialPack> pack;
   std::unique_ptr<VisbufferPass> vis;
   std::unique_ptr<ResolvePass> resolve;
+  // FUNCTION SCOPE, not the branch below. The resolve holds BORROWED views into
+  // the chain, and the equirect image is captured by reference by the radiance
+  // function -- either one going out of scope early leaves the table pointing
+  // at freed memory, which is a segfault rather than a wrong image.
+  Environment env;
+  IblChain ibl_chain;
   PlaneChain chain;
   const float scene_aspect = float(opt.width) / float(std::max(1u, opt.height));
   const Camera plane_cam =
@@ -790,6 +891,22 @@ bool RenderOnce(IRhiDevice& device, const Options& opt, rhi::ColorSpace mode,
     sun.intensity = opt.sun_intensity;
     resolve->SetSun(sun);
     resolve->SetView(opt.view);
+    ApplyViewRays(*resolve, plane_cam, aspect);
+
+    // THE IBL CHAIN. Built here rather than passed in, so the headless path is
+    // the same path the window runs -- which is the whole reason the headless
+    // assertions mean anything.
+    if (!opt.env_none) {
+      if (!opt.env_path.empty()) {
+        env.image = ibl::EquirectImage::Load(opt.env_path);
+        if (!env.image) return false;  // a bad --env is a refusal, not a sky
+      }
+      if (!RebuildIbl(device, compiler, env.Radiance(), ibl_chain)) return false;
+      resolve->SetEnvironment(ibl_chain.prefiltered->CubeView(),
+                              ibl::PrefilteredCube::kMipCount,
+                              ibl_chain.lut->View(), opt.env_intensity);
+      resolve->SetAmbient(ibl_chain.ambient_sh);
+    }
     chain = {.vis = vis.get(), .resolve = resolve.get()};
   }
 
