@@ -250,6 +250,26 @@ target_include_directories(badlands_camera PUBLIC
 # near->1, and a consumer built without this silently disagrees about depth.
 target_compile_definitions(badlands_camera PUBLIC GLM_FORCE_DEPTH_ZERO_TO_ONE)
 
+# badlands_ibl: image-based lighting — the environment cube, its SH irradiance,
+# the GGX-prefiltered specular chain and the split-sum BRDF LUT.
+#
+# Game-agnostic engine infrastructure, NOT an object_viewer detail: this is the
+# RHI-era replacement for the Dawn-side rendering/{brdf_lut,prefiltered_cubemap,
+# cubemap_builder}, and badlands_game adopts it when it moves off Dawn. That is
+# why it does not follow material_pack.hpp's "keep it local until the second
+# consumer" precedent.
+add_library(badlands_ibl STATIC
+    src/engine/ibl/environment.cpp
+    src/engine/ibl/prefiltered_cube.cpp
+    src/core/parallel.cpp)
+target_link_libraries(badlands_ibl PUBLIC badlands_rhi badlands_slang assets)
+target_include_directories(badlands_ibl PUBLIC
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
+    ${CMAKE_SOURCE_DIR}/src/crates/assets/include
+    ${taskflow_SOURCE_DIR})
+
 # badlands_rhi_app: the windowed render loop on the RHI, shared by every app
 # that opens a window. Separate from badlands_rhi so the RHI itself never links
 # SDL — the RHI runs headless, and a swapchain is only one of its consumers.
@@ -1914,6 +1934,22 @@ if(APPLE)
     set_tests_properties(badlands_imgui_rhi_tests PROPERTIES
         ENVIRONMENT "MTL_DEBUG_LAYER=1;MTL_SHADER_VALIDATION=1")
 endif()
+
+# badlands_ibl_tests: the CPU half of IBL — face convention, sky gradient, SH
+# projection, cube fill, equirect mapping and the mip parameterization. No GPU:
+# every one of these is a CONVENTION agreeing with another convention, and each
+# failure produces a smooth, plausible, wrong image rather than an error.
+add_executable(badlands_ibl_tests
+    src/engine/tests/ibl_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp)
+target_link_libraries(badlands_ibl_tests PRIVATE badlands_ibl)
+target_include_directories(badlands_ibl_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras)
+if(APPLE)
+    target_link_options(badlands_ibl_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_ibl_tests COMMAND badlands_ibl_tests
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_slang_tests: compile, cache, hot-reload and reflection, against
 # test-local fixtures.
