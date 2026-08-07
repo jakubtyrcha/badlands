@@ -26,6 +26,7 @@
 
 #include <SDL3/SDL.h>
 
+#include "engine/app/fixed_timestep.hpp"
 #include "engine/app/rhi_app_shell.hpp"
 #include "engine/rhi/rhi_device.hpp"
 #include "engine/slang/slang_compiler.hpp"
@@ -98,6 +99,42 @@ struct FrameTime {
   uint32_t fixed_steps = 0;     // whole fixed steps elapsed this frame
   uint64_t index = 0;           // frames begun, from 0
   const bool* keys = nullptr;   // SDL_GetKeyboardState, valid for this call
+};
+
+// Turns a stream of real frame deltas into FrameTime.
+//
+// EXTRACTED SO IT CAN BE TESTED. This was six lines inside a lambda in
+// RunParsed, which meant the only way to check that --fixed-dt is exact, that
+// the step count is right, or that a stall cannot detonate the accumulator was
+// to open a window and look. None of those need a GPU.
+struct FrameClock {
+  // 0 means wall clock; anything else replaces the measured dt entirely.
+  float fixed_dt = 0.0f;
+  double elapsed = 0.0;
+  double accumulator = 0.0;
+
+  // `real_dt` is what the loop measured; the return is what the view is told.
+  FrameTime Advance(float real_dt, uint64_t index, const bool* keys) {
+    const float dt = fixed_dt > 0.0f ? fixed_dt : real_dt;
+    elapsed += double(dt);
+    accumulator += double(dt);
+    uint32_t steps = 0;
+    // CAPPED. A stall -- a breakpoint, a slow first frame -- otherwise asks for
+    // hundreds of steps at once, and an app that simulates each of them spends
+    // longer than the stall did, which is the spiral kMaxSimTicksPerFrame
+    // exists to stop. The remainder is DROPPED rather than carried: catching up
+    // on time nobody was watching is worse than losing it.
+    while (accumulator >= kTickDt && steps < uint32_t(kMaxSimTicksPerFrame)) {
+      accumulator -= kTickDt;
+      ++steps;
+    }
+    if (steps >= uint32_t(kMaxSimTicksPerFrame)) accumulator = 0.0;
+    return {.real_dt = dt,
+            .elapsed = elapsed,
+            .fixed_steps = steps,
+            .index = index,
+            .keys = keys};
+  }
 };
 
 // One application view. The RHI-era counterpart of AppView.

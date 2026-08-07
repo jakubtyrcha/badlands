@@ -14,6 +14,7 @@
 #include "engine/app/fixed_timestep.hpp"
 #include "engine/app/platform_surface.hpp"
 #include "engine/graph/render_graph.hpp"
+#include "engine/app/ui_compositor.hpp"
 #include "engine/ui/imgui_impl_rhi.hpp"
 
 namespace badlands::rhi_app {
@@ -184,63 +185,10 @@ int RhiApp::RunParsed(const RhiAppOptions& opt, const ViewFactory& factory,
     return 1;
   }
 
-  auto load_shader = [&](const char* entry) -> ShaderModulePtr {
-    auto compiled = compiler->Get({.module = "ui_composite", .entry = entry},
-                                  slang::ShaderTarget::Metal);
-    if (!compiled) return nullptr;
-    return device->CreateShaderModule(compiled->source, compiled->reflection,
-                                      std::string("ui_composite::") + entry);
-  };
-  auto cvs = load_shader("vs_ui_composite");
-  auto cfs = load_shader("fs_ui_composite");
-  if (!cvs || !cfs) return 1;
-  auto composite_pipeline = device->CreateRenderPipeline(
-      {.vertex_shader = cvs.get(),
-       .vertex_entry = "vs_ui_composite",
-       .fragment_shader = cfs.get(),
-       .fragment_entry = "fs_ui_composite",
-       .color_formats = {surface_format},
-       // PREMULTIPLIED: the overlay is a layer of accumulated translucent
-       // draws, and only this form composes associatively. See the module
-       // header.
-       .blend_states = {PremultipliedAlphaBlend()},
-       .cull_mode = CullMode::None,
-       .label = "ui_composite"});
-  if (!composite_pipeline) return 1;
-
-  auto composite_params = device->CreateBuffer(
-      {.size = sizeof(CompositeParams),
-       .usage = BufferUsage::Uniform | BufferUsage::CopyDst,
-       .label = "ui_composite_params"});
-  if (!composite_params) return 1;
-  CompositeParams cp;
-  cp.mode[0] = float(uint8_t(surface_cs));
-  composite_params->Write(
-      0, {reinterpret_cast<const uint8_t*>(&cp), sizeof(cp)});
-
-  TexturePtr ui_target;
-  BindingTablePtr composite_table;
-  auto rebuild_ui_target = [&](uint32_t w, uint32_t h) {
-    ui_target = device->CreateTexture({.width = w, .height = h,
-                                       .format = kUiFormat,
-                                       .usage = TextureUsage::RenderTarget |
-                                                TextureUsage::Sampled,
-                                       .label = "ui_overlay"});
-    if (!ui_target) return false;
-    // The table names the target, and a table is immutable -- so a resize that
-    // rebuilt one without the other would sample a destroyed texture.
-    composite_table = device->CreateBindingTable(
-        {.render_pipeline = composite_pipeline.get(),
-         .entries = {{.slot = kCompositeParamsSlot,
-                      .kind = BindingKind::UniformBuffer,
-                      .buffer = composite_params.get()},
-                     {.slot = kCompositeUiSlot,
-                      .kind = BindingKind::SampledTexture,
-                      .texture_view = ui_target->GetDefaultView()}},
-         .label = "ui_composite"});
-    return composite_table != nullptr;
-  };
-  if (!rebuild_ui_target(shell->Width(), shell->Height())) return 1;
+  auto compositor = UiCompositor::Create(*device, *compiler, surface_format,
+                                        surface_cs, shell->Width(),
+                                        shell->Height());
+  if (!compositor) return 1;
 
   // --- The view -----------------------------------------------------------
   ShellHost host(*shell);
@@ -258,9 +206,7 @@ int RhiApp::RunParsed(const RhiAppOptions& opt, const ViewFactory& factory,
   }
 
   // --- Time ---------------------------------------------------------------
-  double elapsed = 0.0;
-  double fixed_accumulator = 0.0;
-  const bool fixed = opt.fixed_dt > 0.0f;
+  FrameClock clock{.fixed_dt = opt.fixed_dt};
 
   // --- The loop -----------------------------------------------------------
   AppShellCallbacks cb;
@@ -284,7 +230,7 @@ int RhiApp::RunParsed(const RhiAppOptions& opt, const ViewFactory& factory,
     return view->OnEvent(e);
   };
   cb.OnResize = [&](uint32_t w, uint32_t h) {
-    if (!rebuild_ui_target(w, h)) {
+    if (!compositor->Resize(w, h)) {
       spdlog::error("rhi_app: could not rebuild the UI overlay at {}x{}", w, h);
       return false;
     }
@@ -292,23 +238,9 @@ int RhiApp::RunParsed(const RhiAppOptions& opt, const ViewFactory& factory,
     return view->OnResize(w, h);
   };
   cb.OnUpdate = [&](const FrameInfo& f) {
-    // WALL CLOCK, or exactly the fixed step. A fixed step ignores how long the
-    // frame actually took, which is what makes a capture reproducible on any
-    // machine -- and what makes "N frames from start" a meaningful thing for a
-    // test to ask for.
-    const float dt = fixed ? opt.fixed_dt : f.dt;
-    elapsed += double(dt);
-    fixed_accumulator += double(dt);
-    uint32_t steps = 0;
-    while (fixed_accumulator >= kTickDt && steps < uint32_t(kMaxSimTicksPerFrame)) {
-      fixed_accumulator -= kTickDt;
-      ++steps;
-    }
-    view->Update({.real_dt = dt,
-                  .elapsed = elapsed,
-                  .fixed_steps = steps,
-                  .index = f.index,
-                  .keys = f.keys});
+    // WALL CLOCK, or exactly the fixed step -- see FrameClock, which is where
+    // this logic lives so it can be tested without a window.
+    view->Update(clock.Advance(f.dt, f.index, f.keys));
   };
   cb.OnFrameBegin = [&](uint64_t frame_index) {
     view->OnFrameBegin(frame_index);
@@ -329,38 +261,13 @@ int RhiApp::RunParsed(const RhiAppOptions& opt, const ViewFactory& factory,
     // drew. Its own graph, submitted after the view's: the view owns its
     // passes and this layer does not reach into them.
     graph::RenderGraph graph(*device);
-    auto ui_h = graph.ImportTexture(ui_target.get(), ResourceState::Undefined,
-                                    "ui_overlay");
-    // UNDEFINED as the entry state, not RenderTarget. This pass runs after the
-    // VIEW's, in a separate encoder, and cannot know what state the view left
-    // the drawable in -- asserting RenderTarget means the graph derives no
-    // transition, and the validation layer then reports the drawable as
-    // Undefined at BeginRenderPass. Declaring what is actually known lets the
-    // graph emit the transition, which is also what DX12 will need.
     auto surface_h = graph.ImportTexture(target->GetTexture(),
                                          ResourceState::Undefined, "surface");
+    auto ui_h = compositor->BeginOverlay(graph);
     if (!ui_h.IsValid() || !surface_h.IsValid()) return false;
-
-    // Cleared to transparent every frame: the overlay is rebuilt from scratch,
-    // and loading it would accumulate last frame's panels.
-    const float clear[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    graph.AddRasterPass("ui_clear")
-        .ColorTarget(ui_h, LoadOp::Clear, StoreOp::Store, clear)
-        .Execute([](const graph::RasterContext&) {});
     ImGui_ImplRHI_AddPass(ImGui::GetDrawData(), graph, ui_h);
-
-    auto params_h = graph.ImportBuffer(composite_params.get(),
-                                       ResourceState::Undefined,
-                                       "ui_composite_params");
-    graph.AddRasterPass("ui_composite")
-        .ColorTarget(surface_h, LoadOp::Load, StoreOp::Store)
-        .Reads(ui_h)
-        .Reads(params_h)
-        .Execute([&](const graph::RasterContext& c) {
-          c.pass->SetPipeline(composite_pipeline.get());
-          c.pass->SetBindingTable(0, composite_table.get());
-          c.pass->Draw(3);  // one fullscreen triangle
-        });
+    // THE UI GOES LAST, so debug UI always sits on top of whatever the app drew.
+    if (!compositor->Composite(graph, ui_h, surface_h)) return false;
 
     // COMPILED before executed. Execute refuses to record passes whose
     // declarations were never checked, and it says so -- which is how this got
@@ -413,8 +320,7 @@ int RhiApp::RunParsed(const RhiAppOptions& opt, const ViewFactory& factory,
   // Shutdown in reverse: the view's resources before the device that made
   // them, and ImGui's backend before its context.
   view.reset();
-  composite_table.reset();
-  ui_target.reset();
+  compositor.reset();
   ImGui_ImplRHI_Shutdown();
   ImGui_ImplSDL3_Shutdown();
   ImGui::DestroyContext();

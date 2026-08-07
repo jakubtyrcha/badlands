@@ -280,7 +280,8 @@ target_include_directories(badlands_ibl PUBLIC
 # shell": the loop, the app layer and the ImGui composite all compile on both.
 add_library(badlands_rhi_app STATIC
     src/engine/app/rhi_app_shell.cpp
-    src/engine/app/rhi_app.cpp)
+    src/engine/app/rhi_app.cpp
+    src/engine/app/ui_compositor.cpp)
 if(APPLE)
     target_sources(badlands_rhi_app PRIVATE
         src/engine/app/platform_surface_mac.mm)
@@ -1673,9 +1674,13 @@ if(APPLE)
     # the same size, so it gets a deterministic test of its own.
     add_executable(badlands_rhi_app_tests
         src/engine/tests/surface_size_tests.cpp
+        src/engine/tests/rhi_app_tests.cpp
         third_party/catch2/extras/catch_amalgamated.cpp)
+    target_link_libraries(badlands_rhi_app_tests PRIVATE badlands_rhi_app)
     target_include_directories(badlands_rhi_app_tests PRIVATE
         ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/third_party/glm
+        ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
         ${CMAKE_SOURCE_DIR}/third_party/catch2/extras)
     add_test(NAME badlands_rhi_app_tests COMMAND badlands_rhi_app_tests
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
