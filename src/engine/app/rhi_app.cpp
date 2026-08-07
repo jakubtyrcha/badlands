@@ -1,6 +1,8 @@
 #include "engine/app/rhi_app.hpp"
 
 #include <algorithm>
+#include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -40,9 +42,16 @@ bool ParseFloatArg(const char* text, float& out) {
 }
 
 bool ParseU64Arg(const char* text, uint64_t& out) {
+  // A LEADING MINUS IS REFUSED EXPLICITLY. strtoull accepts one and NEGATES it,
+  // so "-1" parses successfully as 18446744073709551615 -- a frame cap that
+  // silently means "forever" instead of being rejected. object_viewer's own
+  // parser refused it before this layer took the flag over, and its ctest entry
+  // caught the regression immediately.
+  if (!text || *text == '-') return false;
   char* end = nullptr;
+  errno = 0;
   const unsigned long long v = std::strtoull(text, &end, 10);
-  if (end == text || *end != '\0') return false;
+  if (end == text || *end != '\0' || errno == ERANGE) return false;
   out = uint64_t(v);
   return true;
 }
@@ -93,6 +102,11 @@ RhiAppOptions ParseAppArgs(int& argc, char** argv) {
 
 int RhiApp::Run(int argc, char** argv, const ViewFactory& factory) {
   RhiAppOptions opt = ParseAppArgs(argc, argv);
+  if (!opt.valid) return 1;
+  return RunParsed(opt, factory);
+}
+
+int RhiApp::RunParsed(const RhiAppOptions& opt, const ViewFactory& factory) {
   if (!opt.valid) return 1;
 
   auto device = CreateDevice({.backend = NativeBackend(),
@@ -306,6 +320,10 @@ int RhiApp::Run(int argc, char** argv, const ViewFactory& factory) {
           c.pass->Draw(3);  // one fullscreen triangle
         });
 
+    // COMPILED before executed. Execute refuses to record passes whose
+    // declarations were never checked, and it says so -- which is how this got
+    // caught rather than silently dropping the UI on the first run.
+    if (!graph.Compile()) return false;
     auto encoder = device->CreateCommandEncoder("rhi_app_ui");
     graph.Execute(*encoder);
 

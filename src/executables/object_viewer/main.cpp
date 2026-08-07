@@ -29,6 +29,7 @@
 
 #include "badlands_assets.h"
 #include "core/color/output_transform.hpp"
+#include "engine/app/rhi_app.hpp"
 #include "engine/app/rhi_app_shell.hpp"
 #include "engine/graph/render_graph.hpp"
 #include "engine/rendering/debug_line_buffer.hpp"
@@ -2726,449 +2727,347 @@ int RunHeadless(IRhiDevice& device, const Options& opt) {
   return 0;
 }
 
-int RunWindowed(IRhiDevice& device, const Options& opt) {
-  // BGRA, because that is what CAMetalLayer accepts. prefer_hdr lets the shell
-  // upgrade to RGBA16Float / extended-linear P3 when the display reports HDR;
-  // the SDR fallback is still tagged P3, so the viewer matches badlands_game on
-  // the same display either way.
-  // --present DRIVES THIS. It used to be hardcoded to P3 + prefer_hdr, so the
-  // flag was honoured headless and silently ignored on screen -- there was no
-  // way to look at the untagged path in a window.
-  //
-  //   srgb -> untagged 8-bit, no upgrade
-  //   p3   -> Display P3 8-bit, no upgrade
-  //   edr  -> Display P3, upgraded to extended-linear when the DISPLAY has HDR
-  auto shell = rhi_app::AppShell::Create(
-      device,
-      {.title = "badlands object_viewer",
-       .width = opt.width,
-       .height = opt.height,
-       .present_format = Format::BGRA8Unorm,
-       .color_space = opt.present == rhi::ColorSpace::Srgb
-                          ? rhi::ColorSpace::Srgb
-                          : rhi::ColorSpace::DisplayP3,
-       // Unasked, a window takes the display's best: P3, upgraded to
-       // extended-linear when the display reports HDR. Asked, it gets exactly
-       // what was asked for -- including staying SDR, which is the whole point
-       // of being able to inspect the other paths on screen.
-       .prefer_hdr =
-           !opt.present_explicit ||
-           opt.present == rhi::ColorSpace::ExtendedLinearDisplayP3});
-  if (!shell) return 1;
+// The windowed viewer, as an RhiAppView.
+//
+// WHAT LEFT WITH THE PORT: SDL init, device creation, the Slang compiler, the
+// shell, ImGui's context and both backends, the frame loop, screenshots and
+// shutdown order -- roughly 350 lines that rhi_lab had a second copy of. What
+// stayed is everything about THIS viewer: its scene target, its visibility
+// buffer, its resolve chain, its output pass and its debug windows.
+//
+// ImGui's overlay now belongs to the layer. This view keeps its OWN ui target
+// for debug LINES, which the output pass still composites -- two overlays, each
+// correct in its own space, rather than one shared one whose ownership would
+// have to straddle the seam.
+class ObjectViewerView : public rhi_app::RhiAppView {
+ public:
+  explicit ObjectViewerView(const Options& opt) : opt_(opt) {}
 
-  // READ BACK, never assumed: the shell may have picked a float format, and the
-  // swapchain may have dropped off it again if the layer refused to tag. Only
-  // the output pass's pipeline sees this -- every other pass targets the scene
-  // texture, which is 8-bit encoded regardless of what is being presented.
-  const Format surface_format = shell->SurfaceFormat();
-  const rhi::ColorSpace present = shell->SurfaceColorSpace();
-  spdlog::info("object_viewer: presenting {} / {}", ToString(surface_format),
-               ToString(present));
+  bool Initialize(const rhi_app::RhiAppContext& ctx) override {
+    device_ = ctx.device;
+    surface_format_ = ctx.surface_format;
+    present_ = ctx.surface_color_space;
+    spdlog::info("object_viewer: presenting {} / {}",
+                 ToString(surface_format_), ToString(present_));
 
-  // The compiler and the line pass exist only if a scene needs them. --scene
-  // clear paid for both before, which is the accepted-and-ignored trap from the
-  // other direction: a flag that changed nothing still changed the cost.
-  auto compiler = MakeCompiler();
-  if (!compiler) return 1;
-  std::unique_ptr<LinePass> lines;
-  // THE SAME PREDICATE the headless path uses. This used to be
-  // `opt.scene != Scene::Clear`, which drew the grid and axes over --scene
-  // plane on screen while headless drew neither -- so the windowed frame was
-  // not the frame any assertion covered.
-  if (SceneHasLines(opt.scene)) {
-    // The OVERLAY's format, not the scene's and not the surface's.
-    lines = LinePass::Create(device, *compiler, kUiFormat);
-    if (!lines) return 1;
-  }
-  auto output = OutputPass::Create(device, *compiler, surface_format);
-  if (!output) return 1;
+    if (SceneHasLines(opt_.scene)) {
+      lines_ = LinePass::Create(*device_, *ctx.compiler, kUiFormat);
+      if (!lines_) return false;
+    }
+    output_ = OutputPass::Create(*device_, *ctx.compiler, surface_format_);
+    if (!output_) return false;
 
-  // Recreated on resize, so it always matches the surface it is converted onto.
-  auto scene = MakeSceneTarget(device, shell->Width(), shell->Height());
-  auto ui = MakeUiTarget(device, shell->Width(), shell->Height());
-  if (!scene || !ui) return 1;
+    scene_ = MakeSceneTarget(*device_, ctx.width, ctx.height);
+    ui_ = MakeUiTarget(*device_, ctx.width, ctx.height);
+    if (!scene_ || !ui_) return false;
 
-  // The DEBUG UI surface, distinct from any in-world game UI. imgui_impl_sdl3
-  // is the platform half (already vendored); imgui_impl_rhi is the renderer.
-  IMGUI_CHECKVERSION();
-  ImGui::CreateContext();
-  ImGui::StyleColorsDark();
-  if (!ImGui_ImplSDL3_InitForMetal(shell->Window())) {
-    spdlog::error("object_viewer: ImGui_ImplSDL3_InitForMetal failed");
-    return 1;
-  }
-  if (!ImGui_ImplRHI_Init({.device = &device,
-                           .compiler = compiler.get(),
-                           // The OVERLAY's format. ImGui draws into it in
-                           // encoded space and never touches the surface.
-                           .target_format = kUiFormat,
-                           .framebuffer_width = shell->Width(),
-                           .framebuffer_height = shell->Height()})) {
-    return 1;
-  }
+    if (SceneUsesVisbuffer(opt_.scene)) {
+      pack_ = opt_.pack == "test"
+                  ? MakeConstantPack(*device_,
+                                     badlands::object_viewer::TestPackValues{})
+                  : (opt_.pack == "checker"
+                         ? MakeCheckerPack(*device_)
+                         : LoadMaterialPack(*device_, opt_.pack));
+      if (!pack_) return false;
+      vis_ = VisbufferPass::Create(*device_, *ctx.compiler, MeshFor(opt_.scene),
+                                   ctx.width, ctx.height);
+      resolve_ = ResolvePass::Create(*device_, *ctx.compiler, *pack_,
+                                     kSceneFormat);
+      if (!vis_ || !resolve_) return false;
 
-  // The visibility-buffer chain, for the scenes that have a material.
-  std::unique_ptr<MaterialPack> pack;
-  std::unique_ptr<VisbufferPass> vis;
-  std::unique_ptr<ResolvePass> resolve;
-  // FUNCTION SCOPE: the resolve borrows views into the chain and the radiance
-  // function captures the equirect image by reference.
-  Environment env;
-  IblChain ibl_chain;
-  PlaneChain chain;
-  if (SceneUsesVisbuffer(opt.scene)) {
-    pack = opt.pack == "test"
-               ? MakeConstantPack(device,
-                                  badlands::object_viewer::TestPackValues{})
-               : (opt.pack == "checker"
-                      ? MakeCheckerPack(device)
-                      : LoadMaterialPack(device, opt.pack));
-    if (!pack) return 1;
-    vis = VisbufferPass::Create(device, *compiler, MeshFor(opt.scene),
-                                shell->Width(), shell->Height());
-    // The SCENE target's format: linear float, so the lit view keeps headroom.
-    resolve = ResolvePass::Create(device, *compiler, *pack, kSceneFormat);
-    if (!vis || !resolve) return 1;
-
-    if (!opt.env_none) {
-      env.furnace = opt.env_furnace;
-      if (!opt.env_path.empty() && !opt.env_furnace) {
-        env.image = ibl::EquirectImage::Load(opt.env_path);
-        if (!env.image) return 1;  // a bad --env is a refusal, not a sky
+      if (!opt_.env_none) {
+        env_.furnace = opt_.env_furnace;
+        if (!opt_.env_path.empty() && !opt_.env_furnace) {
+          env_.image = ibl::EquirectImage::Load(opt_.env_path);
+          if (!env_.image) return false;
+        }
+        if (!RebuildIbl(*device_, *ctx.compiler, env_.Radiance(), ibl_chain_)) {
+          return false;
+        }
+        resolve_->SetEnvironment(ibl_chain_.prefiltered->CubeView(),
+                                 ibl::PrefilteredCube::kMipCount,
+                                 ibl_chain_.lut->View(), opt_.env_intensity);
+        resolve_->SetAmbient(ibl_chain_.ambient_sh);
       }
-      if (!RebuildIbl(device, *compiler, env.Radiance(), ibl_chain)) return 1;
-      resolve->SetEnvironment(ibl_chain.prefiltered->CubeView(),
-                              ibl::PrefilteredCube::kMipCount,
-                              ibl_chain.lut->View(), opt.env_intensity);
-      resolve->SetAmbient(ibl_chain.ambient_sh);
     }
-  }
 
-  Camera cam = CameraFor(opt.scene);
-  // What the two debug windows drive. Nothing else in this app reads them, and
-  // nothing else writes them -- which is what makes the windows the whole of
-  // their interface.
-  DebugView view = opt.view;
-  SunSettings sun;
-  sun.intensity = opt.sun_intensity;
+    cam_ = CameraFor(opt_.scene);
+    view_ = opt_.view;
+    sun_.intensity = opt_.sun_intensity;
+    env_intensity_ = opt_.env_intensity;
+    baked_sun_ = sun_;
 
-  // THE ORBIT CAMERA, for the scenes that have an object to orbit. Ported from
-  // badlands_viewer's model viewer via badlands_camera, which was split out of
-  // badlands_engine precisely so an RHI app could reach it without Dawn.
-  //
-  // It DRIVES the viewer's own Camera rather than replacing it: Camera::View()
-  // uses the camera-OFFSET convention (camera at the origin, world rebased) and
-  // badlands::Camera does not, so wiring the two together directly would put
-  // every pass in a different space than the one the assertions assume.
-  OrbitCameraController orbit;
-  const bool orbiting = SceneUsesVisbuffer(opt.scene);
-  if (orbiting) {
-    const auto bounds = badlands::object_viewer::SphereGridExtent();
-    if (opt.scene == Scene::Spheres) {
-      orbit.FrameBounds(bounds.center, bounds.radius);
-      // Clamped to the sphere radius so the orbit cannot end up INSIDE one.
-      // Not a correctness fix -- back-face culling makes the interior render
-      // the background, which is correct -- but it is not a view anyone wants.
-      orbit.min_distance = bounds.sphere_radius * 1.5f;
-    } else {
-      orbit.FrameBounds(glm::vec3(0.0f), 6.0f);
-    }
-  }
-  // Drag orbits, wheel zooms, WASD/QE pans the target. Applied here so the
-  // starting frame matches what the orbit state says.
-  auto apply_orbit = [&] {
-    cam.position = orbit.target + orbit.distance * glm::vec3(
-        std::cos(orbit.pitch) * std::sin(orbit.yaw), std::sin(orbit.pitch),
-        std::cos(orbit.pitch) * std::cos(orbit.yaw));
-    const glm::vec3 to_target = orbit.target - cam.position;
-    cam.pitch = std::asin(glm::normalize(to_target).y);
-    cam.yaw = std::atan2(to_target.x, -to_target.z);
-  };
-  if (orbiting) apply_orbit();
-  bool dragging = false;
-  float env_intensity = opt.env_intensity;
-  // What the chain was last baked FROM. Re-baking is 128^2 x 6 CPU evaluations
-  // plus a thirty-draw prefilter, so it runs when one of these moves and not
-  // otherwise -- an unconditional per-frame rebuild is what the Dawn-side
-  // light_environment.hpp note warns about.
-  //
-  // The INTENSITY is deliberately not here: it is a multiply in the shader, so
-  // changing it needs no bake at all.
-  SunSettings baked_sun = sun;
-
-  spdlog::info(
-      orbiting
-          ? "object_viewer: drag to orbit, wheel to zoom, WASD/QE to pan, Esc "
-            "to quit"
-          : "object_viewer: WASD/QE to move, wheel to zoom, Esc to quit");
-
-  rhi_app::AppShellCallbacks cb;
-  cb.OnEvent = [&](const SDL_Event& e) {
-    // Stands in for an ImGui widget holding focus: consume EVERYTHING. If
-    // Escape still stops the loop, it is because the shell acted on it before
-    // asking.
-    if (opt.self_test_escape) return true;
-    ImGui_ImplSDL3_ProcessEvent(&e);
-    // ImGui gets first refusal on input it is using. Without this the camera
-    // also acts on a drag inside a panel, which is the two-surfaces confusion
-    // the debug/game UI split exists to avoid.
-    const ImGuiIO& io = ImGui::GetIO();
-    if (io.WantCaptureMouse &&
-        (e.type == SDL_EVENT_MOUSE_MOTION || e.type == SDL_EVENT_MOUSE_WHEEL ||
-         e.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
-         e.type == SDL_EVENT_MOUSE_BUTTON_UP)) {
-      return true;
-    }
-    if (io.WantCaptureKeyboard && (e.type == SDL_EVENT_KEY_DOWN ||
-                                   e.type == SDL_EVENT_KEY_UP)) {
-      return true;
-    }
-    if (e.type == SDL_EVENT_MOUSE_WHEEL) {
-      if (orbiting) {
-        // NormalizedWheelY's flip, inline: without it macOS natural scrolling
-        // inverts the zoom and the control feels broken rather than reversed.
-        orbit.HandleMouseWheel(e.wheel.y);
-        apply_orbit();
+    orbiting_ = SceneUsesVisbuffer(opt_.scene);
+    if (orbiting_) {
+      const auto bounds = badlands::object_viewer::SphereGridExtent();
+      if (opt_.scene == Scene::Spheres) {
+        orbit_.FrameBounds(bounds.center, bounds.radius);
+        orbit_.min_distance = bounds.sphere_radius * 1.5f;
       } else {
-        cam.extent =
-            std::clamp(cam.extent * (e.wheel.y > 0 ? 0.9f : 1.1f), 1.0f, 200.0f);
+        orbit_.FrameBounds(glm::vec3(0.0f), 6.0f);
+      }
+      ApplyOrbit();
+    }
+    spdlog::info(orbiting_
+                     ? "object_viewer: drag to orbit, wheel to zoom, WASD/QE to "
+                       "pan, Esc to quit"
+                     : "object_viewer: WASD/QE to move, wheel to zoom, Esc to "
+                       "quit");
+    return true;
+  }
+
+  bool OnEvent(const SDL_Event& e) override {
+    // NO ImGui GATING HERE any more -- the layer gives ImGui first refusal
+    // before this is called, which is exactly the boilerplate the port removed.
+    if (e.type == SDL_EVENT_MOUSE_WHEEL) {
+      if (orbiting_) {
+        orbit_.HandleMouseWheel(e.wheel.y);
+        ApplyOrbit();
+      } else {
+        cam_.extent =
+            std::clamp(cam_.extent * (e.wheel.y > 0 ? 0.9f : 1.1f), 1.0f, 200.0f);
       }
       return true;
     }
-    if (orbiting && e.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
+    if (orbiting_ && e.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
         e.button.button == SDL_BUTTON_LEFT) {
-      dragging = true;
+      dragging_ = true;
       return true;
     }
     if (e.type == SDL_EVENT_MOUSE_BUTTON_UP &&
         e.button.button == SDL_BUTTON_LEFT) {
-      dragging = false;
+      dragging_ = false;
       return true;
     }
-    if (orbiting && dragging && e.type == SDL_EVENT_MOUSE_MOTION) {
-      orbit.HandleMouseDrag(e.motion.xrel, e.motion.yrel);
-      apply_orbit();
+    if (orbiting_ && dragging_ && e.type == SDL_EVENT_MOUSE_MOTION) {
+      orbit_.HandleMouseDrag(e.motion.xrel, e.motion.yrel);
+      ApplyOrbit();
       return true;
     }
     return false;
-  };
-  cb.OnUpdate = [&](const rhi_app::FrameInfo& f) {
-    if (opt.self_test_escape && f.index == 3) {
-      SDL_Event esc{};
-      esc.type = SDL_EVENT_KEY_DOWN;
-      esc.key.scancode = SDL_SCANCODE_ESCAPE;
-      SDL_PushEvent(&esc);
+  }
+
+  bool OnResize(uint32_t w, uint32_t h) override {
+    scene_ = MakeSceneTarget(*device_, w, h);
+    ui_ = MakeUiTarget(*device_, w, h);
+    if (!scene_ || !ui_) {
+      spdlog::error("object_viewer: could not rebuild the targets at {}x{}", w, h);
+      return false;
     }
-    if (ImGui::GetIO().WantCaptureKeyboard) return;
-    if (orbiting) {
-      // WASD/QE PANS THE TARGET, so nothing that worked before stops working --
-      // the keys still move the view, they just move what it is looking at.
-      // Scaled by distance so panning stays usable when zoomed out.
-      const float step = orbit.distance * std::min(f.dt, 0.1f);
+    if (vis_ && !vis_->Resize(w, h)) return false;
+    return true;
+  }
+
+  void OnFrameBegin(uint64_t frame_index) override {
+    if (lines_) lines_->BeginFrame(frame_index);
+    if (vis_) vis_->BeginFrame(frame_index);
+    if (resolve_) resolve_->BeginFrame(frame_index);
+    output_->BeginFrame(frame_index);
+  }
+
+  void Update(const rhi_app::FrameTime& t) override {
+    if (!t.keys) return;
+    if (orbiting_) {
+      const float step = orbit_.distance * std::min(t.real_dt, 0.1f);
       glm::vec3 pan(0.0f);
-      if (f.keys[SDL_SCANCODE_W]) pan.z -= step;
-      if (f.keys[SDL_SCANCODE_S]) pan.z += step;
-      if (f.keys[SDL_SCANCODE_A]) pan.x -= step;
-      if (f.keys[SDL_SCANCODE_D]) pan.x += step;
-      if (f.keys[SDL_SCANCODE_E]) pan.y += step;
-      if (f.keys[SDL_SCANCODE_Q]) pan.y -= step;
+      if (t.keys[SDL_SCANCODE_W]) pan.z -= step;
+      if (t.keys[SDL_SCANCODE_S]) pan.z += step;
+      if (t.keys[SDL_SCANCODE_A]) pan.x -= step;
+      if (t.keys[SDL_SCANCODE_D]) pan.x += step;
+      if (t.keys[SDL_SCANCODE_E]) pan.y += step;
+      if (t.keys[SDL_SCANCODE_Q]) pan.y -= step;
       if (pan != glm::vec3(0.0f)) {
-        orbit.target += pan;
-        apply_orbit();
+        orbit_.target += pan;
+        ApplyOrbit();
       }
       return;
     }
-    const float step = cam.extent * std::min(f.dt, 0.1f);
-    if (f.keys[SDL_SCANCODE_W]) cam.position.z -= step;
-    if (f.keys[SDL_SCANCODE_S]) cam.position.z += step;
-    if (f.keys[SDL_SCANCODE_A]) cam.position.x -= step;
-    if (f.keys[SDL_SCANCODE_D]) cam.position.x += step;
-    if (f.keys[SDL_SCANCODE_E]) cam.position.y += step;
-    if (f.keys[SDL_SCANCODE_Q]) cam.position.y -= step;
-  };
-  cb.OnResize = [&](uint32_t w, uint32_t h) {
-    // The scene target is sized to the surface, so it is rebuilt here rather
-    // than sampled at the wrong size for a frame. Returning false stops the
-    // loop: a viewer with no scene target has nothing sane to present.
-    scene = MakeSceneTarget(device, w, h);
-    ui = MakeUiTarget(device, w, h);
-    if (!scene || !ui) {
-      spdlog::error("object_viewer: could not rebuild the scene target at {}x{}",
-                    w, h);
-      return false;
+    const float step = cam_.extent * std::min(t.real_dt, 0.1f);
+    if (t.keys[SDL_SCANCODE_W]) cam_.position.z -= step;
+    if (t.keys[SDL_SCANCODE_S]) cam_.position.z += step;
+    if (t.keys[SDL_SCANCODE_A]) cam_.position.x -= step;
+    if (t.keys[SDL_SCANCODE_D]) cam_.position.x += step;
+    if (t.keys[SDL_SCANCODE_E]) cam_.position.y += step;
+    if (t.keys[SDL_SCANCODE_Q]) cam_.position.y -= step;
+  }
+
+  void DrawUI() override {
+    // EXACTLY WHAT WAS APPROVED and nothing else. CLAUDE.md: the feature is
+    // approved, its UI is not.
+    ImGui::Begin("object_viewer");
+    ImGui::Text("%u x %u", last_width_, last_height_);
+    ImGui::End();
+
+    if (!resolve_) return;
+    ImGui::Begin("Graphics debug");
+    for (size_t i = 0; i < DebugViews().size(); ++i) {
+      if (i == size_t(DebugView::TriangleId)) ImGui::SeparatorText("Visbuffer");
+      if (i == size_t(DebugView::Albedo)) ImGui::SeparatorText("Material");
+      int current = int(view_);
+      if (ImGui::RadioButton(std::string(DebugViews()[i].label).c_str(),
+                             &current, int(i))) {
+        view_ = DebugView(i);
+      }
     }
-    // The visibility buffer and its depth are screen-sized too, and the
-    // resolve's binding table names the visbuffer -- so a resize that rebuilt
-    // one and not the other would sample a destroyed texture.
-    if (vis && !vis->Resize(w, h)) return false;
-    return true;
-  };
-  cb.OnFrameBegin = [&](uint64_t frame_index) {
-    // After BeginFrame, so a SKIPPED frame still recycles its slot.
-    if (lines) lines->BeginFrame(frame_index);
-    if (vis) vis->BeginFrame(frame_index);
-    if (resolve) resolve->BeginFrame(frame_index);
-    output->BeginFrame(frame_index);
-    ImGui_ImplRHI_NewFrame(frame_index);
-  };
-  cb.OnRender = [&](ITextureView* target, const rhi_app::FrameInfo& f) {
+    ImGui::End();
+
+    ImGui::Begin("Scene lighting");
+    ImGui::SeparatorText("Directional");
+    ImGui::SliderFloat("azimuth", &sun_.azimuth_deg, 0.0f, 360.0f);
+    ImGui::SliderFloat("elevation", &sun_.elevation_deg, -90.0f, 90.0f);
+    ImGui::ColorEdit3("color", &sun_.color.x);
+    ImGui::SliderFloat("intensity", &sun_.intensity, 0.0f, 10.0f);
+    if (ibl_chain_.Ready()) {
+      ImGui::SeparatorText("Environment");
+      ImGui::SliderFloat("env intensity", &env_intensity_, 0.0f, 4.0f);
+      ImGui::Text("source: %s", env_.SourceName(opt_.env_path));
+    }
+    ImGui::End();
+  }
+
+  bool Render(ITextureView* target, const rhi_app::FrameInfo& f) override {
+    last_width_ = f.width;
+    last_height_ = f.height;
     const float aspect = float(f.width) / float(std::max(1u, f.height));
-    if (lines) {
-      // The SAME scene the headless run of this flag would render, so what is
-      // on screen and what a test asserts cannot drift.
+
+    if (lines_) {
       const DebugLineBuffer scene =
-          opt.scene == Scene::Lines ? LineScene() : GridScene();
-      if (!lines->Upload(scene, cam.View(), cam.Proj(aspect),
-                         {float(f.width), float(f.height)}, cam.position)) {
+          opt_.scene == Scene::Lines ? LineScene() : GridScene();
+      if (!lines_->Upload(scene, cam_.View(), cam_.Proj(aspect),
+                          {float(f.width), float(f.height)}, cam_.position)) {
         return false;
       }
     }
-    // Rebuilt per frame because the drawable is a different texture each time.
-    // Cheap at this size, and the alternative -- caching a graph keyed on a
-    // resource that changes every frame -- is how a stale view gets rendered
-    // into.
-    ImGui_ImplRHI_SetFramebufferSize(f.width, f.height);
-    ImGui_ImplSDL3_NewFrame();
-    ImGui::NewFrame();
-    // THE DEBUG UI, and it contains exactly what was approved and nothing else.
-    // CLAUDE.md: never add anything to a UI without explicit approval -- no
-    // stats block, no pack selector, no tonemap knob, no gizmo toggles. The
-    // camera readout and zoom slider that used to live here were removed under
-    // that rule; one frame-timing line stays.
-    ImGui::Begin("object_viewer");
-    ImGui::Text("%u x %u  |  %.1f fps", f.width, f.height,
-                f.dt > 0.0f ? 1.0f / f.dt : 0.0f);
-    ImGui::End();
 
-    // The sun feeds the sky, so moving it re-bakes -- but only then. Compared
-    // against what was BAKED rather than against last frame's value, so a drag
-    // that returns to where it started does not leave a stale cube behind.
-    if (resolve && ibl_chain.Ready() &&
-        (baked_sun.azimuth_deg != sun.azimuth_deg ||
-         baked_sun.elevation_deg != sun.elevation_deg ||
-         baked_sun.intensity != sun.intensity)) {
-      baked_sun = sun;
-      if (RebuildIbl(device, *compiler, env.Radiance(), ibl_chain)) {
-        resolve->SetEnvironment(ibl_chain.prefiltered->CubeView(),
-                                ibl::PrefilteredCube::kMipCount,
-                                ibl_chain.lut->View(), env_intensity);
-        resolve->SetAmbient(ibl_chain.ambient_sh);
+    // The sun feeds the sky, so moving it re-bakes -- but only then, and
+    // against what was BAKED rather than last frame's value.
+    if (resolve_ && ibl_chain_.Ready() &&
+        (baked_sun_.azimuth_deg != sun_.azimuth_deg ||
+         baked_sun_.elevation_deg != sun_.elevation_deg ||
+         baked_sun_.intensity != sun_.intensity)) {
+      baked_sun_ = sun_;
+      if (RebuildIbl(*device_, *compiler_for_rebuild_, env_.Radiance(),
+                     ibl_chain_)) {
+        resolve_->SetEnvironment(ibl_chain_.prefiltered->CubeView(),
+                                 ibl::PrefilteredCube::kMipCount,
+                                 ibl_chain_.lut->View(), env_intensity_);
+        resolve_->SetAmbient(ibl_chain_.ambient_sh);
       }
     }
 
-    if (resolve) {
-      ImGui::Begin("Graphics debug");
-      // ONE radio group over the whole enum, driven by the same table the CLI
-      // parses. A view added to the enum appears here automatically and gets a
-      // --debug-view name for free, which is what stops a UI-only mode existing
-      // that no headless assertion covers.
-      for (size_t i = 0; i < DebugViews().size(); ++i) {
-        // The group headings are labels on the radio list, not extra controls:
-        // ten flat entries read as a list of unrelated things.
-        if (i == size_t(DebugView::TriangleId)) ImGui::SeparatorText("Visbuffer");
-        if (i == size_t(DebugView::Albedo)) ImGui::SeparatorText("Material");
-        int current = int(view);
-        if (ImGui::RadioButton(std::string(DebugViews()[i].label).c_str(),
-                               &current, int(i))) {
-          view = DebugView(i);
-        }
-      }
-      ImGui::End();
-
-      ImGui::Begin("Scene lighting");
-      ImGui::SeparatorText("Directional");
-      ImGui::SliderFloat("azimuth", &sun.azimuth_deg, 0.0f, 360.0f);
-      ImGui::SliderFloat("elevation", &sun.elevation_deg, -90.0f, 90.0f);
-      ImGui::ColorEdit3("color", &sun.color.x);
-      ImGui::SliderFloat("intensity", &sun.intensity, 0.0f, 10.0f);
-      // THE ONE APPROVED ADDITION: a separator, an intensity slider and a
-      // source readout. Nothing else -- no colour pickers, no resolution knob,
-      // no reload button. CLAUDE.md: the feature is approved, its UI is not.
-      if (ibl_chain.Ready()) {
-        ImGui::SeparatorText("Environment");
-        ImGui::SliderFloat("env intensity", &env_intensity, 0.0f, 4.0f);
-        ImGui::Text("source: %s", env.SourceName(opt.env_path));
-      }
-      ImGui::End();
-    }
-    ImGui::Render();
-
-    // Rebuilt per frame because the drawable is a different texture each time.
-    // Cheap at this size, and the alternative -- caching a graph keyed on a
-    // resource that changes every frame -- is how a stale view gets rendered
-    // into.
-    //
-    // The SAME BuildGraph the headless path calls, with the acquired drawable
-    // as the sink instead of a plain texture. That is the whole of the sink
-    // abstraction, and it is why the headless run is the real path.
-    if (chain.Active() || (vis && resolve)) {
-      vis->SetCamera(cam.View(), cam.Proj(aspect), cam.position);
-      resolve->SetCamera(cam.View(), cam.Proj(aspect), cam.position, cam.near_m,
-                         cam.far_m);
-      resolve->SetSun(sun);
-      resolve->SetView(view);
-      resolve->SetEnvironmentIntensity(env_intensity);
-      ApplyViewRays(*resolve, cam, aspect);
-      chain = {.vis = vis.get(), .resolve = resolve.get()};
+    if (vis_ && resolve_) {
+      vis_->SetCamera(cam_.View(), cam_.Proj(aspect), cam_.position);
+      resolve_->SetCamera(cam_.View(), cam_.Proj(aspect), cam_.position,
+                          cam_.near_m, cam_.far_m);
+      resolve_->SetSun(sun_);
+      resolve_->SetView(view_);
+      resolve_->SetEnvironmentIntensity(env_intensity_);
+      ApplyViewRays(*resolve_, cam_, aspect);
+      chain_ = {.vis = vis_.get(), .resolve = resolve_.get()};
     }
 
-    Options local = opt;
-    local.present = present;
-    // The window drives the view, so the tonemap decision has to read the LIVE
-    // value rather than the one the command line started with.
-    local.view = view;
-    RenderGraph graph(device);
-    if (!BuildGraph(graph, scene.get(), ui.get(), target->GetTexture(), local,
-                    lines.get(), output.get(), ImGui::GetDrawData(), chain)) {
+    Options local = opt_;
+    local.present = present_;
+    local.view = view_;
+    RenderGraph graph(*device_);
+    // nullptr for the ImGui draw data: ImGui belongs to the app layer now and
+    // is composited after this, so the output pass sees only the debug LINES
+    // overlay this view still owns.
+    if (!BuildGraph(graph, scene_.get(), ui_.get(), target->GetTexture(), local,
+                    lines_.get(), output_.get(), nullptr, chain_)) {
       return false;
     }
-    auto encoder = device.CreateCommandEncoder("frame");
+    auto encoder = device_->CreateCommandEncoder("frame");
     graph.Execute(*encoder);
     encoder->Finish();
-    device.Submit(*encoder);
+    device_->Submit(*encoder);
     return true;
-  };
+  }
 
-  const auto stats = shell->Run(cb, opt.max_frames);
-  if (opt.self_test_escape) {
-    // It must have stopped on the Escape, well before the frame cap.
-    if (stats.frames_begun >= opt.max_frames) {
-      spdlog::error(
-          "object_viewer self-test: ran all {} frames -- Escape was swallowed "
-          "by the event consumer instead of stopping the loop",
-          stats.frames_begun);
-      ImGui_ImplRHI_Shutdown();
-      ImGui_ImplSDL3_Shutdown();
-      ImGui::DestroyContext();
-      return 1;
-    }
-    spdlog::info("object_viewer self-test OK: Escape stopped the loop after {} "
-                 "frames", stats.frames_begun);
+  void SetCompiler(slang::SlangCompiler* c) { compiler_for_rebuild_ = c; }
+
+ private:
+  void ApplyOrbit() {
+    cam_.position = orbit_.target + orbit_.distance *
+        glm::vec3(std::cos(orbit_.pitch) * std::sin(orbit_.yaw),
+                  std::sin(orbit_.pitch),
+                  std::cos(orbit_.pitch) * std::cos(orbit_.yaw));
+    const glm::vec3 to_target = orbit_.target - cam_.position;
+    cam_.pitch = std::asin(glm::normalize(to_target).y);
+    cam_.yaw = std::atan2(to_target.x, -to_target.z);
   }
-  ImGui_ImplRHI_Shutdown();
-  ImGui_ImplSDL3_Shutdown();
-  ImGui::DestroyContext();
-  if (stats.aborted) return 1;
-  if (opt.max_frames > 0 && stats.frames_presented == 0) {
-    spdlog::error("object_viewer: ran {} frames and presented none",
-                  stats.frames_begun);
-    return 1;
-  }
-  spdlog::info("object_viewer: {} frames, {} presented", stats.frames_begun,
-               stats.frames_presented);
-  return 0;
+
+  Options opt_;
+  IRhiDevice* device_ = nullptr;
+  slang::SlangCompiler* compiler_for_rebuild_ = nullptr;
+  Format surface_format_ = Format::BGRA8Unorm;
+  ColorSpace present_ = ColorSpace::Srgb;
+
+  std::unique_ptr<LinePass> lines_;
+  std::unique_ptr<OutputPass> output_;
+  std::unique_ptr<MaterialPack> pack_;
+  std::unique_ptr<VisbufferPass> vis_;
+  std::unique_ptr<ResolvePass> resolve_;
+  rhi::TexturePtr scene_, ui_;
+  PlaneChain chain_;
+
+  Environment env_;
+  IblChain ibl_chain_;
+  float env_intensity_ = 1.0f;
+
+  Camera cam_;
+  OrbitCameraController orbit_;
+  bool orbiting_ = false;
+  bool dragging_ = false;
+  DebugView view_ = DebugView::Lit;
+  SunSettings sun_;
+  SunSettings baked_sun_;
+  uint32_t last_width_ = 0, last_height_ = 0;
+};
+
+int RunWindowed(const Options& opt,
+                const rhi_app::RhiAppOptions& app_opts) {
+  rhi_app::RhiApp app({.title = "badlands object_viewer",
+                       .width = opt.width,
+                       .height = opt.height,
+                       .color_space = opt.present == rhi::ColorSpace::Srgb
+                                          ? rhi::ColorSpace::Srgb
+                                          : rhi::ColorSpace::DisplayP3,
+                       .prefer_hdr = !opt.present_explicit ||
+                                     opt.present ==
+                                         rhi::ColorSpace::ExtendedLinearDisplayP3,
+                       .shader_paths = {"shaders/slang/common",
+                                        "shaders/slang/object_viewer",
+                                        "shaders/slang/app",
+                                        "shaders/slang/ibl",
+                                        "shaders/slang/ui"}});
+  return app.RunParsed(app_opts, [&](const rhi_app::RhiAppContext& ctx) {
+    auto v = std::make_unique<ObjectViewerView>(opt);
+    v->SetCompiler(ctx.compiler);
+    return v;
+  });
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
+  // THE LAYER PARSES FIRST, and strips what it takes. Its flags would otherwise
+  // reach ParseArgs below as unknown arguments and be refused there, which
+  // reads as this app rejecting a flag the app layer documents.
+  const auto app_opts = rhi_app::ParseAppArgs(argc, argv);
+  if (!app_opts.valid) return 1;
+
   Options opt;
   if (!ParseArgs(argc, argv, opt)) return 1;
+
+  // ONLY THE HEADLESS PATH MAKES A DEVICE HERE. The windowed path goes through
+  // RhiApp, which creates its own -- and creating a second one alongside it
+  // would allocate a whole Metal device per run for nothing.
+  if (!opt.headless) return RunWindowed(opt, app_opts);
 
   auto device = CreateDevice({.backend = BackendKind::Metal,
                               .enable_validation = true,
                               .label = "object_viewer"});
   if (!device) return 1;
-
-  return opt.headless ? RunHeadless(*device, opt) : RunWindowed(*device, opt);
+  return RunHeadless(*device, opt);
 }

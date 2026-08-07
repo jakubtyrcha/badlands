@@ -132,8 +132,18 @@ class RhiApp {
 
   explicit RhiApp(RhiAppConfig config) : config_(std::move(config)) {}
 
-  // Runs to completion. Returns a process exit code.
+  // Runs to completion. Returns a process exit code. Parses and STRIPS the
+  // layer's own flags from argv first.
   int Run(int argc, char** argv, const ViewFactory& factory);
+
+  // The same, with the flags already parsed.
+  //
+  // EXISTS BECAUSE ORDER MATTERS. An app with its own parser must strip the
+  // layer's flags BEFORE running it, or --frames reaches the app as an unknown
+  // argument and gets refused -- the app rejecting a flag the layer documents.
+  // So the app calls ParseAppArgs itself, up front, and hands the result here
+  // rather than having argv parsed twice.
+  int RunParsed(const RhiAppOptions& options, const ViewFactory& factory);
 
  private:
   RhiAppConfig config_;
