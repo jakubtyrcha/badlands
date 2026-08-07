@@ -167,7 +167,6 @@ struct Options {
   uint32_t width = 1280;
   uint32_t height = 720;
   std::string out = "object_viewer.png";
-  uint64_t max_frames = 0;  // 0 = until quit
   // The clear colour, so a headless run has something falsifiable to assert.
   // Authored in ENCODED sRGB, like every other colour in this app -- the scene
   // target is the space the passes blend in.
@@ -375,10 +374,6 @@ bool ParseArgs(int argc, char** argv, Options& opt) {
       if (!value(v) || !ParseU32(v, 1, 16384, opt.width)) return false;
     } else if (a == "--height") {
       if (!value(v) || !ParseU32(v, 1, 16384, opt.height)) return false;
-    } else if (a == "--frames") {
-      uint32_t n = 0;
-      if (!value(v) || !ParseU32(v, 1, 100000, n)) return false;
-      opt.max_frames = n;
     } else if (a == "--out") {
       if (!value(v)) return false;
       opt.out = v;
@@ -3064,6 +3059,17 @@ int main(int argc, char** argv) {
   // RhiApp, which creates its own -- and creating a second one alongside it
   // would allocate a whole Metal device per run for nothing.
   if (!opt.headless) return RunWindowed(opt, app_opts);
+
+  // REFUSED rather than ignored. The headless path renders exactly one frame
+  // through the graph and asserts its pixels; there is no loop to step and no
+  // backbuffer to capture, so these flags cannot do what they say.
+  if (app_opts.max_frames != 0 || app_opts.fixed_dt != 0.0f ||
+      !app_opts.screenshot_path.empty()) {
+    spdlog::error(
+        "object_viewer: --frames, --fixed-dt and --screenshot belong to the "
+        "windowed loop; headless renders one frame to --out");
+    return 1;
+  }
 
   auto device = CreateDevice({.backend = BackendKind::Metal,
                               .enable_validation = true,
