@@ -75,12 +75,16 @@ RasterPassBuilder& RasterPassBuilder::DepthTarget(ResourceHandle target,
 }
 
 RasterPassBuilder& RasterPassBuilder::DepthReadOnly(ResourceHandle target) {
-  // Load, never store, never clear: a pass that does not write depth has
-  // nothing to store, and clearing what it is about to test against would
-  // defeat the point of testing.
+  // Load, STORE, never clear. Storing looks redundant for a pass that writes no
+  // depth, and the first draft discarded on exactly that reasoning -- which was
+  // wrong. StoreOp::Discard does not mean "I changed nothing"; it means the
+  // attachment's contents are UNDEFINED afterwards. On a shared depth buffer
+  // that destroys what the geometry pass wrote, so a SECOND read-only overlay --
+  // the case this method exists for -- loads garbage and occludes at random.
+  // Clearing would lose it the other way, and is equally wrong here.
   graph_->passes_[pass_].depth = {.target = target,
                                   .load = LoadOp::Load,
-                                  .store = StoreOp::Discard,
+                                  .store = StoreOp::Store,
                                   .clear = 0.0f,
                                   .read_only = true};
   graph_->Declare(pass_, target, Access::DepthReadOnly);
@@ -213,12 +217,16 @@ bool RenderGraph::Compile() {
                     pass.name);
       return false;
     }
-    // Depth alone is enough: a shadow pass renders somewhere, it just renders
-    // depth. Neither is still a pass that renders nowhere.
-    if (pass.raster && pass.colors.empty() && !pass.depth.target.IsValid()) {
+    // Depth alone is enough -- a shadow pass renders somewhere, it just renders
+    // depth -- but only if it WRITES that depth. A pass whose sole declaration
+    // is DepthReadOnly has no colour to draw into and no depth to update, so it
+    // renders nowhere in exactly the sense this guard rejects.
+    const bool writes_depth =
+        pass.depth.target.IsValid() && !pass.depth.read_only;
+    if (pass.raster && pass.colors.empty() && !writes_depth) {
       spdlog::error(
-          "graph: raster pass '{}' declares neither a colour nor a depth "
-          "target -- a pass that renders nowhere is a mistake, not an "
+          "graph: raster pass '{}' declares no colour target and no depth it "
+          "writes -- a pass that renders nowhere is a mistake, not an "
           "optimisation",
           pass.name);
       return false;
@@ -246,14 +254,24 @@ bool RenderGraph::Compile() {
       // A depth attachment that is not a depth texture produces a render pass
       // the backend will refuse, so it is refused here instead -- at the point
       // that names the pass and the resource.
-      if ((access == Access::DepthTarget || access == Access::DepthReadOnly) &&
-          resources_[h.id].texture &&
-          !rhi::IsDepthFormat(resources_[h.id].texture->GetFormat())) {
-        spdlog::error(
-            "graph: pass '{}' declares '{}' as a depth attachment, but its "
-            "format is not a depth format",
-            pass.name, resources_[h.id].name);
-        return false;
+      //
+      // The format comes from the DESC for a transient, not the texture: they
+      // are created further down, once the declarations are known good, so
+      // asking the texture here reads a null pointer's format for every
+      // graph-owned depth buffer -- which is the common case, and was skipping
+      // the check for exactly the callers it was written for.
+      if (access == Access::DepthTarget || access == Access::DepthReadOnly) {
+        const Resource& dr = resources_[h.id];
+        const rhi::Format declared = dr.transient ? dr.desc.format
+                                     : dr.texture ? dr.texture->GetFormat()
+                                                  : rhi::Format::Undefined;
+        if (!rhi::IsDepthFormat(declared)) {
+          spdlog::error(
+              "graph: pass '{}' declares '{}' as a depth attachment, but its "
+              "format is not a depth format",
+              pass.name, resources_[h.id].name);
+          return false;
+        }
       }
     }
     // Marked only AFTER this pass's own reads are checked, so a pass that both
