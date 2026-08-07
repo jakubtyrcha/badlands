@@ -2478,6 +2478,7 @@ add_library(shapeshifter_core STATIC
     ${SHAPESHIFTER_DIR}/core/src/camera_controller.cpp
     ${SHAPESHIFTER_DIR}/core/src/dcsdd.cpp
     ${SHAPESHIFTER_DIR}/core/src/editor.cpp
+    ${SHAPESHIFTER_DIR}/core/src/frame.cpp
     ${SHAPESHIFTER_DIR}/core/src/gizmo.cpp
     ${SHAPESHIFTER_DIR}/core/src/lines.cpp
     ${SHAPESHIFTER_DIR}/core/src/mesh_job.cpp
@@ -2554,6 +2555,7 @@ add_executable(shapeshifter_core_tests
     ${SHAPESHIFTER_DIR}/tests/core/camera_tests.cpp
     ${SHAPESHIFTER_DIR}/tests/core/dcsdd_tests.cpp
     ${SHAPESHIFTER_DIR}/tests/core/drag_tests.cpp
+    ${SHAPESHIFTER_DIR}/tests/core/frame_tests.cpp
     ${SHAPESHIFTER_DIR}/tests/core/gizmo_tests.cpp
     ${SHAPESHIFTER_DIR}/tests/core/ground_grid_tests.cpp
     ${SHAPESHIFTER_DIR}/tests/core/lines_tests.cpp
