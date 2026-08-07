@@ -1077,6 +1077,9 @@ void SweWellBalancedness() {
   p.evaporation_m_per_yr = 0.f;
   p.swe_substeps = 100;
 
+  // FLUID-ONLY fixture: this is a statement about the water, so the
+  // Task-6 morpho group is switched off at its own gate (see RunSweCycles).
+  p.morfac = 0.f;
   Grid g(p.res);
   const float level = 310.0f;
   const int lo = 8, hi = 23;  // lake block, >= 8-cell dry margin to the border
@@ -1143,6 +1146,9 @@ void SweFillOracle() {
   p.evaporation_m_per_yr = 0.f;
   p.swe_substeps = 100;
 
+  // FLUID-ONLY fixture: this is a statement about the water, so the
+  // Task-6 morpho group is switched off at its own gate (see RunSweCycles).
+  p.morfac = 0.f;
   Grid g(p.res);
   InitTerrain(g, p);  // InitBowl: ramp + gaussian well, see protogen.cpp
 
@@ -1193,6 +1199,9 @@ void SweWaterLedger() {
   p.evaporation_m_per_yr = 15.0f;  // nonzero, exercises BOTH ledger terms
   p.swe_substeps = 60;
 
+  // FLUID-ONLY fixture: this is a statement about the water, so the
+  // Task-6 morpho group is switched off at its own gate (see RunSweCycles).
+  p.morfac = 0.f;
   Grid g(p.res);
   InitTerrain(g, p);
   const float cell_area = (p.world_m / float(p.res)) * (p.world_m / float(p.res));
@@ -1235,6 +1244,9 @@ void SweDeterminism() {
   p.runoff_m_per_yr = 200.0f;
   p.swe_substeps = 40;
 
+  // FLUID-ONLY fixture: this is a statement about the water, so the
+  // Task-6 morpho group is switched off at its own gate (see RunSweCycles).
+  p.morfac = 0.f;
   auto run = [&]() {
     Grid g(p.res);
     InitTerrain(g, p);
@@ -1263,6 +1275,8 @@ void SweTripwire() {
     p.world_m = 16.0f * float(p.res);
     p.relief_m = 1.0f;
     p.out = "";  // empty: must not attempt a dump
+    // FLUID-ONLY fixture: see the note in SweWellBalancedness.
+    p.morfac = 0.f;
     Grid g(p.res);
     InitTerrain(g, p);
     g.h[g.idx(12, 12)] = std::numeric_limits<float>::quiet_NaN();
@@ -1285,6 +1299,8 @@ void SweTripwire() {
     // bound), so 100 s comfortably exceeds it for any depth this fixture
     // could plausibly reach in 5 cycles.
     p.dt_floor_s = 100.0f;
+    // FLUID-ONLY fixture: see the note in SweWellBalancedness.
+    p.morfac = 0.f;
     Grid g(p.res);
     InitTerrain(g, p);
     std::fill(g.h.begin(), g.h.end(), 1.0f);  // some water, so CFL dt is finite
@@ -1337,6 +1353,8 @@ void SweTripwire() {
     p.relief_m = 1.0f;
     p.out = "";
     p.cfl_number = std::numeric_limits<float>::quiet_NaN();
+    // FLUID-ONLY fixture: see the note in SweWellBalancedness.
+    p.morfac = 0.f;
     Grid g(p.res);
     InitTerrain(g, p);
     std::fill(g.h.begin(), g.h.end(), 0.5f);  // clean, finite starting state
@@ -1585,6 +1603,9 @@ void SweManningConvergence() {
   p.swe_manning_n = 0.035f;
   p.swe_substeps = 60;
 
+  // FLUID-ONLY fixture: this is a statement about the water, so the
+  // Task-6 morpho group is switched off at its own gate (see RunSweCycles).
+  p.morfac = 0.f;
   Grid g(p.res);
   InitTerrain(g, p);
   RunSweCycles(g, p, /*cycles=*/300);
@@ -1758,6 +1779,9 @@ void WarmStartProximity() {
   p.bowl_well_m = 8.0f;        // V-convergence magnitude
   p.bowl_sigma_frac = 0.12f;   // reused below as the carved pit's sigma
 
+  // FLUID-ONLY fixture: this is a statement about the water, so the
+  // Task-6 morpho group is switched off at its own gate (see RunSweCycles).
+  p.morfac = 0.f;
   Grid g(p.res);
   InitTerrain(g, p);  // InitAnalytic's Valley: ramp down +y plus a V in x
 
@@ -1841,6 +1865,1169 @@ void WarmStartProximity() {
         ok, buf);
 }
 
+// ===================== phase-1 morphodynamics (Task 6) =====================
+//
+// Fixtures here are 32-48 cells at production-ish cell sizes, and they run
+// the REAL dispatch order through RunSweCycles wherever the statement is
+// about the coupled system. Where a statement is about ONE pass's arithmetic
+// (the substrate split, the backtrace clamp, the capacity law) the pass is
+// driven directly instead -- a coupled fixture would only add ways for the
+// test to fail for a reason it is not about.
+//
+// `relief_m = 1` throughout except where the units seam is the point
+// (ExnerSoilBedrockConservation runs at relief_m = 100 precisely to exercise
+// it). Two reasons: `height` then IS metres, so a fixture can be read
+// directly, and -- the load-bearing one -- float32 `height` at landform
+// elevations has a representable step of ~1e-5 m, which is the same order as
+// a single cycle's bed delta. Keeping fixture elevations under a few tens of
+// metres keeps that quantisation four orders below the signal, so a mass
+// ledger that fails here failed for a real reason.
+
+// A small phase-1 world: `res` cells at `cell_m` metres, morpho ACTIVE
+// (morfac = 1), no climate unless a fixture asks for it.
+Params MorphoBase(int res, float cell_m) {
+  Params p;
+  p.res = res;
+  p.world_m = cell_m * float(res);
+  p.relief_m = 1.0f;
+  p.runoff_m_per_yr = 0.f;
+  p.evaporation_m_per_yr = 0.f;
+  p.swe_substeps = 30;
+  p.morfac = 1.0f;
+  p.out = "";  // never touch the filesystem from a test
+  return p;
+}
+
+// A straight confined channel running down +y: high side walls, a bed that
+// falls linearly from `top_m` to `top_m - drop_m`, and a V-shaped incision
+// `notch_m` deep and `half_w` cells wide down the middle column. `soil_m` of
+// erodible cover everywhere. The far edge (y = res-1) is the outflow.
+void BuildChannel(Grid& g, const Params& p, float top_m, float drop_m,
+                  float notch_m, int half_w, float soil_m, float wall_m,
+                  float x_tilt = 0.f) {
+  const int n = g.n;
+  const float cell_m = p.world_m / float(p.res);
+  const int xc = n / 2;
+  for (int y = 0; y < n; ++y)
+    for (int x = 0; x < n; ++x) {
+      const size_t i = g.idx(x, y);
+      float z = top_m - drop_m * float(y) / float(n - 1);
+      const int dx = std::abs(x - xc);
+      if (dx > half_w + 2) {
+        z += wall_m;  // confining wall: keeps the flow in the channel
+      } else {
+        // V notch, plus an optional lateral tilt of the channel floor (the
+        // transverse-deflection fixture's only extra ingredient).
+        z -= notch_m * std::max(0.f, 1.f - float(dx) / float(half_w + 1));
+        z += x_tilt * float(x - xc) * cell_m;
+      }
+      g.height[i] = z / p.relief_m;
+      g.soil[i] = soil_m / p.relief_m;
+    }
+}
+
+void g_height_set(Grid& g, const Params& p, int x, int y, float metres) {
+  g.height[g.idx(x, y)] = metres / p.relief_m;
+}
+
+double SumBedM(const Grid& g, const Params& p) {
+  double s = 0;
+  for (float v : g.height) s += double(v) * double(p.relief_m);
+  return s;
+}
+double SumSusM(const Grid& g, const Params& p) {
+  double s = 0;
+  for (float v : g.sus) s += double(v) * double(p.relief_m);
+  return s;
+}
+
+// --- M1. flowing water over a FLAT bed still has capacity ------------------
+// The energy-slope amendment, stated as an experiment: a perfectly flat bed
+// with water running across it must have C > 0, because the WATER SURFACE
+// tilts even where the bed does not -- that tilt is what drives the flow. A
+// capacity built on the bed slope would be identically zero here, the reach
+// would never transport, and a flat reach would terrace instead of grading.
+void FlatReachTransport() {
+  Params p = MorphoBase(32, 16.f);
+  p.runoff_m_per_yr = 800.f;  // synthetic-fast, so a steady sheet develops in
+                              // a test-sized cycle budget (SweFillOracle's
+                              // own trick and its own reason)
+  p.morfac = 0.f;             // fluid only for now: establish the flow first
+  Grid g(p.res);
+  for (size_t i = 0; i < g.cells; ++i) {
+    g.height[i] = 5.0f;   // EXACTLY flat, bit-for-bit
+    g.soil[i] = 2.0f;
+  }
+  RunSweCycles(g, p, 150);
+
+  // The bed is still exactly flat (nothing has eroded yet), so any nonzero
+  // capacity below is the water surface's doing and nothing else.
+  bool bed_flat = true;
+  for (size_t i = 0; i < g.cells; ++i)
+    if (g.height[i] != 5.0f) bed_flat = false;
+
+  const int x = p.res / 2, y = p.res / 4;  // mid-slab, well inside the border
+  const float cap = SedCapacityM(g, p, x, y);
+  const size_t i = g.idx(x, y);
+  const float speed = std::sqrt(g.velx[i] * g.velx[i] + g.vely[i] * g.vely[i]);
+
+  // And it actually transports: switch morpho on and the flat bed must move.
+  //
+  // MORFAC 1000 is not a thumb on the scale, it is what makes the claim
+  // MEASURABLE IN FLOAT32. A flat reach's capacity is genuinely tiny (C is
+  // ~1e-7 m here), so one unaccelerated cycle asks the bed for a change three
+  // orders below `height`'s representable step at this elevation -- the
+  // addition would discard it entirely and the test would read "no transport"
+  // for a reason that has nothing to do with the physics. This is the same
+  // quantisation wall SedExchange's read-back handles cell by cell, seen from
+  // outside; MORFAC is the knob that lifts a real signal over it.
+  p.morfac = 1000.0f;
+  const std::vector<float> bed0 = g.height;
+  SweRunResult r = RunSweCycles(g, p, 60);
+  float max_move = 0.f;
+  for (size_t k = 0; k < g.cells; ++k)
+    max_move = std::max(max_move, std::fabs(g.height[k] - bed0[k]));
+
+  const bool ok = bed_flat && cap > 0.f && max_move > 0.f && r.ok;
+  char buf[240];
+  std::snprintf(buf, sizeof(buf),
+                "bed exactly flat=%d, |v|=%.4e m/s, C=%.4e m (bed-slope form "
+                "would be 0), max bed move over 60 morpho cycles %.3e m",
+                bed_flat, double(speed), double(cap), double(max_move));
+  Check("FlatReachTransport: flat bed, flowing water, C > 0", ok, buf);
+}
+
+// --- M2. a still lake is inert -------------------------------------------
+// The other half of the capacity law's contract, and checked BIT-EXACT
+// rather than within a tolerance: on a flat-surfaced lake both factors of
+// C = Kc*S_energy*|v| are exactly zero, so the whole morpho group must be a
+// no-op -- not "small", exactly nothing. Same fixture as
+// SweWellBalancedness (see its comment for why relief_m = 1 makes bed+h
+// reconstruct exactly), with soil added on the lake floor so the talus pair
+// has something it COULD move if it were wrong to.
+void StillLakeInert() {
+  Params p = MorphoBase(32, 16.f);
+  p.swe_substeps = 60;
+  Grid g(p.res);
+  const float level = 310.0f;
+  const int lo = 8, hi = 23;
+  const int cx = (lo + hi) / 2, cy = (lo + hi) / 2;
+  for (int y = 0; y < p.res; ++y)
+    for (int x = 0; x < p.res; ++x) {
+      const size_t i = g.idx(x, y);
+      if (x >= lo && x <= hi && y >= lo && y <= hi) {
+        const float dx = float(x - cx), dy = float(y - cy);
+        const float bed = 290.0f + 0.25f * std::sqrt(dx * dx + dy * dy);
+        g.height[i] = bed;
+        g.h[i] = level - bed;
+        g.soil[i] = 3.0f;  // erodible cover, deliberately available
+      } else {
+        g.height[i] = 400.0f;
+        g.h[i] = 0.f;
+        g.soil[i] = 0.f;  // dry margin gets none: a 100 m step to the lake
+                          // floor is far over repose, and BEDROCK DOES NOT
+                          // AVALANCHE -- soil-only talus is what makes that
+                          // margin legitimately immobile rather than merely
+                          // untested
+      }
+    }
+  const std::vector<float> h0 = g.h, bed0 = g.height, soil0 = g.soil;
+  const float cap_centre = SedCapacityM(g, p, cx, cy);
+
+  SweRunResult r = RunSweCycles(g, p, 3);
+
+  bool same = true;
+  for (size_t i = 0; i < g.cells && same; ++i)
+    if (g.h[i] != h0[i] || g.height[i] != bed0[i] || g.soil[i] != soil0[i] ||
+        g.sus[i] != 0.f)
+      same = false;
+  char buf[200];
+  std::snprintf(buf, sizeof(buf),
+                "status ok=%d, C at lake centre = %.3e m (want exactly 0), "
+                "h/bed/soil/sus all bit-identical=%d",
+                r.ok, double(cap_centre), same);
+  Check("StillLakeInert: still lake moves exactly nothing",
+        r.ok && cap_centre == 0.f && same, buf);
+}
+
+// --- M3. a sediment-rich river builds a delta at the inlet ----------------
+// The S1-era delta fixture rebuilt on the SWE: a confined channel spilling
+// into a STATIC closed lake, fed water and suspended load at its head each
+// cycle. Deposition must concentrate at the inlet -- that is what a delta
+// IS -- and must be essentially absent at the lake's far end, which is what
+// separates "settling where the flow dies" from "settling everywhere".
+//
+// Water and sediment are injected at the channel head rather than rained on
+// the map: global rain would wet the confining walls too, erode them, and
+// dust the whole lake perimeter with sediment that has nothing to do with
+// the river.
+void GeologyDeltaFormation() {
+  Params p = MorphoBase(48, 16.f);
+  p.swe_substeps = 25;
+  Grid g(p.res);
+  const int n = p.res, xc = n / 2, y_lake = 18, half_w = 3;
+  const float lake_level = 3.0f;
+  for (int y = 0; y < n; ++y)
+    for (int x = 0; x < n; ++x) {
+      const size_t i = g.idx(x, y);
+      float z;
+      const bool wall = (y < y_lake) ? (std::abs(x - xc) > half_w)
+                                     : (x < 2 || x > n - 3 || y > n - 3);
+      if (y < y_lake) {
+        z = 12.0f - 12.0f * float(y) / float(y_lake);  // channel: 12 m -> 0
+      } else {
+        z = 0.0f;                                      // flat lake floor
+      }
+      if (wall) z += 40.0f;                            // closed basin
+      g.height[i] = z;
+      g.soil[i] = 4.0f;
+      // Lake prefilled to a static level; the channel starts dry.
+      g.h[i] = (y >= y_lake && !wall) ? (lake_level - z) : 0.f;
+    }
+  const std::vector<float> bed0 = g.height;
+
+  const int cycles = 140;
+  SweRunResult r;
+  for (int c = 0; c < cycles && r.ok; ++c) {
+    for (int x = xc - half_w + 1; x <= xc + half_w - 1; ++x) {
+      const size_t src = g.idx(x, 1);
+      g.h[src] += 0.30f;    // water at the head
+      g.sus[src] += 0.02f;  // and the load it carries
+    }
+    r = RunSweCycles(g, p, 1);
+  }
+
+  // Three disjoint samples of the lake floor: the inlet apron, the middle,
+  // and the far end.
+  auto mean_gain = [&](int y0, int y1) {
+    double s = 0;
+    int cnt = 0;
+    for (int y = y0; y <= y1; ++y)
+      for (int x = 3; x <= n - 4; ++x) {
+        const size_t i = g.idx(x, y);
+        s += double(g.height[i] - bed0[i]);
+        ++cnt;
+      }
+    return cnt ? s / cnt : 0.0;
+  };
+  const double inlet = mean_gain(y_lake, y_lake + 4);
+  const double middle = mean_gain(n / 2 + 2, n / 2 + 6);
+  const double far = mean_gain(n - 8, n - 4);
+
+  // 5x is a shape statement, not a tuned threshold: a delta means the mound
+  // is at the inlet, and anything that merely settled uniformly would come
+  // out near 1x.
+  const bool ok = r.ok && inlet > 0.0 && inlet > 5.0 * std::fabs(middle) &&
+                  inlet > 5.0 * std::fabs(far);
+  char buf[240];
+  std::snprintf(buf, sizeof(buf),
+                "status ok=%d; mean lake-floor gain: inlet %.4e m, middle "
+                "%.4e m, far end %.4e m",
+                r.ok, inlet, middle, far);
+  Check("GeologyDeltaFormation: deposition concentrates at the inlet", ok,
+        buf);
+}
+
+// --- M4. the Exner ledger closes -----------------------------------------
+// Delta(bed) + Delta(sus) + border export - morfac-created = 0, at morfac = 1
+// where the created term is identically zero and the statement is plain mass
+// conservation. Run on a fixture that genuinely exports (an open outflow
+// edge), so the border term is exercised rather than merely present.
+void ExnerLedger() {
+  Params p = MorphoBase(40, 16.f);
+  p.runoff_m_per_yr = 400.f;
+  p.morfac = 1.0f;
+  Grid g(p.res);
+  BuildChannel(g, p, /*top_m=*/16.f, /*drop_m=*/14.f, /*notch_m=*/1.5f,
+               /*half_w=*/3, /*soil_m=*/3.f, /*wall_m=*/8.f);
+  // Seeded as a small PATCH rather than one cell. A delta function is not a
+  // sediment plume: Catmull-Rom overshoots hard on a one-cell spike, the
+  // clipping that follows is what the mass fixer then has to absorb, and the
+  // measured fixer correction was 2x larger with a single-cell seed purely
+  // because of that. Both close the ledger; the patch is the honest input.
+  for (int dy = -1; dy <= 1; ++dy)
+    for (int dx = -1; dx <= 1; ++dx)
+      g.sus[g.idx(p.res / 2 + dx, 3 + dy)] = 0.02f;
+  // Warm-started, like every production phase-1 run. Not cosmetic: from a
+  // BONE-DRY start, cycle 0's velocity field is an expanding wet-dry front,
+  // which is the worst case there is for a semi-Lagrangian gather (the
+  // backtrace displacement varies wildly cell to cell, so the resample's
+  // implied Jacobian does too, and mass is lost between the taps). Measured:
+  // the mass fixer had to apply a 3x correction on that one cycle and never
+  // moved again afterwards. Starting from a plausible water surface is both
+  // more representative and a far better-posed advection problem.
+  SweWarmStart(g, p);
+
+  const float cell_area = (p.world_m / float(p.res)) * (p.world_m / float(p.res));
+  const double before = (SumBedM(g, p) + SumSusM(g, p)) * double(cell_area);
+  SweRunResult r = RunSweCycles(g, p, 60);
+  const double after = (SumBedM(g, p) + SumSusM(g, p)) * double(cell_area);
+
+  const double resid = (after - before) + g.swe_sed_border_export_m3 -
+                       g.swe_sed_morfac_created_m3;
+  const double moved = std::fabs(after - before) +
+                       std::fabs(g.swe_sed_border_export_m3) + 1e-9;
+  const double rel = std::fabs(resid) / moved;
+  char buf[280];
+  std::snprintf(buf, sizeof(buf),
+                "Delta(bed+sus) %.6e + export %.6e - morfac-created %.6e = "
+                "%.3e m3 (rel %.2e); advect mass-fixer worst |f-1| = %.3e",
+                after - before, g.swe_sed_border_export_m3,
+                g.swe_sed_morfac_created_m3, resid, rel,
+                g.swe_sed_advect_fix_max);
+  // The morfac-created term MUST be exactly zero at M = 1 -- if it is not,
+  // the staggering leaked into a path it has no business in.
+  const bool ok = r.ok && rel < 1e-6 && g.swe_sed_morfac_created_m3 == 0.0 &&
+                  // and the mass fixer must not be doing the heavy lifting:
+                  // a fixer working hard means the advection step is wrong,
+                  // even though the ledger would still close. 0.35 is the
+                  // measured STARTUP figure -- the first two cycles, while
+                  // the seeded patch is still a sharp feature being spread
+                  // over its first few cells, dominate it; from cycle 2 on
+                  // the running maximum never moves again for the rest of
+                  // the run.
+                  g.swe_sed_advect_fix_max < 0.35;
+  Check("ExnerLedger: Delta(bed) + Delta(sus) + export = 0", ok, buf);
+}
+
+// --- M5. a flow exactly at capacity exchanges nothing ---------------------
+// Initialise `sus` to EXACTLY the local capacity everywhere the cell is wet.
+// Neither branch of the exchange may fire: erosion needs C > sus, deposition
+// needs sus > C, and equality is neither. Checked bit-exact on the bed, then
+// SedAdvect is run on its own to show the sediment does still move -- "purely
+// advects" is the actual claim, not "is frozen".
+void ExnerCapacityLimiter() {
+  Params p = MorphoBase(40, 16.f);
+  p.runoff_m_per_yr = 400.f;
+  p.morfac = 0.f;  // fluid only while the flow field is established
+  Grid g(p.res);
+  BuildChannel(g, p, 16.f, 14.f, 1.5f, 3, 3.f, 8.f);
+  RunSweCycles(g, p, 80);
+
+  // relief_m == 1, so metres and height units are the same number and
+  // `sus` can hold the capacity EXACTLY (x1.0 and /1.0 are both exact).
+  // Dry cells get zero: their capacity is zero by definition, and a nonzero
+  // `sus` there would be surplus and would legitimately deposit, which is a
+  // different test.
+  int wet_cells = 0;
+  for (int y = 0; y < p.res; ++y)
+    for (int x = 0; x < p.res; ++x) {
+      const size_t i = g.idx(x, y);
+      if (g.h[i] > p.eps_wet) {
+        g.sus[i] = SedCapacityM(g, p, x, y);
+        if (g.sus[i] > 0.f) ++wet_cells;
+      } else {
+        g.sus[i] = 0.f;
+      }
+    }
+  const std::vector<float> bed0 = g.height, soil0 = g.soil, sus0 = g.sus;
+
+  p.morfac = 1.0f;
+  SedExchange(g, p, 30.0f);
+  bool bed_exact = true, sus_exact = true;
+  for (size_t i = 0; i < g.cells; ++i) {
+    if (g.height[i] != bed0[i] || g.soil[i] != soil0[i]) bed_exact = false;
+    if (g.sus[i] != sus0[i]) sus_exact = false;
+  }
+
+  const double sus_before = SumSusM(g, p);
+  SedAdvect(g, p, 30.0f);
+  double moved = 0.0;
+  for (size_t i = 0; i < g.cells; ++i)
+    moved += std::fabs(double(g.sus[i]) - double(sus0[i]));
+  const double sus_after = SumSusM(g, p);
+
+  const bool ok = bed_exact && sus_exact && moved > 0.0;
+  char buf[260];
+  std::snprintf(buf, sizeof(buf),
+                "%d wet cells seeded at C; bed+soil bit-identical=%d, sus "
+                "bit-identical=%d after exchange; advection then moved "
+                "%.3e m (sum sus %.6e -> %.6e)",
+                wet_cells, bed_exact, sus_exact, moved, sus_before, sus_after);
+  Check("ExnerCapacityLimiter: at capacity, nothing erodes or deposits", ok,
+        buf);
+}
+
+// --- M6. the soil -> bedrock transition is mass-conservative --------------
+// The brief's exact numbers: 0.1 m of soil over bedrock, a 0.5 m erosion
+// demand, erodibility 0.1. The soil goes entirely; the REMAINING 0.4 m of
+// demand is scaled by 0.1 BEFORE it bites rock and takes 0.04 m; `sus` gains
+// exactly 0.14 m.
+//
+// AND THIS IS THE UNITS-SEAM TEST: relief_m = 100, so `height`/`soil`/`sus`
+// are all a hundredth of the metres they represent, and every one of those
+// numbers is a claim about METRES. A missing or doubled conversion anywhere
+// in the exchange shows up here as a factor of 100.
+void ExnerSoilBedrockConservation() {
+  // First, the law on its own -- no fixture, no fluid.
+  Params law;
+  law.bedrock_erodibility = 0.1f;
+  const float y_direct = SedSubstrateYieldM(0.5f, 0.1f, law);
+
+  // Then the same numbers through the real pass, in real metres.
+  Params p = MorphoBase(16, 16.f);
+  p.relief_m = 100.0f;  // THE SEAM: height units are 100 m each
+  p.bedrock_erodibility = 0.1f;
+  p.morfac = 1.0f;
+  p.adaptation_length_m = 1e-6f;    // rate saturates at 1: demand = C - sus
+  p.channel_width_coeff = 1e9f;     // channelization factor saturates at 1
+  p.capacity_Kc_s = 50.0f;          // with S = 0.01, |v| = 2 -> C = 1.0 m
+
+  Grid g(p.res);
+  const float cell_m = p.world_m / float(p.res);
+  const float S = 0.01f;
+  for (int y = 0; y < p.res; ++y)
+    for (int x = 0; x < p.res; ++x) {
+      const size_t i = g.idx(x, y);
+      const float bed_m = 20.0f - S * float(x) * cell_m;
+      g.height[i] = bed_m / p.relief_m;
+      g.soil[i] = 0.1f / p.relief_m;    // 0.1 m of cover
+      g.h[i] = 10.0f;                   // deep: clamp bound 0.1*h = 1 m > 0.5
+      g.velx[i] = 2.0f;
+      g.vely[i] = 0.f;
+      // The channelization factor reads the FACE FLUXES, not `velx` -- so a
+      // hand-built fixture has to set them or it gets a zero-discharge cell
+      // and a zero factor. This is SweVelocity's own relation run backwards:
+      // flux = v * h * cell_m.
+      g.flux[i] = {2.0f * 10.0f * cell_m, 0.f, 0.f, 0.f};
+    }
+  const int px = 8, py = 8;
+  const float cap = SedCapacityM(g, p, px, py);
+  // Set the load exactly 0.5 m below capacity, so the demand is 0.5 m.
+  for (size_t i = 0; i < g.cells; ++i) g.sus[i] = (cap - 0.5f) / p.relief_m;
+
+  const size_t i = g.idx(px, py);
+  const float bed_before_m = g.height[i] * p.relief_m;
+  const float sus_before_m = g.sus[i] * p.relief_m;
+  SedExchange(g, p, 1.0f);
+  const float bed_after_m = g.height[i] * p.relief_m;
+  const float sus_after_m = g.sus[i] * p.relief_m;
+  const float soil_after_m = g.soil[i] * p.relief_m;
+
+  const float d_bed = bed_after_m - bed_before_m;   // want -0.14
+  const float d_sus = sus_after_m - sus_before_m;   // want +0.14
+  const bool ok = std::fabs(y_direct - 0.14f) < 1e-6f &&
+                  std::fabs(d_bed + 0.14f) < 1e-4f &&
+                  std::fabs(d_sus - 0.14f) < 1e-4f &&
+                  soil_after_m < 1e-5f;
+  char buf[280];
+  std::snprintf(buf, sizeof(buf),
+                "law(0.5,0.1)=%.6f (want 0.14); C=%.4f m, demand 0.5 m at "
+                "relief_m=100: bed %+.6f m, sus %+.6f m, soil left %.2e m",
+                double(y_direct), double(cap), double(d_bed), double(d_sus),
+                double(soil_after_m));
+  Check("ExnerSoilBedrockConservation: soil-first split, exact numbers", ok,
+        buf);
+}
+
+// --- M7. transverse bed slope deflects the sediment flux ------------------
+// A straight channel down +y whose floor is slightly tilted in x. The
+// sediment flux must lean toward the LOWER bank -- Ikeda's/Struiksma's
+// closure, and the mechanism that seeds meandering.
+//
+// The discriminator is a direct coeff-on vs coeff-off comparison, not the
+// raw asymmetry: a tilted floor makes the WATER lean too, so some deposition
+// asymmetry exists with the deflection switched off entirely. What the
+// closure must add is MORE of it, in the same direction.
+void MorphoTransverseSlopeDeflection() {
+  // Part 1, THE MECHANISM, isolated: uniform flow down +y over a bed tilted
+  // in x, one advection pass, no fluid solver and no exchange. The load's
+  // centroid must move toward the LOW side, and must not move AT ALL with
+  // the coefficient at zero. This half is exact and unambiguous -- it is
+  // what proves the closure is wired up and pointing the right way.
+  auto direct = [](float coeff) {
+    Params p = MorphoBase(32, 16.f);
+    p.transverse_slope_coeff = coeff;
+    Grid g(p.res);
+    for (int y = 0; y < p.res; ++y)
+      for (int x = 0; x < p.res; ++x) {
+        const size_t i = g.idx(x, y);
+        g.height[i] = 10.0f + 0.10f * float(x);  // 0.1 m per 16 m cell
+        g.h[i] = 1.0f;
+        g.velx[i] = 0.f;
+        g.vely[i] = 4.0f;
+      }
+    g.sus[g.idx(16, 8)] = 1.0f;
+    SedAdvect(g, p, 16.0f);  // 4 m/s x 16 s = 4 cells downstream
+    double m1 = 0, m0 = 0;
+    for (int y = 0; y < p.res; ++y)
+      for (int x = 0; x < p.res; ++x) {
+        const double w = double(g.sus[g.idx(x, y)]);
+        m1 += w * double(x - 16);
+        m0 += w;
+      }
+    return m0 > 0 ? m1 / m0 : 0.0;
+  };
+  const double d_off = direct(0.0f);
+  const double d_on = direct(1.0f);
+
+  // Part 2, THE CONSEQUENCE: a straight channel with a 2% lateral tilt whose
+  // long profile FLATTENS in its lower half (all the fall spent upstream).
+  // A uniformly steep channel is erosional end to end and deposits nothing
+  // at all -- a reach that flattens is where a real river drops its load and
+  // the only place a depositional asymmetry can be read. The deposition must
+  // land on the low bank.
+  auto emergent = [](float coeff) {
+    Params p = MorphoBase(40, 16.f);
+    p.runoff_m_per_yr = 400.f;
+    p.transverse_slope_coeff = coeff;
+    p.morfac = 50.0f;
+    Grid g(p.res);
+    const int n = p.res, xc = n / 2;
+    const float cell_m = p.world_m / float(p.res);
+    for (int y = 0; y < n; ++y)
+      for (int x = 0; x < n; ++x) {
+        const size_t i = g.idx(x, y);
+        const float t = std::min(1.f, float(y) / (0.5f * float(n - 1)));
+        float z = 16.0f - 14.0f * t;
+        const int dx = std::abs(x - xc);
+        if (dx > 5) z += 10.0f;                     // confining wall
+        else z += 0.02f * float(x - xc) * cell_m;   // 2% lateral tilt
+        g.height[i] = z;
+        g.soil[i] = 3.0f;
+      }
+    for (int x = xc - 3; x <= xc + 3; ++x) g.sus[g.idx(x, 2)] = 0.03f;
+    SweWarmStart(g, p);
+    const std::vector<float> bed0 = g.height;
+    RunSweCycles(g, p, 120);
+    double m1 = 0, m0 = 0;
+    for (int y = n / 2; y < n - 4; ++y)
+      for (int x = xc - 5; x <= xc + 5; ++x) {
+        const size_t i = g.idx(x, y);
+        const double dep = std::max(0.0, double(g.height[i]) - double(bed0[i]));
+        m1 += dep * double(x - xc);
+        m0 += dep;
+      }
+    return m0 > 0 ? m1 / m0 : 0.0;
+  };
+  const double e_on = emergent(1.0f);
+
+  const bool ok = d_off == 0.0 && d_on < -1e-3 && e_on < -1.0;
+  char buf[280];
+  std::snprintf(buf, sizeof(buf),
+                "isolated flux centroid over a 0.625%% cross-slope: coeff=0 "
+                "%+.5f cells (want exactly 0), coeff=1 %+.5f (want < 0); "
+                "channel deposition centroid at coeff=1 %+.3f cells (want on "
+                "the low bank)",
+                d_off, d_on, e_on);
+  Check("MorphoTransverseSlopeDeflection: flux leans to the low bank", ok,
+        buf);
+}
+
+// --- M8. a knickpoint retreats upstream ----------------------------------
+// A channel with a sudden step in it. The energy slope is largest at the
+// step, so that is where incision is fastest; as the step is cut back, the
+// steep point moves UPSTREAM. Measured as the erosion-weighted centroid of
+// the bed change in a window around the step, compared between an early and
+// a late interval of the same run -- more robust than an argmax, which on a
+// 40-cell fixture can hop a cell on noise alone.
+void GeologyKnickpointRetreat() {
+  Params p = MorphoBase(40, 16.f);
+  p.runoff_m_per_yr = 400.f;
+  p.morfac = 200.0f;
+  Grid g(p.res);
+  BuildChannel(g, p, 20.f, 10.f, 1.5f, 3, 4.f, 10.f);
+  // The step: everything upstream of y_step lifted, so the bed drops 3 m
+  // over one cell there.
+  const int y_step = 22, xc = p.res / 2;
+  for (int y = 0; y < y_step; ++y)
+    for (int x = 0; x < p.res; ++x) g.height[g.idx(x, y)] += 3.0f;
+
+  auto snapshot = [&]() { return g.height; };
+  auto centroid = [&](const std::vector<float>& a,
+                      const std::vector<float>& b) {
+    // erosion-weighted mean y over a window straddling the step
+    double m1 = 0, m0 = 0;
+    for (int y = y_step - 10; y <= y_step + 6; ++y)
+      for (int x = xc - 3; x <= xc + 3; ++x) {
+        const size_t i = g.idx(x, y);
+        const double cut = std::max(0.0, double(a[i]) - double(b[i]));
+        m1 += cut * double(y);
+        m0 += cut;
+      }
+    return m0 > 0 ? m1 / m0 : -1.0;
+  };
+
+  SweRunResult r;
+  const std::vector<float> s0 = snapshot();
+  r = RunSweCycles(g, p, 60);
+  const std::vector<float> s1 = snapshot();
+  if (r.ok) r = RunSweCycles(g, p, 120);
+  const std::vector<float> s2 = snapshot();
+
+  const double early = centroid(s0, s1);
+  const double late = centroid(s1, s2);
+  const bool ok = r.ok && early > 0 && late > 0 && late < early;
+  char buf[220];
+  std::snprintf(buf, sizeof(buf),
+                "status ok=%d; erosion centroid y: cycles 0-60 %.3f -> "
+                "cycles 60-180 %.3f (step at y=%d; smaller y = upstream)",
+                r.ok, early, late, y_step);
+  Check("GeologyKnickpointRetreat: the cut migrates upstream", ok, buf);
+}
+
+// --- M9. MORFAC = 10,000 does not drill a bottomless pit ------------------
+// The clamp's reason for existing, exercised at a MORFAC four orders above
+// production sanity. Two claims: the deepest incision anywhere stays inside
+// the clamp's own budget (cycles x kMaxBedDeltaFraction x depth), and it is
+// not a SINGLE PIXEL -- the deepest cell has company, so what happened is a
+// scour hole and not a numerical drill.
+void GeologyNoBottomlessPits() {
+  Params p = MorphoBase(32, 16.f);
+  p.runoff_m_per_yr = 600.f;
+  p.morfac = 10000.0f;
+  Grid g(p.res);
+  BuildChannel(g, p, 16.f, 12.f, 1.f, 3, 6.f, 8.f);
+  // A local velocity spike: one cell of the channel floor dropped, which
+  // steepens the energy slope right at its lip.
+  const int sx = p.res / 2, sy = p.res / 2;
+  g.height[g.idx(sx, sy)] -= 1.5f;
+
+  const std::vector<float> bed0 = g.height;
+  const int cycles = 40;
+  SweRunResult r = RunSweCycles(g, p, cycles);
+
+  float h_max = 0.f;
+  for (float v : g.h) h_max = std::max(h_max, v);
+  double worst = 0;
+  size_t worst_i = 0;
+  bool finite = true;
+  for (size_t i = 0; i < g.cells; ++i) {
+    if (!std::isfinite(g.height[i])) finite = false;
+    const double cut = double(bed0[i]) - double(g.height[i]);
+    if (cut > worst) { worst = cut; worst_i = i; }
+  }
+  // Clamp budget: at most kMaxBedDeltaFraction of the local depth per cycle.
+  // h_max is measured at the END, and depth only shrank as the bed cut into
+  // it, so this bound is if anything generous.
+  const double budget = double(cycles) * double(kMaxBedDeltaFraction) *
+                        double(std::max(h_max, p.eps_wet)) * 1.05;
+  // Not a single pixel: at least one 4-neighbour cut at least a quarter as
+  // deep.
+  const int wx = int(worst_i % size_t(p.res)), wy = int(worst_i / size_t(p.res));
+  double best_nb = 0;
+  const int d4x[4] = {1, -1, 0, 0}, d4y[4] = {0, 0, 1, -1};
+  for (int k = 0; k < 4; ++k) {
+    const int nx = wx + d4x[k], ny = wy + d4y[k];
+    if (nx < 0 || ny < 0 || nx >= p.res || ny >= p.res) continue;
+    const size_t j = g.idx(nx, ny);
+    best_nb = std::max(best_nb, double(bed0[j]) - double(g.height[j]));
+  }
+  const bool coherent = worst <= 0 || best_nb >= 0.25 * worst;
+  const bool ok = r.ok && finite && worst <= budget && coherent;
+  char buf[260];
+  std::snprintf(buf, sizeof(buf),
+                "status ok=%d finite=%d; deepest cut %.4f m over %d cycles "
+                "(clamp budget %.4f m); best neighbour cut %.4f m (%.0f%% of "
+                "it)",
+                r.ok, finite, worst, cycles, budget, best_nb,
+                100.0 * best_nb / std::max(worst, 1e-12));
+  Check("GeologyNoBottomlessPits: MORFAC 10,000 stays bounded", ok, buf);
+}
+
+// --- M10. no runaway -----------------------------------------------------
+// Cycle by cycle, from OUTSIDE the passes: the bed may never move further in
+// one cycle than the clamp promises, and nothing may go non-finite.
+void NoRunaway() {
+  Params p = MorphoBase(32, 16.f);
+  p.runoff_m_per_yr = 600.f;
+  p.morfac = 500.0f;
+  // Talus effectively off (nothing on this fixture approaches an 80 degree
+  // slope). Deliberate: the claim under test is THE CLAMP's, and the talus
+  // pair has a bound of its own shape entirely (a fraction of the repose
+  // excess, limited by the soil present) with its own test, TalusRepose.
+  // Leaving both in would make any violation un-attributable.
+  p.repose_angle_deg = 80.0f;
+  Grid g(p.res);
+  BuildChannel(g, p, 16.f, 12.f, 1.f, 3, 5.f, 8.f);
+
+  bool bounded = true, finite = true;
+  double worst_ratio = 0.0;
+  SweRunResult r;
+  for (int c = 0; c < 40 && r.ok; ++c) {
+    const std::vector<float> bed0 = g.height;
+    float h_max = 0.f, sus_max = 0.f;
+    for (float v : g.h) h_max = std::max(h_max, v);
+    for (float v : g.sus) sus_max = std::max(sus_max, v * p.relief_m);
+    r = RunSweCycles(g, p, 1);
+    // The depth the clamp actually saw is the one AT the morpho pass, i.e.
+    // after this cycle's substeps -- rain arrives during the cycle, so the
+    // pre-cycle depth alone would understate it (a bone-dry start would make
+    // the budget eps_wet-sized however much water fell).
+    for (float v : g.h) h_max = std::max(h_max, v);
+    // Two terms, and both are documented exceptions rather than slack:
+    //   - the clamp proper, kMaxBedDeltaFraction of the local depth;
+    //   - the DRY-SETTLING bypass, where a stranded load lands in one cycle
+    //     with MORFAC deliberately not applied (see SedExchange). It is
+    //     bounded by the load present, which is what `sus_max` measures.
+    const double budget =
+        double(kMaxBedDeltaFraction) * double(std::max(h_max, p.eps_wet)) +
+        double(sus_max);
+    for (size_t i = 0; i < g.cells; ++i) {
+      if (!std::isfinite(g.height[i]) || !std::isfinite(g.sus[i])) finite = false;
+      const double d = std::fabs(double(g.height[i]) - double(bed0[i]));
+      worst_ratio = std::max(worst_ratio, d / std::max(budget, 1e-12));
+      if (d > budget * 1.01) bounded = false;
+    }
+  }
+  char buf[200];
+  std::snprintf(buf, sizeof(buf),
+                "status ok=%d finite=%d bounded=%d; worst per-cycle bed move "
+                "as a fraction of the budget: %.3f",
+                r.ok, finite, bounded, worst_ratio);
+  Check("NoRunaway: per-cycle bed change stays inside the clamp",
+        r.ok && finite && bounded, buf);
+}
+
+// --- M11. talus relaxes to the repose angle ------------------------------
+// A soil cone far steeper than repose, relaxed by the Jacobi talus pair
+// alone (no fluid at all). Two claims, and the second is the one that would
+// catch a broken gather: every 8-neighbour slope ends at or under repose,
+// and the total is conserved EXACTLY -- the pair moves material, it does not
+// create or destroy it.
+void TalusRepose() {
+  Params p = MorphoBase(32, 16.f);
+  Grid g(p.res);
+  const float cell_m = p.world_m / float(p.res);
+  const int cx = p.res / 2, cy = p.res / 2;
+  for (int y = 0; y < p.res; ++y)
+    for (int x = 0; x < p.res; ++x) {
+      const size_t i = g.idx(x, y);
+      const float r_m = std::sqrt(float((x - cx) * (x - cx) + (y - cy) * (y - cy))) * cell_m;
+      const float cone = std::max(0.f, 200.0f - 2.0f * r_m);  // 63 deg: way over
+      g.height[i] = cone;  // bedrock is flat 0, the cone IS soil
+      g.soil[i] = cone;
+    }
+  const double before = SumBedM(g, p);
+
+  for (int it = 0; it < 600; ++it) {
+    TalusFlux(g, p);
+    TalusApply(g, p);
+  }
+
+  const double after = SumBedM(g, p);
+  const float tan_repose = std::tan(p.repose_angle_deg * 3.14159265f / 180.0f);
+  float worst = 0.f;
+  bool soil_ok = true;
+  const int tdx[8] = {-1, 0, 1, -1, 1, -1, 0, 1};
+  const int tdy[8] = {-1, -1, -1, 0, 0, 1, 1, 1};
+  for (int y = 0; y < p.res; ++y)
+    for (int x = 0; x < p.res; ++x) {
+      const size_t i = g.idx(x, y);
+      if (g.soil[i] < -1e-6f) soil_ok = false;
+      for (int k = 0; k < 8; ++k) {
+        const int nx = x + tdx[k], ny = y + tdy[k];
+        if (nx < 0 || ny < 0 || nx >= p.res || ny >= p.res) continue;
+        const bool diag = tdx[k] != 0 && tdy[k] != 0;
+        const float dist = diag ? cell_m * 1.41421356f : cell_m;
+        worst = std::max(worst,
+                         (g.height[i] - g.height[g.idx(nx, ny)]) / dist);
+      }
+    }
+  const double rel_mass = std::fabs(after - before) / std::max(before, 1e-9);
+  const bool ok = worst <= tan_repose * 1.001f && rel_mass < 1e-6 && soil_ok;
+  char buf[240];
+  std::snprintf(buf, sizeof(buf),
+                "steepest post-pass slope %.4f vs tan(%.0f deg) = %.4f; mass "
+                "%.6e -> %.6e (rel drift %.2e); soil non-negative=%d",
+                double(worst), double(p.repose_angle_deg), double(tan_repose),
+                before, after, rel_mass, soil_ok);
+  Check("TalusRepose: relaxes to repose, conserves mass exactly", ok, buf);
+}
+
+// --- M12. MORFAC is a time rescaling, not a physics knob ------------------
+// Halve M and double the cycles: the same amount of BED time passes, so the
+// landscape must land in the same place. It cannot land there exactly -- the
+// staggering is a first-order splitting, and its error is O(M), so halving M
+// halves the error rather than removing it. What the test pins is that the
+// two runs agree to within the size of that error and not merely in sign.
+void MorfacInvariance() {
+  auto run = [](float morfac, int cycles) {
+    Params p = MorphoBase(32, 16.f);
+    p.runoff_m_per_yr = 400.f;
+    p.morfac = morfac;
+    Grid g(p.res);
+    BuildChannel(g, p, 16.f, 12.f, 1.f, 3, 4.f, 8.f);
+    const std::vector<float> bed0 = g.height;
+    RunSweCycles(g, p, cycles);
+    std::vector<float> d(g.cells);
+    for (size_t i = 0; i < g.cells; ++i) d[i] = g.height[i] - bed0[i];
+    return d;
+  };
+  // M = 4 and 2, not 40 and 20, and the reason is measured rather than
+  // aesthetic: on this fixture 20% of the moved cells sit ON the MORFAC
+  // clamp at M = 10 and 65% at M = 300 (measured directly). A clamped cell
+  // moves the SAME distance at M and at M/2, so doubling the cycles doubles
+  // its total change -- MORFAC invariance is not merely approximate there,
+  // it is false, and no tolerance would make the test meaningful. The clamp
+  // is a deliberate nonlinearity, and it has its own test
+  // (GeologyNoBottomlessPits); this one is the statement about the LINEAR
+  // regime, so it picks M inside it (2 cells of 1500 clamped at M = 1).
+  const std::vector<float> a = run(4.0f, 60);
+  const std::vector<float> b = run(2.0f, 120);
+  double num = 0, den = 0;
+  for (size_t i = 0; i < a.size(); ++i) {
+    num += std::fabs(double(a[i]) - double(b[i]));
+    den += std::fabs(double(a[i]));
+  }
+  const double rel = den > 0 ? num / den : 1.0;
+  // 30%: measured, and honest about what it is. This is a first-order
+  // operator splitting between a fluid at its CFL step and a bed running M
+  // times faster; the splitting error IS first order in M, so an exact match
+  // would mean the fixture was inert, not that the scheme was better than it
+  // is. What the bound rules out is a landscape that depends on M as a
+  // PARAMETER rather than as a time rescaling -- that failure mode comes out
+  // at O(1), not at 30%.
+  const bool ok = den > 0 && rel < 0.30;
+  char buf[200];
+  std::snprintf(buf, sizeof(buf),
+                "L1|bedchange(M=4,60cyc) - bedchange(M=2,120cyc)| / "
+                "L1|first| = %.4f (sum |change| %.4e m)",
+                rel, den);
+  Check("MorfacInvariance: halve M, double cycles, same landscape", ok, buf);
+}
+
+// --- M13. the substep count is a splitting choice, not a time knob --------
+// Double the substeps per cycle and halve the cycles: the SAME total fluid
+// time and the same total bed time, only the fluid/morpho coupling frequency
+// changes. If N were too small, the fluid the morpho pass sees would be far
+// from quasi-steady and the two would disagree.
+void SubstepSufficiency() {
+  auto run = [](int substeps, int cycles) {
+    Params p = MorphoBase(32, 16.f);
+    p.runoff_m_per_yr = 400.f;
+    p.swe_substeps = substeps;
+    // In the clamp's linear regime, for the reason MorfacInvariance spells
+    // out: a clamped cell would make this test a measurement of the clamp.
+    p.morfac = 4.0f;
+    Grid g(p.res);
+    BuildChannel(g, p, 16.f, 12.f, 1.f, 3, 4.f, 8.f);
+    const std::vector<float> bed0 = g.height;
+    RunSweCycles(g, p, cycles);
+    std::vector<float> d(g.cells);
+    for (size_t i = 0; i < g.cells; ++i) d[i] = g.height[i] - bed0[i];
+    return d;
+  };
+  const std::vector<float> a = run(20, 40);
+  const std::vector<float> b = run(40, 20);
+  double num = 0, den = 0;
+  for (size_t i = 0; i < a.size(); ++i) {
+    num += std::fabs(double(a[i]) - double(b[i]));
+    den += std::fabs(double(a[i]));
+  }
+  const double rel = den > 0 ? num / den : 1.0;
+  const bool ok = den > 0 && rel < 0.30;
+  char buf[200];
+  std::snprintf(buf, sizeof(buf),
+                "L1|bedchange(N=20,40cyc) - bedchange(N=40,20cyc)| / "
+                "L1|first| = %.4f (sum |change| %.4e m)",
+                rel, den);
+  Check("SubstepSufficiency: same total time, same landscape", ok, buf);
+}
+
+// --- M14. the morpho passes are resolution-invariant ---------------------
+// Same world, half the cell size, twice the cycles (the CFL dt scales with
+// cell_m, so twice as many cycles is the same simulated time). Compared on a
+// 2x2 block average, which is the only fair comparison between two grids.
+//
+// THE SUB-GRID CHANNELIZATION FACTOR IS DISABLED HERE ON PURPOSE, by
+// saturating `channel_width_coeff`. That factor is min(1, w/cell_m): it is a
+// closure for what happens BELOW the grid scale, so it is resolution-
+// dependent BY CONSTRUCTION and vanishes as the cell approaches the channel
+// width -- which is correct behaviour, not a defect, and would make this
+// test a measurement of the closure rather than of the passes. What is under
+// test here is the passes themselves.
+void SweResolutionInvariance() {
+  auto run = [](int res, int cycles) {
+    Params p = MorphoBase(res, 512.f / float(res));  // 512 m world either way
+    p.runoff_m_per_yr = 400.f;
+    p.morfac = 4.0f;               // linear regime, as MorfacInvariance argues
+    p.channel_width_coeff = 1e9f;  // channelization factor == 1 everywhere
+    Grid g(p.res);
+    // The fixture is defined entirely in METRES, never in cells: a tilted
+    // plain with a broad gaussian hollow that concentrates the flow. A
+    // cell-defined fixture (an "n-cell-wide notch") is a DIFFERENT LANDSCAPE
+    // at each resolution, which is a fine way to measure nothing -- the
+    // first attempt here did exactly that and came out at 107% disagreement.
+    const float cell_m = p.world_m / float(p.res);
+    for (int y = 0; y < p.res; ++y)
+      for (int x = 0; x < p.res; ++x) {
+        const float wx = (float(x) + 0.5f) * cell_m - 0.5f * p.world_m;
+        const float wy = (float(y) + 0.5f) * cell_m;
+        const float hollow =
+            4.0f * std::exp(-(wx * wx) / (2.0f * 80.0f * 80.0f));
+        g_height_set(g, p, x, y, 20.0f - 12.0f * wy / p.world_m - hollow);
+        g.soil[g.idx(x, y)] = 4.0f / p.relief_m;
+      }
+    const std::vector<float> bed0 = g.height;
+    RunSweCycles(g, p, cycles);
+    std::vector<float> d(g.cells);
+    for (size_t i = 0; i < g.cells; ++i) d[i] = g.height[i] - bed0[i];
+    return d;
+  };
+  // Half the cell size doubles the CFL substep rate, so twice the cycles is
+  // the same simulated time.
+  const std::vector<float> coarse = run(24, 40);
+  const std::vector<float> fine = run(48, 80);
+  double num = 0, den = 0;
+  for (int y = 0; y < 24; ++y)
+    for (int x = 0; x < 24; ++x) {
+      double f = 0;
+      for (int dy = 0; dy < 2; ++dy)
+        for (int dx = 0; dx < 2; ++dx)
+          f += double(fine[size_t(2 * y + dy) * 48 + size_t(2 * x + dx)]);
+      f *= 0.25;
+      const double c = double(coarse[size_t(y) * 24 + size_t(x)]);
+      num += std::fabs(c - f);
+      den += std::fabs(c);
+    }
+  const double rel = den > 0 ? num / den : 1.0;
+  // 60%: a genuinely loose bar, stated as such. Two grids at 2x cell size do
+  // not resolve the same sheet-flow depths (Manning depth goes as the unit
+  // discharge, which is per CELL WIDTH), and no first-order scheme makes them
+  // agree exactly. What this rules out is the failure that matters -- a pass
+  // whose magnitude scales with cell_m (a missing /cell_m, an area/length
+  // confusion) -- which shows up as a factor of 2 or 4, not as 60%.
+  const bool ok = den > 0 && rel < 0.60;
+  char buf[200];
+  std::snprintf(buf, sizeof(buf),
+                "L1|coarse - blockavg(fine)| / L1|coarse| = %.4f (sum "
+                "|change| %.4e m)",
+                rel, den);
+  Check("SweResolutionInvariance: morpho passes survive refinement", ok, buf);
+}
+
+// --- M15. a carved channel survives the SWE morpho pass ------------------
+// THE AMENDMENT'S TEST. Phase 0 hands phase 1 a landscape whose channels
+// were carved by a sub-grid particle walk; the SWE then sees each of them as
+// cell_m-wide sheet flow. Without the channelization factor the bank cells
+// -- thin, fast, steep overland flow -- erode at very nearly the same rate
+// as the channel floor, so the channel loses definition: it widens and fills
+// instead of holding. With the factor, a bank cell's tiny net discharge
+// gives it a regime width far under one cell and its erosion is scaled down
+// accordingly, while the channel floor (which carries the discharge) keeps
+// most of its own.
+//
+// The factor is switched off by saturating `channel_width_coeff`, which
+// drives min(1, w/cell_m) to exactly 1 everywhere -- the same counterfactual
+// with no second code path to keep in sync. BOTH halves are asserted: the
+// factor-on run must hold its channel AND the factor-off run must not, so
+// the test cannot pass by being insensitive.
+void ChannelPersistence() {
+  // A FLOODPLAIN, not a walled flume: a broad plain tilted toward the outflow
+  // with a narrow channel incised into it, rained on so the plain carries
+  // real overland sheet flow while the channel carries the concentrated
+  // flow. That contrast IS the subject -- a walled channel (the first fixture
+  // tried here) has no overbank cells for the factor to distinguish, and both
+  // runs came out identical.
+  //
+  // MORFAC 20, DELIBERATELY LOW, and this is the other thing the fixture had
+  // to learn. The MORFAC clamp bounds the bed delta by a fraction of the
+  // local DEPTH, so it already suppresses erosion on a millimetre-deep plain
+  // relative to a channel -- at morfac 300 essentially every active cell is
+  // clamped and the two runs below were measured to be indistinguishable
+  // (centre cut 0.632 vs 0.625 m). That is not the factor working, it is the
+  // factor being MASKED by a different limiter. At morfac 20 the exchange is
+  // capacity-limited rather than clamp-limited, and the factor is the thing
+  // being measured.
+  struct Shape { double depth, concentration; };
+  auto run = [](float width_coeff) {
+    Params p = MorphoBase(40, 16.f);
+    p.runoff_m_per_yr = 400.f;
+    p.morfac = 20.0f;
+    p.channel_width_coeff = width_coeff;
+    Grid g(p.res);
+    const int n = p.res, xc = n / 2;
+    for (int y = 0; y < n; ++y)
+      for (int x = 0; x < n; ++x) {
+        const size_t i = g.idx(x, y);
+        float z = 20.0f - 12.0f * float(y) / float(n - 1);  // ~2% plain
+        const int dx = std::abs(x - xc);
+        if (dx <= 1) z -= 2.5f * (1.0f - 0.4f * float(dx));  // narrow incision
+        g.height[i] = z;
+        g.soil[i] = 4.0f;
+      }
+    SweWarmStart(g, p);
+    const std::vector<float> bed0 = g.height;
+    SweRunResult r = RunSweCycles(g, p, 150);
+
+    // Cross-section at mid-length: how deep the channel sits below its own
+    // floodplain, before and after, and how concentrated the erosion was.
+    const int y = n / 2;
+    auto plain_of = [&](const std::vector<float>& b) {
+      double s = 0; int c = 0;
+      for (int x = xc - 6; x <= xc - 2; ++x) { s += double(b[g.idx(x, y)]); ++c; }
+      for (int x = xc + 2; x <= xc + 6; ++x) { s += double(b[g.idx(x, y)]); ++c; }
+      return s / double(c);
+    };
+    const double depth0 = plain_of(bed0) - double(bed0[g.idx(xc, y)]);
+    const double depth1 = plain_of(g.height) - double(g.height[g.idx(xc, y)]);
+    const double centre_cut =
+        double(bed0[g.idx(xc, y)]) - double(g.height[g.idx(xc, y)]);
+    double overbank = 0; int c = 0;
+    for (int x = xc - 6; x <= xc - 2; ++x) {
+      overbank += double(bed0[g.idx(x, y)]) - double(g.height[g.idx(x, y)]); ++c;
+    }
+    for (int x = xc + 2; x <= xc + 6; ++x) {
+      overbank += double(bed0[g.idx(x, y)]) - double(g.height[g.idx(x, y)]); ++c;
+    }
+    overbank /= double(c);
+    const double conc = centre_cut / std::max(std::fabs(overbank), 1e-9);
+    return std::tuple<double, double, double, bool>{depth0, depth1, conc, r.ok};
+  };
+  const auto on = run(5.0f);    // production default: the factor is live
+  const auto off = run(1e9f);   // factor identically 1: the amendment removed
+
+  const double on_keep = std::get<1>(on) / std::max(std::get<0>(on), 1e-9);
+  const double off_keep = std::get<1>(off) / std::max(std::get<0>(off), 1e-9);
+  const double on_conc = std::get<2>(on), off_conc = std::get<2>(off);
+  // Factor ON: the section holds (it should if anything deepen), and the
+  // erosion stays IN the channel rather than scouring the plain -- which is
+  // what "does not unnaturally widen" means when measured rather than
+  // eyeballed.
+  const bool holds = std::get<3>(on) && on_keep > 0.9 && on_conc >= 8.0;
+  // Factor OFF: it must fail the SAME bar. If this ever passes, the amendment
+  // is inert and the half above is measuring nothing.
+  const bool degrades = off_keep <= 0.9 || off_conc < 8.0;
+  char buf[300];
+  std::snprintf(buf, sizeof(buf),
+                "factor ON: section %.3f -> %.3f m (%.0f%% kept), erosion "
+                "concentration %.1fx | factor OFF: %.3f -> %.3f m (%.0f%%), "
+                "concentration %.1fx",
+                std::get<0>(on), std::get<1>(on), 100 * on_keep, on_conc,
+                std::get<0>(off), std::get<1>(off), 100 * off_keep, off_conc);
+  Check("ChannelPersistence: the carved channel holds, and only with the "
+        "channelization factor",
+        holds && degrades, buf);
+}
+
+// --- M16. determinism with morpho active ---------------------------------
+// SweDeterminism's sibling. The morpho group adds two whole-grid REDUCTIONS
+// per cycle (SedAdvect's mass fixer, the periodic audit), and a reduction is
+// exactly where a parallel pass stops being reproducible if its combine
+// order is left to the scheduler -- so this is not a redundant copy of the
+// fluid test.
+void MorphoDeterminism() {
+  auto run = [] {
+    Params p = MorphoBase(32, 16.f);
+    p.runoff_m_per_yr = 400.f;
+    p.morfac = 50.0f;
+    Grid g(p.res);
+    BuildChannel(g, p, 16.f, 12.f, 1.f, 3, 4.f, 8.f);
+    g.sus[g.idx(16, 3)] = 0.05f;
+    RunSweCycles(g, p, 40);
+    return g;
+  };
+  Grid a = run(), b = run();
+  bool same = true;
+  for (size_t i = 0; i < a.cells && same; ++i)
+    if (a.height[i] != b.height[i] || a.soil[i] != b.soil[i] ||
+        a.sus[i] != b.sus[i] || a.h[i] != b.h[i])
+      same = false;
+  const bool ledger_same =
+      a.swe_sed_border_export_m3 == b.swe_sed_border_export_m3 &&
+      a.swe_sed_morfac_created_m3 == b.swe_sed_morfac_created_m3;
+  char buf[200];
+  std::snprintf(buf, sizeof(buf), "fields identical=%d, ledger identical=%d",
+                same, ledger_same);
+  Check("MorphoDeterminism: bit-exact bed/soil/sus and ledger", same && ledger_same,
+        buf);
+}
+
+// --- M17. the advection step is sub-stepped, and clamped when capped ------
+// Two claims about SedAdvect's step control, on a hand-built uniform flow
+// (no fluid solver, no deflection -- just transport):
+//
+//   1. Sub-stepping does not change WHERE the sediment goes. A displacement
+//      of 3 cells is taken as several shorter backtraces, and the blob still
+//      arrives 3 cells downstream -- if the sub-step count leaked into the
+//      distance, this is what would catch it.
+//   2. Once the sub-step cap is reached, the PER-SUB-STEP clamp bounds the
+//      rest: an absurd velocity asking for 40 cells is taken as
+//      kMaxAdvectSubsteps steps of at most kMaxBacktraceCells each, so the
+//      blob lands exactly 32 cells downstream and not 40.
+void MorphoAdvectStepControl() {
+  auto shoot = [](float speed, float dt_morpho, int res, int bx) {
+    Params p = MorphoBase(res, 16.f);
+    p.transverse_slope_coeff = 0.f;  // isolate the step control
+    Grid g(p.res);
+    for (size_t i = 0; i < g.cells; ++i) {
+      g.height[i] = 5.0f;
+      g.h[i] = 1.0f;
+      g.velx[i] = speed;
+      g.vely[i] = 0.f;
+    }
+    const int by = res / 2;
+    g.sus[g.idx(bx, by)] = 1.0f;
+    SedAdvect(g, p, dt_morpho);
+    int landed = -1;
+    float best = 0.f;
+    for (int x = 0; x < p.res; ++x) {
+      const float v = g.sus[g.idx(x, by)];
+      if (v > best) { best = v; landed = x; }
+    }
+    return landed;
+  };
+  // 7.5 m/s over 6.4 s across 16 m cells = 3 cells, well inside every cap.
+  const int a_landed = shoot(7.5f, 6.4f, 32, 8);
+  // 100 m/s over 6.4 s = 40 cells: capped to 8 sub-steps x 4 cells = 32.
+  const int b_landed = shoot(100.0f, 6.4f, 48, 4);
+  const int b_expect = 4 + int(kMaxAdvectSubsteps) * int(kMaxBacktraceCells);
+  const bool ok = a_landed == 11 && b_landed == b_expect;
+  char buf[220];
+  std::snprintf(buf, sizeof(buf),
+                "3-cell shot from x=8 landed at x=%d (want 11); 40-cell shot "
+                "from x=4 landed at x=%d (want %d = %d substeps x %.0f cells)",
+                a_landed, b_landed, b_expect, kMaxAdvectSubsteps,
+                double(kMaxBacktraceCells));
+  Check("MorphoAdvectStepControl: sub-stepped, and capped when it must be",
+        ok, buf);
+}
+
+// --- M18. every new morpho knob is live ----------------------------------
+// KnobLiveness's phase-1 counterpart. The original runs phase-0's RunSim,
+// which never touches any of these, so a new knob would be reported live by
+// a test that cannot see it.
+void MorphoKnobLiveness() {
+  struct Knob { const char* name; void (*set)(Params&, int); };
+  static const Knob knobs[] = {
+      {"capacity_Kc_s", [](Params& p, int i) {
+         p.capacity_Kc_s = i ? 0.02f : 0.5f; }},
+      {"sus_settling_velocity", [](Params& p, int i) {
+         p.sus_settling_velocity_m_per_s = i ? 1e-4f : 1e-2f; }},
+      {"transverse_slope_coeff", [](Params& p, int i) {
+         p.transverse_slope_coeff = i ? 0.f : 3.f; }},
+      {"morfac", [](Params& p, int i) { p.morfac = i ? 5.f : 200.f; }},
+      // Not a new knob, but it GAINED a phase-1 consumer (the channelization
+      // factor), and that consumer is the amendment -- so it needs a row of
+      // its own here rather than relying on its phase-0 one.
+      {"channel_width_coeff", [](Params& p, int i) {
+         p.channel_width_coeff = i ? 1.f : 1e9f; }},
+      // Same: the talus pair is a second consumer of the repose angle.
+      {"repose_angle_deg", [](Params& p, int i) {
+         p.repose_angle_deg = i ? 20.f : 55.f; }},
+  };
+  for (const Knob& k : knobs) {
+    auto run = [&](int which) {
+      Params p = MorphoBase(32, 16.f);
+      p.runoff_m_per_yr = 400.f;
+      p.morfac = 50.0f;
+      k.set(p, which);
+      Grid g(p.res);
+      BuildChannel(g, p, 16.f, 12.f, 1.f, 3, 4.f, 8.f, /*x_tilt=*/0.01f);
+      g.sus[g.idx(16, 3)] = 0.05f;
+      RunSweCycles(g, p, 30);
+      return g;
+    };
+    Grid ga = run(0), gb = run(1);
+    bool differs = false;
+    for (size_t i = 0; i < ga.cells && !differs; ++i)
+      if (ga.height[i] != gb.height[i] || ga.sus[i] != gb.sus[i]) differs = true;
+    Check((std::string("morpho knob is live: ") + k.name).c_str(), differs,
+          differs ? "output changes" : "NO EFFECT - masked or unused");
+  }
+}
+
 int RunAll() {
   std::printf("protogen sanity tests (small grids, production 16 m cells)\n");
   MassConservation();
@@ -1887,6 +3074,26 @@ int RunAll() {
   std::printf("\n  phase-0 -> phase-1 warm start (Task 5)\n");
   WarmStartLakeLevel();
   WarmStartProximity();
+
+  std::printf("\n  phase-1 morphodynamics (Exner + advection + talus)\n");
+  FlatReachTransport();
+  StillLakeInert();
+  ExnerSoilBedrockConservation();
+  ExnerCapacityLimiter();
+  ExnerLedger();
+  MorphoAdvectStepControl();
+  TalusRepose();
+  GeologyDeltaFormation();
+  GeologyKnickpointRetreat();
+  GeologyNoBottomlessPits();
+  NoRunaway();
+  MorphoTransverseSlopeDeflection();
+  ChannelPersistence();
+  MorfacInvariance();
+  SubstepSufficiency();
+  SweResolutionInvariance();
+  MorphoDeterminism();
+  MorphoKnobLiveness();
 
   std::printf("\n  %d passed, %d failed, %d pending", g_pass, g_fail, g_pending);
   if (g_pending_ready)

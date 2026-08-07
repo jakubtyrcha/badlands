@@ -34,15 +34,57 @@ constexpr double kSecondsPerYear = 31557600.0;
 // assert against the SAME number the implementation enforces, not a
 // hand-copied duplicate that could silently drift out of sync.
 constexpr float kMaxFroude = 10.0f;
-// MORFAC clamp scaffolding (Task 6 activates this, Task 4 only seeds it --
-// see Params::morfac and ClampMorfacBedDelta below): the fraction of a
-// cell's water depth a single fluid cycle's morpho hook may move the bed by,
-// AFTER morfac scaling. 10%: a starting bound with no bed-delta magnitude
-// yet to calibrate it against (nothing calls ClampMorfacBedDelta today), so
-// it may need retuning once Task 6 supplies a real erosion/deposition term
-// -- the number exists so the clamp is never silently unbounded, not because
-// 10% is a derived physical limit.
+// MORFAC clamp bound (ACTIVE as of Task 6 -- SedExchange is its caller; see
+// Params::morfac and ClampMorfacBedDelta below): the fraction of a cell's
+// water depth a single fluid cycle's morpho hook may move the bed by, AFTER
+// morfac scaling.
+//
+// 10%, and Task 6 KEPT the number after calibrating it against a real bed
+// delta rather than inheriting it. The bound is what makes MORFAC legitimate
+// at all: MORFAC's whole premise is that the flow field computed this cycle
+// stays VALID for the M cycles of bed change it is being credited with, and
+// that premise dies as soon as the bed moves a significant fraction of the
+// water depth -- the head field the next cycle's SweFlux solves is then a
+// different problem from the one the exchange was computed on. 10% of depth
+// means the flow the exchange saw is still ~90% correct when the bed is
+// updated, i.e. the quasi-steady assumption is bent, not broken.
+//
+// Two measured checks that the number is neither too tight nor too loose:
+//   - too tight would starve the physics: at the production capacity scale
+//     (Params::capacity_Kc_s, C ~ 1e-3 m of sediment in an active channel)
+//     one cycle's UNACCELERATED bed delta is ~5e-4 m, which is 0.5% of a
+//     0.1 m deep channel -- 20x under the bound, so the clamp never touches
+//     ordinary transport and only engages once MORFAC is genuinely large.
+//   - too loose would let MORFAC drill: GeologyNoBottomlessPits drives
+//     morfac = 10,000 at a local velocity spike, where the unclamped bed
+//     delta is metres per cycle. The bound is exactly what converts that
+//     into a bounded incision (see that test).
 constexpr float kMaxBedDeltaFraction = 0.1f;
+// SedAdvect step control. A semi-Lagrangian backtrace assumes the trajectory
+// over its step is a STRAIGHT line at the cell's own velocity, which is only
+// true while the parcel stays in a locally-uniform part of the field; a long
+// backtrace through a curving channel cuts the corner and lands the sample
+// somewhere the water never went. And the cycle's advective step is genuinely
+// long: `swe_substeps` fluid substeps at CFL 0.5 move the water roughly
+// swe_substeps*0.5*Froude cells, which on a measured fixture came to ~6 cells
+// per cycle -- not a perturbation, a traverse.
+//
+// So the pass SUB-STEPS: it takes ceil(max displacement in cells) backtraces
+// of `dt_morpho`/that, capped at kMaxAdvectSubsteps, so each one moves about
+// a cell. Each sub-step re-gathers, which means the composite path follows
+// the velocity field piecewise instead of shooting a single straight chord --
+// the same reason a multi-step ODE integrator beats one Euler leap.
+//
+// 8 sub-steps: covers the ~6-cell traverse measured at the production substep
+// count with headroom, and bounds the cost at 8 gather passes against the
+// 3*swe_substeps the fluid already spends. kMaxBacktraceCells then only binds
+// when the cap has already been hit (a single anomalously fast cell, e.g. one
+// riding the Froude clamp), and 4 cells keeps even that sample inside a
+// neighbourhood the Catmull-Rom stencil spans a couple of times over.
+// Both are shared here so MorphoAdvectStepControl asserts against the SAME
+// numbers the pass enforces.
+constexpr int kMaxAdvectSubsteps = 8;
+constexpr float kMaxBacktraceCells = 4.0f;
 
 // ---------------------------------------------------------------- parameters
 
@@ -320,6 +362,60 @@ struct Params {
   // `ClampMorfacBedDelta` below for where it is applied.
   float morfac = 1.0f;
 
+  // --- phase-1 morphodynamics: the Exner exchange (protogen_swe.cpp) -------
+  //
+  // Transport capacity, MEI FORM ON THE ENERGY SLOPE:
+  //     C = capacity_Kc_s * |grad(bed + h)| * |v|
+  // with C an EQUIVALENT SEDIMENT DEPTH in metres (the depth of solid the
+  // water column over this cell can hold in suspension) -- so
+  // capacity_Kc_s carries units of SECONDS: [m] = [s] * [1] * [m/s].
+  //
+  // Both factors vanish in a still lake (flat water surface -> zero energy
+  // slope; no flow -> zero speed), which is the property StillLakeInert
+  // pins. The slope is the ENERGY slope, not the bed slope, which is what
+  // keeps C > 0 for flowing water over a locally FLAT bed (the water surface
+  // still tilts -- that tilt is what drives the flow) and is what stops a
+  // flat reach terracing; FlatReachTransport pins that.
+  //
+  // 0.1 s, from one reference point rather than a fit: an active mountain
+  // channel at S = 0.01, |v| = 1 m/s gives C = 1e-3 m of sediment over a
+  // ~0.5 m deep flow, i.e. a volumetric concentration of 2e-3 (~5 g/l) --
+  // turbid, but squarely inside the 0.1-10 g/l range measured in real
+  // sediment-carrying rivers. This is the one genuinely free knob in the
+  // morpho set (it sets the absolute transport RATE, which no other quantity
+  // here pins), so production tuning of the landform timescale belongs on
+  // this knob and on `morfac`, not on the physics.
+  float capacity_Kc_s = 0.1f;
+  // Settling velocity of the suspended grade, m/s -- the DEPOSITION rate's
+  // own clock, and NOT a free knob: it is the same quantity
+  // `adaptation_length_m`'s comment already derives that length from
+  // (L = u*h/w_s, "physical, silt-grade suspended load: u*h/w_s =
+  // 1*0.3/1e-3 -> ~300 m"). 1e-3 m/s is that comment's own w_s, so the two
+  // knobs stay consistent by construction rather than by coincidence.
+  //
+  // WHY DEPOSITION NEEDS ITS OWN RATE AT ALL (the brief allows a k_deposit
+  // "if the formulation needs it beyond the adaptation-length factor"): the
+  // adaptation-length rate is min(1, |v|*dt/L) and therefore vanishes
+  // identically as |v| -> 0. Using it for deposition would forbid the one
+  // behaviour the design explicitly requires -- suspended load settling out
+  // over STILL water (a lake floor) and over DRY ground (where phase-0's
+  // leftover `sus` has to land). The same relaxation physics gives the
+  // deposition rate directly and WITHOUT the velocity: substituting
+  // L = u*h/w_s into |v|*dt/L at |v| = u collapses it to w_s*dt/h. So this
+  // is not a second free parameter, it is the same one written in the
+  // variables deposition actually depends on.
+  float sus_settling_velocity_m_per_s = 1e-3f;
+  // Transverse-slope deflection of the sediment flux (Ikeda / Struiksma's
+  // closure), DIMENSIONLESS: the sediment transport direction deviates from
+  // the flow direction toward the downhill side of the TRANSVERSE bed slope
+  // by tan(deviation) = transverse_slope_coeff * (transverse bed slope).
+  // This is the mechanism that seeds meandering -- it is what moves material
+  // toward the inside of a bend and builds the point bar that steers the
+  // flow further. 1.0 is mid-range for the classic closure's 1/f(theta),
+  // which sits at ~0.5-2 for ordinary Shields numbers; at a 5% transverse
+  // slope it deflects the flux by ~2.9 degrees.
+  float transverse_slope_coeff = 1.0f;
+
   // THE landscape clock. One step represents this many years, and every
   // process scales with it: diffusion through k = D*dt/cell^2, and erosion
   // through the water a step delivers (see EffectiveDropVolume). Previously
@@ -350,8 +446,13 @@ struct Grid {
   std::vector<float> momx, momy, momx_b, momy_b;
   // Erodible thickness over bedrock, height units. The surface is `height`;
   // bedrock is implicitly height - soil, so `height` stays authoritative and
-  // every existing read of it is untouched.
-  std::vector<float> soil;
+  // every existing read of it is untouched. `soil_b` is the Jacobi back
+  // buffer the phase-1 morpho passes need: SedExchange and TalusApply write
+  // bed state while OTHER cells are still reading it (the energy-slope
+  // stencil, the neighbour talus gather), so they cannot update in place the
+  // way phase-0's serial `Deposit`/`Erode` do -- height/soil/sus all
+  // ping-pong together and swap at the end of each pass.
+  std::vector<float> soil, soil_b;
   // Suspended sediment awaiting settlement, height units per cell -- what the
   // particle walk's terminal exit injects instead of dumping straight onto
   // the bed (see Params::settle_fraction). Ping-pong like the other grid
@@ -390,6 +491,45 @@ struct Grid {
   double swe_rain_in_m3 = 0.0, swe_evap_out_m3 = 0.0,
          swe_border_outflow_m3 = 0.0;
 
+  // --- phase-1 morphodynamic state (protogen_swe.cpp, Task 6) ------------
+  //
+  // Talus (thermal-erosion) transfer buffer: per cell, the volume-per-area
+  // (METRES of solid, SI like every other quantity in protogen_swe.cpp) it
+  // wants to shed to each of its EIGHT neighbours this pass. Written by
+  // TalusFlux, gathered by TalusApply -- the Jacobi twin of phase-0's serial
+  // in-place `Cascade`. Neighbour order is TalusApply's own kTdx/kTdy
+  // (row-major from (-1,-1) to (+1,+1)), whose opposite-index is simply
+  // 7 - k.
+  std::vector<std::array<float, 8>> talus;
+  // SEDIMENT ledger, cubic metres of solid. Three terms, and they are not
+  // interchangeable:
+  //   `swe_sed_border_export_m3`  solid advected off the open border by
+  //                               SedAdvect, computed from the border faces'
+  //                               own water flux times the cell's sediment
+  //                               concentration -- an INDEPENDENT physical
+  //                               estimate, deliberately not "whatever went
+  //                               missing", so the mass tripwire has
+  //                               something real to check the field against.
+  //   `swe_sed_morfac_created_m3` solid the MORFAC staggering created (+, net
+  //                               deposition) or destroyed (-, net erosion):
+  //                               the bed moves M times as far as the `sus`
+  //                               it exchanged with, by design (see
+  //                               Params::morfac), so Sigma(bed+sus) is NOT
+  //                               conserved at M != 1 and this is exactly the
+  //                               term that says by how much. Identically
+  //                               zero at M = 1.
+  //   `swe_sed_advect_fix_max`    diagnostic, not a ledger term: the largest
+  //                               |renormalisation factor - 1| SedAdvect's
+  //                               mass fixer had to apply in any one cycle.
+  //                               Semi-Lagrangian advection is not
+  //                               conservative on its own; this says how hard
+  //                               the fixer had to work, and a value far from
+  //                               0 means the advection step is too long for
+  //                               the flow field.
+  double swe_sed_border_export_m3 = 0.0;
+  double swe_sed_morfac_created_m3 = 0.0;
+  double swe_sed_advect_fix_max = 0.0;
+
   explicit Grid(int res)
       : n(res), cells(size_t(res) * res), height(cells, 0.f),
         height_b(cells, 0.f),
@@ -397,12 +537,15 @@ struct Grid {
         discharge(cells, 0.f), discharge_b(cells, 0.f),
         Qm3s(cells, 0.f), Qm3s_b(cells, 0.f),
         momx(cells, 0.f), momy(cells, 0.f), momx_b(cells, 0.f), momy_b(cells, 0.f),
-        soil(cells, 0.f), sus(cells, 0.f), sus_b(cells, 0.f),
+        soil(cells, 0.f), soil_b(cells, 0.f),
+        sus(cells, 0.f), sus_b(cells, 0.f),
         vol_track(cells, 0.f), mx_track(cells, 0.f), my_track(cells, 0.f),
         visits(cells, 0u),
         h(cells, 0.f), h_b(cells, 0.f),
         flux(cells, std::array<float, 4>{0.f, 0.f, 0.f, 0.f}),
-        velx(cells, 0.f), vely(cells, 0.f) {}
+        velx(cells, 0.f), vely(cells, 0.f),
+        talus(cells, std::array<float, 8>{0.f, 0.f, 0.f, 0.f,
+                                          0.f, 0.f, 0.f, 0.f}) {}
 
   inline size_t idx(int x, int y) const { return size_t(y) * n + x; }
   inline bool oob(int x, int y) const {
@@ -419,6 +562,10 @@ struct SimStats {
   // is wired into the driver (Task 7); RunSweCycles itself already fills
   // them in when given a non-null SimStats*, so a caller can time it today.
   double t_swe_reduce = 0, t_swe_flux = 0, t_swe_depth = 0, t_swe_velocity = 0;
+  // Morpho hook buckets (Task 6), same shape and same caveat: filled in by
+  // RunSweCycles when given a non-null SimStats*, zero while `morfac` is 0
+  // (the hook does not run at all then -- see RunSweCycles).
+  double t_swe_sed_exchange = 0, t_swe_sed_advect = 0, t_swe_talus = 0;
 };
 
 // Definitions in protogen.cpp -- phase-0 land init, the whole-sim driver, and
@@ -444,6 +591,42 @@ void SweFlux(Grid& g, const Params& p, float dt);
 void SweDepth(Grid& g, const Params& p, float dt);
 void SweVelocity(Grid& g, const Params& p);
 
+// Phase-1 morphodynamic passes (protogen_swe.cpp, Task 6). Same contract as
+// the fluid passes above -- standalone gather-only Jacobi over ping-pong
+// buffers, no atomics, extending the frozen GPU dispatch list. RunSweCycles
+// runs them ONCE per cycle, after that cycle's `swe_substeps` fluid substeps,
+// in exactly this order:
+//
+//   SedExchange -> SedAdvect -> TalusFlux -> TalusApply
+//
+// NO PASS CALLS ANOTHER; the sequencing lives entirely in RunSweCycles.
+// `dt_morpho` is the cycle's TOTAL fluid time (swe_substeps * dt) -- these
+// passes stand in for the sediment work of the substeps they representatively
+// skipped, so they run on the fluid clock, not on a clock of their own. The
+// only quantity on the accelerated BED clock is the bed-elevation delta
+// inside SedExchange, and it gets there through `ClampMorfacBedDelta` alone.
+void SedExchange(Grid& g, const Params& p, float dt_morpho);
+void SedAdvect(Grid& g, const Params& p, float dt_morpho);
+void TalusFlux(Grid& g, const Params& p);
+void TalusApply(Grid& g, const Params& p);
+
+// The transport capacity SedExchange itself uses -- THE single definition,
+// exported (rather than duplicated in the test file) so FlatReachTransport,
+// StillLakeInert and ExnerCapacityLimiter assert against the same arithmetic
+// the pass runs, not a hand-copy that could drift. Returns an EQUIVALENT
+// SEDIMENT DEPTH in metres (see Params::capacity_Kc_s). Reads `height`, `h`
+// (own cell and its four orthogonal neighbours, for the central-difference
+// energy slope) and `velx`/`vely` (own cell only); writes nothing.
+float SedCapacityM(const Grid& g, const Params& p, int x, int y);
+
+// The two-layer substrate's erosion yield, in METRES of solid, for a demand
+// of `demand_m` against `soil_m` metres of cover -- soil first at full rate,
+// then the RESIDUAL demand scaled by `bedrock_erodibility` before it bites
+// bedrock. The phase-1 counterpart of protogen.cpp's `Erode` (same law, no
+// side effects), exported so ExnerSoilBedrockConservation can pin the exact
+// split arithmetic independently of the fixture that drives it.
+float SedSubstrateYieldM(float demand_m, float soil_m, const Params& p);
+
 // The phase-0 -> phase-1 handoff (Task 5). ONE-SHOT plain CPU code, run
 // EXACTLY ONCE between phase-0's finished bed and phase-1's first
 // RunSweCycles call -- NOT a Jacobi pass, and deliberately NOT part of the
@@ -459,7 +642,8 @@ void SweVelocity(Grid& g, const Params& p);
 void SweWarmStart(Grid& g, const Params& p);
 
 // Outcome of RunSweCycles: `ok` false means a tripwire fired -- non-finite
-// state or a CFL-derived dt collapsed below `dt_floor_s`. `aborted_cycle`/
+// state, a CFL-derived dt collapsed below `dt_floor_s`, or (Task 6) the
+// periodic sediment-mass audit drifting past its tolerance. `aborted_cycle`/
 // `reason` name where and why, so a caller (test or, from Task 7, the
 // driver) can report it rather than merely detect it.
 struct SweRunResult {
@@ -468,22 +652,33 @@ struct SweRunResult {
   std::string reason;
 };
 // Runs `cycles` SWE cycles (CFL dt -> swe_substeps x Flux/Depth/Velocity ->
-// empty morpho hook) starting from Grid `g`'s current `h`/`flux` state --
+// morpho hook) starting from Grid `g`'s current `h`/`flux` state --
 // callable standalone, independent of RunSim/phase-0 (Task 5 supplies the
 // warm start that seeds `h` from phase-0's finished bed; nothing here
 // requires it). `stats`, if non-null, accumulates per-pass wall time.
+//
+// THE MORPHO HOOK IS GATED ON `p.morfac > 0`: a run with morfac == 0 is a
+// FLUID-ONLY run, and every pre-Task-6 SWE fixture in protogen_tests.cpp
+// (which are all statements about the fluid alone) sets it explicitly for
+// that reason. It is not an enable_* toggle in disguise -- morfac == 0
+// literally means "no bed change per fluid cycle", so skipping the passes
+// and running them to produce exactly zero are the same landscape, only one
+// of them costs nothing.
 SweRunResult RunSweCycles(Grid& g, const Params& p, int cycles,
                           SimStats* stats = nullptr);
 
-// MORFAC clamp scaffolding for Task 6's morpho hook (SedExchange et al.):
-// scales a proposed bed-elevation delta (metres, either sign) by
-// `p.morfac`, then bounds the magnitude to `kMaxBedDeltaFraction * depth_m`
-// so one fluid cycle's accelerated bed change can never exceed a fixed
-// fraction of the water sitting on top of it. INERT today -- nothing calls
-// this yet (the morpho hook is empty, see RunSweCycles's comment) -- so
-// Task 6 ACTIVATES this path by calling it, rather than inventing it from
-// scratch. Exported (not a private helper in protogen_swe.cpp) so a test
-// can exercise its clamp behaviour directly.
+// THE ONE PLACE `p.morfac` IS EVER APPLIED. Scales a proposed bed-elevation
+// delta (metres, either sign, on the FLUID clock) by `p.morfac`, then bounds
+// the magnitude to `kMaxBedDeltaFraction * depth_m` so one fluid cycle's
+// accelerated bed change can never exceed a fixed fraction of the water
+// sitting on top of it (see kMaxBedDeltaFraction for why that bound is what
+// makes MORFAC legitimate). ACTIVE as of Task 6: `SedExchange` is the sole
+// caller, on both the erosion and the deposition side, and NOTHING else in
+// the codebase multiplies by `morfac` -- in particular the `sus` side of the
+// exchange never does, which is the entire point of the staggered scheme
+// (`sus` lives on the fluid clock, the bed on the accelerated one).
+// Exported (not a private helper in protogen_swe.cpp) so a test can exercise
+// its clamp behaviour directly.
 float ClampMorfacBedDelta(float raw_delta_m, float depth_m, const Params& p);
 
 }  // namespace pg

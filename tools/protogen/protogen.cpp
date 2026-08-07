@@ -1402,6 +1402,16 @@ int main(int argc, char** argv) {
     else if (a == "--swe-manning-n") p.swe_manning_n = std::stof(nxt());
     else if (a == "--eps-wet") p.eps_wet = std::stof(nxt());
     else if (a == "--dt-floor") p.dt_floor_s = std::stof(nxt());
+    // Phase-1 morphodynamics (Task 6). `--morfac` is the landform-time
+    // accelerator; the other three are the transport law's own knobs. Same
+    // caveat as the fluid flags above: parsed here so they exist on the
+    // command line, with RunSweCycles not called from main() until Task 7.
+    else if (a == "--morfac") p.morfac = std::stof(nxt());
+    else if (a == "--kc") p.capacity_Kc_s = std::stof(nxt());
+    else if (a == "--settling-velocity")
+      p.sus_settling_velocity_m_per_s = std::stof(nxt());
+    else if (a == "--transverse-slope")
+      p.transverse_slope_coeff = std::stof(nxt());
     else if (a == "--out") p.out = nxt();
     else { std::fprintf(stderr, "protogen: unknown arg '%s'\n", a.c_str()); return 2; }
   }
@@ -1424,11 +1434,16 @@ int main(int argc, char** argv) {
               "  runoff %.2f m/yr, evaporation %.2f m/yr\n"
               "  settle %.3f/step, sus-diffusion %.3f\n"
               "  swe: %d substeps, CFL %.2f, manning-n %.3f, eps-wet %.4f m, "
-              "dt-floor %.1e s (not yet driven -- Task 7)\n",
+              "dt-floor %.1e s (not yet driven -- Task 7)\n"
+              "  morpho: morfac %.0f, Kc %.4g s, settling %.1e m/s, "
+              "transverse-slope %.2f, repose %.0f deg\n",
               p.res, p.res, p.world_m, cell_m, workers, p.relief_m, p.steps,
               p.drops, p.runoff_m_per_yr, p.evaporation_m_per_yr,
               p.settle_fraction, p.sus_diffusion, p.swe_substeps,
-              p.cfl_number, p.swe_manning_n, p.eps_wet, double(p.dt_floor_s));
+              p.cfl_number, p.swe_manning_n, p.eps_wet, double(p.dt_floor_s),
+              double(p.morfac), double(p.capacity_Kc_s),
+              double(p.sus_settling_velocity_m_per_s),
+              double(p.transverse_slope_coeff), double(p.repose_angle_deg));
 
   {
     std::error_code ec;

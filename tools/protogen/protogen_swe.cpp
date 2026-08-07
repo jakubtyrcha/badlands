@@ -3,8 +3,9 @@
 //
 // THE PASS LIST IS THE FROZEN FUTURE GPU DISPATCH ORDER:
 //   SweFlux -> SweDepth -> SweVelocity, repeated `swe_substeps` times per
-//   RunSweCycles cycle, with an (currently empty) morpho hook after the
-//   substep loop.
+//   RunSweCycles cycle, then ONCE per cycle the morpho group
+//   SedExchange -> SedAdvect -> TalusFlux -> TalusApply (Task 6; skipped
+//   entirely when `morfac` is 0, which is what makes a fluid-only run).
 // Each pass is a standalone function, gather-only Jacobi over the whole
 // grid via badlands::ParallelFor -- every cell reads only FRONT-buffer state
 // (its neighbours' depth/flux as they stood when the pass began) and writes
@@ -66,6 +67,189 @@ constexpr int kDy[4] = {0, 0, 1, -1};
 // Opposite-face index: the face that carries flow back the other way across
 // the same edge. Pairs (0,1) and (2,3) are each other's opposite, hence xor 1.
 inline int Opposite(int k) { return k ^ 1; }
+
+// ------------------------------------------------------------- units seam
+//
+// THIS FILE IS SI. `protogen.hpp`'s Grid is NOT: `height`, `soil` and `sus`
+// are all stored in HEIGHT UNITS, where one unit is `relief_m` metres (see
+// Grid::height's own comment). Every quantity in the morpho passes below --
+// capacity, the exchange, talus transfers -- is a length of SOLID in metres,
+// so every read of `height`/`soil`/`sus` and every write back to them crosses
+// that seam.
+//
+// THE SEAM GOES THROUGH THESE TWO FUNCTIONS AND NOWHERE ELSE in the morpho
+// code. That is a deliberate rule, not a stylistic preference: a stray
+// `* p.relief_m` on one side of an exchange and a missing one on the other is
+// a silent mass bug that no amount of staring at a raster reveals -- it looks
+// exactly like "erosion is a bit stronger than expected". Keeping the
+// conversion in one named place means the ledger can be traced by reading two
+// lines instead of auditing every arithmetic expression.
+//
+// (The FLUID passes above predate this and spell `g.height[i] * p.relief_m`
+// inline where they need a bed elevation. They only ever READ `height`, never
+// write it, so they cannot produce an asymmetric conversion -- the failure
+// mode this seam exists to prevent does not apply to them.)
+inline float ToMetres(float height_units, const Params& p) {
+  return height_units * p.relief_m;
+}
+inline float ToHeightUnits(float metres, const Params& p) {
+  return (p.relief_m > 0.f) ? metres / p.relief_m : 0.f;
+}
+
+// ------------------------------------------------- talus neighbourhood (8)
+//
+// The talus pair uses the EIGHT-neighbourhood, matching phase-0's `Cascade`
+// (protogen.cpp) so both express the same repose angle over the same
+// directions -- a 4-neighbour avalanche relaxes to a visibly different,
+// axis-aligned shape. Row-major from (-1,-1) to (+1,+1), which makes the
+// opposite direction of index k exactly 7 - k (the ordering is symmetric
+// under negation by construction).
+constexpr int kTdx[8] = {-1, 0, 1, -1, 1, -1, 0, 1};
+constexpr int kTdy[8] = {-1, -1, -1, 0, 0, 1, 1, 1};
+inline int TalusOpposite(int k) { return 7 - k; }
+
+// ------------------------------------------------------- deterministic sum
+//
+// Fixed-chunk parallel sum, combined in a plain serial loop over chunk INDEX
+// -- the same construction (and the same reasons) as DeterministicMaxDepth
+// further down: chunk boundaries are a function of `cells` alone, never of
+// thread count or scheduling, so the result is bit-reproducible run to run.
+// Floating-point addition is NOT associative, so unlike the max reduction
+// this one genuinely needs the fixed order for its VALUE and not merely for
+// its tripwire flag. Accumulates in double from float inputs.
+template <typename F>
+double DeterministicSum(size_t cells, F&& fn) {
+  constexpr int kChunks = 64;
+  const int chunks = int(std::min<size_t>(kChunks, std::max<size_t>(1, cells)));
+  std::vector<double> part(size_t(chunks), 0.0);
+  badlands::ParallelFor(size_t(chunks), [&](size_t c) {
+    const size_t begin = cells * c / size_t(chunks);
+    const size_t end = cells * (c + 1) / size_t(chunks);
+    double s = 0.0;
+    for (size_t i = begin; i < end; ++i) s += fn(i);
+    part[c] = s;
+  });
+  double total = 0.0;
+  for (int c = 0; c < chunks; ++c) total += part[size_t(c)];
+  return total;
+}
+
+// Fixed-chunk parallel max, same construction and same reason.
+template <typename F>
+float DeterministicMax(size_t cells, F&& fn) {
+  constexpr int kChunks = 64;
+  const int chunks = int(std::min<size_t>(kChunks, std::max<size_t>(1, cells)));
+  std::vector<float> part(size_t(chunks), 0.f);
+  badlands::ParallelFor(size_t(chunks), [&](size_t c) {
+    const size_t begin = cells * c / size_t(chunks);
+    const size_t end = cells * (c + 1) / size_t(chunks);
+    float m = 0.f;
+    for (size_t i = begin; i < end; ++i) {
+      const float v = fn(i);
+      if (v > m) m = v;
+    }
+    part[c] = m;
+  });
+  float total = 0.f;
+  for (int c = 0; c < chunks; ++c) total = std::max(total, part[size_t(c)]);
+  return total;
+}
+
+// ------------------------------------------------------ Catmull-Rom bicubic
+//
+// One-dimensional Catmull-Rom (the uniform, tension-1/2 cubic through p1 and
+// p2, with the interior slopes taken from p0/p3). Chosen over bilinear for
+// SedAdvect's backtrace on purpose: a bilinear semi-Lagrangian step is
+// strongly diffusive -- each substep convolves the field with a triangle
+// kernel -- and the thing being advected here is a sediment concentration
+// whose SHARP EDGES (a bank, a plume front) are the structure the whole
+// morphodynamic model exists to produce. Bilinear turns banks into gradients
+// and gradients into mud.
+//
+// The price is that it overshoots: a cubic through a step produces values
+// outside the data range, and on a strictly non-negative field like `sus` a
+// negative overshoot is nonsense. SedAdvect clips it and accounts for the
+// clipped mass -- see there.
+//
+// EXACT AT t = 0: the expression collapses to 0.5 * 2 * p1 = p1 with no
+// rounding, so a zero-displacement backtrace reproduces the source field
+// bit-for-bit. StillLakeInert depends on that.
+inline float CatmullRom1D(float p0, float p1, float p2, float p3, float t) {
+  const float t2 = t * t, t3 = t2 * t;
+  return 0.5f * ((2.0f * p1) + (-p0 + p2) * t +
+                 (2.0f * p0 - 5.0f * p1 + 4.0f * p2 - p3) * t2 +
+                 (-p0 + 3.0f * p1 - 3.0f * p2 + p3) * t3);
+}
+
+// Bicubic Catmull-Rom sample of a cell-centred field at a CONTINUOUS position
+// (cell centres at (i+0.5, j+0.5), the same convention protogen.cpp's
+// SampleField uses). OFF-GRID TAPS READ 0, not a clamped edge value: an
+// off-grid tap means the parcel came from outside the simulated domain, and
+// outside the domain there is no suspended sediment. Clamping to the edge
+// instead would manufacture inflow from a border that has none.
+inline float CatmullRomSample(const std::vector<float>& f, int n, float fx,
+                              float fy) {
+  const float px = fx - 0.5f, py = fy - 0.5f;
+  const int x1 = int(std::floor(px)), y1 = int(std::floor(py));
+  const float tx = px - float(x1), ty = py - float(y1);
+  float col[4];
+  for (int j = 0; j < 4; ++j) {
+    const int sy = y1 - 1 + j;
+    float row[4];
+    for (int k = 0; k < 4; ++k) {
+      const int sx = x1 - 1 + k;
+      row[k] = (sx < 0 || sy < 0 || sx >= n || sy >= n)
+                   ? 0.f
+                   : f[size_t(sy) * size_t(n) + size_t(sx)];
+    }
+    col[j] = CatmullRom1D(row[0], row[1], row[2], row[3], tx);
+  }
+  return CatmullRom1D(col[0], col[1], col[2], col[3], ty);
+}
+
+// ------------------------------------------ sub-grid channelization factor
+//
+// THE STAGE-0 -> STAGE-1 RECONCILIATION (the brief's amendment). SweFlux's
+// virtual pipe is `cell_m` wide by construction (its A_pipe is
+// `cell_m * own_h`, see SweFlux), so the solver sees every watercourse as
+// sheet flow spread across a whole cell. Reality is a channel NARROWER than
+// one cell carrying the same discharge: deeper, faster, and applying its
+// shear to only a fraction of the cell floor. A capacity built naively on the
+// cell-averaged velocity therefore describes neither -- it under-states the
+// stress inside the real channel and applies what stress it does compute to
+// the entire cell width, which is a recipe for a river that erodes weakly and
+// spreads sideways instead of incising. ChannelPersistence is the test that
+// measures exactly that failure with this factor switched off.
+//
+// The factor is the fractional wet width, min(1, w_regime/cell_m), with the
+// regime width w = channel_width_coeff*sqrt(Q) this repo already uses
+// (Params::channel_width_coeff, src/mapgen/erosion.hpp). It is applied to the
+// EROSION demand as an AREAL FRACTION: only that share of the cell floor is
+// under a channel's shear, so only that share of the cell-averaged bed
+// responds.
+//
+// Q_local IS THE MAGNITUDE OF THE CELL'S NET DISCHARGE VECTOR, sqrt((f+x -
+// f-x)^2 + (f+y - f-y)^2), built from the four face fluxes. NOT the sum of
+// the outflow magnitudes, and the difference is the whole point: the sum
+// counts a cell that is merely spreading water in every direction -- a lake
+// surface, a divergent sheet, a numerical sloshing pair -- as if it were
+// conveying a large discharge, and would hand it a wide "channel" that does
+// not exist. The net vector is what actually passes THROUGH the cell, which
+// is the discharge a regime width is defined on: w = k*sqrt(Q) describes a
+// channel conveying Q, not a puddle exchanging Q with itself.
+//
+// Setting `channel_width_coeff` absurdly large drives the factor to exactly 1
+// everywhere, which is how ChannelPersistence runs its factor-disabled
+// counterfactual without a second code path.
+inline float ChannelizationFactor(const Grid& g, const Params& p, size_t i,
+                                  float cell_m) {
+  const float qx = g.flux[i][0] - g.flux[i][1];
+  const float qy = g.flux[i][2] - g.flux[i][3];
+  const float Q = std::sqrt(qx * qx + qy * qy);  // m^3/s through the cell
+  if (!(cell_m > 0.f)) return 1.f;
+  const float w_regime = p.channel_width_coeff * std::sqrt(Q);
+  return std::min(1.0f, w_regime / cell_m);
+}
 
 }  // namespace
 
@@ -544,6 +728,563 @@ void SweWarmStart(Grid& g, const Params& p) {
   std::fill(g.flux.begin(), g.flux.end(), std::array<float, 4>{0.f, 0.f, 0.f, 0.f});
 }
 
+// ============================================================ morphodynamics
+//
+// Four passes, run once per fluid cycle in this order by RunSweCycles:
+//
+//   SedExchange  bed <-> suspended load (Exner source term), MORFAC lives here
+//   SedAdvect    the suspended load rides the flow (semi-Lagrangian)
+//   TalusFlux    each cell's desired downslope shed over the repose angle
+//   TalusApply   the gather half of the talus pair
+//
+// They extend the frozen GPU dispatch list, so each obeys the same rules as
+// the fluid passes: a standalone function, gather-only Jacobi over the whole
+// grid via badlands::ParallelFor, reading FRONT buffers and writing only its
+// own cell's BACK buffer, no atomics and no cross-cell write. Where a pass
+// mutates bed state that another cell reads in the same pass (SedExchange's
+// energy-slope stencil reads neighbours' `height`/`h`; TalusApply gathers
+// neighbours' talus) the update ping-pongs through `height_b`/`soil_b`/
+// `sus_b` and swaps at the end -- phase-0's serial in-place Deposit/Erode
+// would be a read-after-write race here, which is why these do not use them.
+//
+// PHASE-0'S `SettleSus` DOES NOT RUN IN PHASE 1. That pass (protogen.cpp) is
+// the particle walk's own drain for `sus`: a fixed fraction settles per
+// LANDSCAPE STEP plus an isotropic diffusion, neither of which has any
+// meaning once there is a real velocity field. In phase 1 `sus` is owned
+// entirely by SedExchange (which puts sediment in and takes it out, at rates
+// derived from the flow) and SedAdvect (which moves it). Running both would
+// double-count the settling and smear the plumes SedAdvect exists to keep
+// sharp.
+
+// ------------------------------------------------------------- capacity law
+
+float SedCapacityM(const Grid& g, const Params& p, int x, int y) {
+  const int n = g.n;
+  const float cell_m = p.world_m / float(p.res);
+  // ENERGY SLOPE, |grad(bed + h)|, by CENTRAL DIFFERENCE over the water
+  // SURFACE -- not the bed. On a lake the surface is flat however the bed
+  // rolls underneath, so this is zero and so is the capacity; on a flat bed
+  // carrying flow the surface still tilts (that tilt is what drives the flow
+  // at all), so this is NON-zero and the capacity is too. Those two
+  // statements are FlatReachTransport and StillLakeInert, and a bed-slope
+  // capacity would fail both.
+  //
+  // Stencil: (surf[x+1] - surf[x-1]) / (2*cell_m) in the interior, degrading
+  // to a ONE-SIDED difference over the actual span at the border -- note the
+  // divisor is `(xp - xm) * cell_m`, so the border case divides by one cell
+  // and not two. Dividing by 2*cell_m regardless would halve every border
+  // slope and quietly make the map edge a low-transport ring.
+  auto surf = [&](int sx, int sy) -> float {
+    const size_t j = g.idx(sx, sy);
+    return ToMetres(g.height[j], p) + g.h[j];
+  };
+  const int xm = std::max(x - 1, 0), xp = std::min(x + 1, n - 1);
+  const int ym = std::max(y - 1, 0), yp = std::min(y + 1, n - 1);
+  const float span_x = float(xp - xm) * cell_m;
+  const float span_y = float(yp - ym) * cell_m;
+  const float sx = span_x > 0.f ? (surf(xp, y) - surf(xm, y)) / span_x : 0.f;
+  const float sy = span_y > 0.f ? (surf(x, yp) - surf(x, ym)) / span_y : 0.f;
+  const float s_energy = std::sqrt(sx * sx + sy * sy);
+
+  const size_t i = g.idx(x, y);
+  const float speed =
+      std::sqrt(g.velx[i] * g.velx[i] + g.vely[i] * g.vely[i]);
+  return p.capacity_Kc_s * s_energy * speed;
+}
+
+// ------------------------------------------------------------ substrate law
+
+float SedSubstrateYieldM(float demand_m, float soil_m, const Params& p) {
+  if (!(demand_m > 0.f)) return 0.f;
+  const float from_soil = std::min(demand_m, std::max(soil_m, 0.f));
+  // THE RESIDUAL DEMAND IS SCALED BEFORE IT ATTACKS BEDROCK, which is what
+  // makes the soil -> bedrock transition mass-conservative BY CONSTRUCTION:
+  // the cut takes soil at full rate, and only what the cut still WANTS after
+  // the soil is gone gets multiplied by `bedrock_erodibility`. `sus` then
+  // gains exactly (from_soil + from_rock) -- there is no separate
+  // "yield-scaling" step that could disagree with what the bed lost. Same law
+  // and same order as phase-0's `Erode` (protogen.cpp); pinned to exact
+  // numbers by ExnerSoilBedrockConservation.
+  const float from_rock = (demand_m - from_soil) * p.bedrock_erodibility;
+  return from_soil + from_rock;
+}
+
+// --------------------------------------------------------------- sed_exchange
+
+// The Exner source term: material moves between the bed and the suspended
+// load at a rate set by how far the load is from the flow's capacity.
+//
+// READS (front buffers only): own `h`, `velx`, `vely`, `soil`, `sus`, `flux`;
+// own and FOUR-NEIGHBOUR `height`/`h` (via SedCapacityM's energy-slope
+// stencil). WRITES: `height_b[i]`, `soil_b[i]`, `sus_b[i]` for the single `i`
+// this thread owns; the three swaps happen after the ParallelFor returns.
+// Nothing this pass writes is read by any cell during the pass.
+//
+// WET GATE, with ONE deliberate exception. Erosion needs flowing water and is
+// skipped entirely on a cell with `h <= eps_wet`. DEPOSITION IS NOT: a dry
+// cell has zero capacity by definition, so any `sus` sitting on it is pure
+// surplus and settles. That exception is load-bearing rather than tidy -- it
+// is how the suspended load phase-0 hands over (Grid::sus) reaches the
+// ground at all, and how sediment stranded by a retreating wet-dry front
+// stops following the water around forever.
+//
+// MORFAC, and why the two sides of the exchange disagree on purpose: the bed
+// delta goes through `ClampMorfacBedDelta` (the sole place `p.morfac` is ever
+// applied, in this file or any other), so the BED moves M cycles' worth per
+// fluid cycle. The `sus` side does not -- it gains or loses exactly
+// (bed delta)/M, one fluid cycle's worth, because `sus` is advected by a
+// fluid that really did only advance one cycle. THAT ASYMMETRY IS THE WHOLE
+// STAGGERED SCHEME, not an oversight: it is what lets a landform-scale bed
+// evolve without simulating landform-scale fluid time. Its cost is that
+// Sigma(bed + sus) is genuinely not conserved at M != 1, and the difference
+// is booked to `swe_sed_morfac_created_m3` so the mass audit can subtract a
+// known term instead of tripping on it.
+void SedExchange(Grid& g, const Params& p, float dt_morpho) {
+  const int n = g.n;
+  const float cell_m = p.world_m / float(p.res);
+  const float cell_area = cell_m * cell_m;
+  const float morfac = p.morfac;
+  if (!(morfac > 0.f)) return;
+  // Guarded only against a degenerate zero: `adaptation_length_m` is a real
+  // physical length (Params) and a caller setting it to 0 means "reach
+  // capacity immediately", which the min(1, ...) below already expresses.
+  const float adapt_L = std::max(p.adaptation_length_m, 1e-9f);
+  const float w_settle = std::max(p.sus_settling_velocity_m_per_s, 0.f);
+
+  std::vector<double> row_created(size_t(n), 0.0);
+
+  badlands::ParallelFor(size_t(n), [&](size_t yy) {
+    const int y = int(yy);
+    double created_acc = 0.0;
+    for (int x = 0; x < n; ++x) {
+      const size_t i = g.idx(x, y);
+      const float h_m = g.h[i];
+      const bool wet = h_m > p.eps_wet;
+      const float sus_m = ToMetres(g.sus[i], p);
+      const float soil_m = ToMetres(g.soil[i], p);
+
+      float bed_delta_m = 0.f;   // signed, + is aggradation
+      float soil_delta_m = 0.f;  // signed, tracks bed_delta except on bedrock
+      float sus_delta_m = 0.f;   // signed, fluid-clock
+      float created_m = 0.f;     // solid MORFAC conjured (+) or vanished (-)
+
+      const float cap_m = wet ? SedCapacityM(g, p, x, y) : 0.f;
+
+      if (wet && cap_m > sus_m) {
+        // ---- DEFICIT: the flow can carry more than it holds -> erode ----
+        const float speed =
+            std::sqrt(g.velx[i] * g.velx[i] + g.vely[i] * g.vely[i]);
+        // Relaxation over the ADAPTATION LENGTH: d(sus)/ds = (C - sus)/L
+        // integrated over the distance |v|*dt_morpho this cycle covers, in
+        // its saturating first-order form. `adaptation_length_m` is reused
+        // (rather than a new knob) because it is literally the same physical
+        // quantity: Params' own comment defines it as "the distance over
+        // which flow reaches its equilibrium concentration", derived twice
+        // (back-calibration from phase-0's law, and u*h/w_s for a silt-grade
+        // load) and agreeing at ~215-300 m. Phase 0 applied it to a
+        // particle's swept path; phase 1 applies it to a cell's flow path.
+        // Same length, same meaning, one number.
+        const float rate = std::min(1.0f, speed * dt_morpho / adapt_L);
+        const float chan = ChannelizationFactor(g, p, i, cell_m);
+        const float demand_fluid_m = rate * (cap_m - sus_m) * chan;
+        // MORFAC + clamp, applied to the DEMAND rather than to the yield.
+        // Deliberate: the clamp bounds how far the bed ELEVATION may move,
+        // and the substrate yield is monotone in and never exceeds the
+        // demand, so bounding the demand bounds the elevation too (strictly
+        // tighter on bedrock, which is the safe direction).
+        const float demand_bed_m =
+            -ClampMorfacBedDelta(-demand_fluid_m, h_m, p);
+        const float yield_m = SedSubstrateYieldM(demand_bed_m, soil_m, p);
+        bed_delta_m = -yield_m;
+        soil_delta_m = -std::min(demand_bed_m, soil_m);
+        sus_delta_m = yield_m / morfac;
+        created_m = bed_delta_m + sus_delta_m;  // = -(1 - 1/M)*yield <= 0
+      } else if (sus_m > cap_m && sus_m > 0.f) {
+        // ---- SURPLUS: more load than the flow can hold -> deposit ----
+        if (wet) {
+          // Settling, not adaptation-length relaxation -- see
+          // Params::sus_settling_velocity_m_per_s for the derivation and for
+          // why the velocity drops out (w_s*dt/h is what |v|*dt/L collapses
+          // to once L = u*h/w_s is substituted). Deep water deposits slowly,
+          // a shallow film almost instantly, and NEITHER needs the flow to
+          // be moving -- which is the property the still-lake and dry-cell
+          // cases depend on.
+          const float rate = std::min(1.0f, w_settle * dt_morpho / h_m);
+          const float dep_fluid_m = std::min(rate * (sus_m - cap_m), sus_m);
+          bed_delta_m = ClampMorfacBedDelta(dep_fluid_m, h_m, p);
+          soil_delta_m = bed_delta_m;
+          sus_delta_m = -bed_delta_m / morfac;
+          created_m = bed_delta_m + sus_delta_m;  // = +(1 - 1/M)*dep >= 0
+        } else {
+          // DRY: a stranded load, and MORFAC DOES NOT APPLY. MORFAC
+          // accelerates an ONGOING transport -- it credits the bed with M
+          // cycles of a flux that a quasi-steady flow keeps supplying. There
+          // is no flow here and no supply: this is a finite stock that
+          // settles exactly once. Amplifying it would build a mountain out
+          // of a puddle's worth of silt (at M = 10,000, 0.14 m of stranded
+          // load would credit the bed with 1.4 km of it). So the transfer is
+          // one-to-one and exactly conservative, and `created_m` stays 0.
+          bed_delta_m = sus_m;
+          soil_delta_m = sus_m;
+          sus_delta_m = -sus_m;
+        }
+      }
+
+      // Deposition always lands as SOIL (loose material by definition,
+      // whatever it was eroded from -- the same rule phase-0's `Deposit`
+      // states); erosion removes soil first and only then bedrock, which is
+      // why soil_delta and bed_delta differ on the erosion side.
+      //
+      // THE BED DELTA IS WRITTEN, THEN READ BACK, AND THE OTHER TWO SIDES
+      // ARE SCALED TO WHAT THE BED ACTUALLY DID. This is not defensive
+      // programming, it is the only way the exchange is conservative in
+      // float32: `height` stores a landform elevation, so at production
+      // relief its representable step is ~1e-5 m -- the same order as one
+      // cycle's bed delta, and SMALLER than it near a large elevation. A
+      // delta under half a ULP does not merely lose precision, it is
+      // DISCARDED ENTIRELY by the addition, and crediting `sus` with
+      // material the bed never gave up would be plain mass creation, cell by
+      // cell, every cycle. Reading back `height_b[i] - height[i]` recovers
+      // the realised change exactly (the two operands are within a factor of
+      // 2, so the subtraction is exact by Sterbenz's lemma), and scaling the
+      // sediment and ledger sides by the same ratio keeps all three in step.
+      // The physical reading is the honest one: if the bed could not move,
+      // no sediment was exchanged.
+      const float d_hu = ToHeightUnits(bed_delta_m, p);
+      g.height_b[i] = g.height[i] + d_hu;
+      const float realised_hu = g.height_b[i] - g.height[i];
+      const float ratio = (d_hu != 0.f) ? (realised_hu / d_hu) : 0.f;
+      soil_delta_m *= ratio;
+      sus_delta_m *= ratio;
+      created_m *= ratio;
+      g.soil_b[i] = std::max(0.f, g.soil[i] + ToHeightUnits(soil_delta_m, p));
+      g.sus_b[i] = std::max(0.f, g.sus[i] + ToHeightUnits(sus_delta_m, p));
+      created_acc += double(created_m) * double(cell_area);
+    }
+    row_created[size_t(y)] = created_acc;
+  });
+
+  // Serial, fixed-order combine (row index 0..n-1), same reproducibility
+  // argument as SweDepth's ledger partials.
+  double created_total = 0.0;
+  for (int y = 0; y < n; ++y) created_total += row_created[size_t(y)];
+  g.swe_sed_morfac_created_m3 += created_total;
+
+  g.height.swap(g.height_b);
+  g.soil.swap(g.soil_b);
+  g.sus.swap(g.sus_b);
+}
+
+// ---------------------------------------------------------------- sed_advect
+
+// The suspended load rides the flow: a semi-Lagrangian backtrace of `sus`
+// along the cell-centred velocity, sampled with Catmull-Rom bicubic.
+//
+// READS (front buffers only): `sus` over the 4x4 stencil around the
+// backtraced position, own `velx`/`vely`/`h`/`flux`, own and four-neighbour
+// `height` (the transverse bed slope). WRITES: `sus_b[i]`, then a second
+// gather-only pass rescales `sus_b` in place (each cell touching only its own
+// slot), then the swap. No cell reads another cell's `sus_b`.
+//
+// THE ADVECTION STEP IS THE CYCLE'S WHOLE FLUID TIME, `dt_morpho` =
+// swe_substeps * dt. `sus` is not advected during the substeps themselves --
+// this one pass stands in for all of them -- so it must cover the distance
+// they covered. That distance is large (measured at ~6 cells per cycle on a
+// production-shaped fixture), so the pass takes it as SEVERAL sub-steps of
+// about a cell each rather than one long chord -- see kMaxAdvectSubsteps /
+// kMaxBacktraceCells in protogen.hpp for the sizing and the reason.
+//
+// TRANSVERSE-SLOPE DEFLECTION lives here, and that is a considered choice
+// rather than the obvious reading of the brief (which lists it under the
+// exchange). The effect being modelled -- Ikeda's and Struiksma's closure --
+// is a statement about the DIRECTION of the sediment flux: on a laterally
+// tilted bed, transport deviates from the flow toward the downhill side, and
+// that deviation is what builds a point bar, which steers the flow, which is
+// how meandering starts. The only pass here that has a direction to deflect
+// is this one; expressing it inside SedExchange would mean faking a
+// directional effect through a scalar rate, which cannot move a grain
+// sideways and so cannot seed a meander. (Honest caveat kept in the open:
+// the classic closure is a BED-LOAD result, and this model has one sediment
+// field rather than separate bed and suspended load, so it is applied to the
+// only transport there is.)
+//
+// MASS. Semi-Lagrangian advection is not conservative -- a converging flow
+// field lets two cells backtrace into the same source and duplicate it, a
+// diverging one loses mass between the taps -- and Catmull-Rom's negative
+// overshoot has to be clipped on a non-negative field, which adds mass of its
+// own. Both are handled by ONE mechanism, a global multiplicative mass fixer:
+// the field is rescaled so its total is exactly (total before) minus a border
+// export computed INDEPENDENTLY from the border faces' own water flux times
+// the cell's sediment concentration. Two things follow, and both are the
+// point: the ledger closes on a physical export term rather than on
+// "whatever went missing", and the size of the correction (recorded in
+// `swe_sed_advect_fix_max`) becomes a diagnostic of how far the advection
+// step is being pushed.
+void SedAdvect(Grid& g, const Params& p, float dt_morpho) {
+  const int n = g.n;
+  const float cell_m = p.world_m / float(p.res);
+  const float cell_area = cell_m * cell_m;
+  if (!(cell_m > 0.f)) return;
+
+  const double before_m3 = DeterministicSum(g.cells, [&](size_t i) {
+    return double(ToMetres(g.sus[i], p)) * double(cell_area);
+  });
+
+  // Sub-step count, from the largest displacement anywhere on the grid: aim
+  // for about one cell per sub-step. The bound uses the UNDEFLECTED speed
+  // times sqrt(2), which is exactly the worst case the transverse deflection
+  // below can produce (it is bounded at 45 degrees, so it can lengthen the
+  // velocity vector by at most sqrt(2)) -- that way the deflection maths is
+  // written once, in the loop, rather than duplicated here to measure it.
+  const float max_speed = DeterministicMax(g.cells, [&](size_t i) {
+    return std::sqrt(g.velx[i] * g.velx[i] + g.vely[i] * g.vely[i]);
+  });
+  const float max_disp_cells = max_speed * 1.41421356f * dt_morpho / cell_m;
+  int substeps = 1;
+  if (max_disp_cells > 1.f)
+    substeps = std::min(kMaxAdvectSubsteps, int(std::ceil(max_disp_cells)));
+  const float dt_sub = dt_morpho / float(substeps);
+
+  // Border export accumulates across the sub-steps, per row inside each and
+  // combined serially afterwards (SweDepth's ledger construction, and the
+  // same reproducibility reason).
+  std::vector<double> row_export(size_t(n), 0.0);
+  double export_raw_m3 = 0.0;
+
+  for (int sub = 0; sub < substeps; ++sub) {
+    badlands::ParallelFor(size_t(n), [&](size_t yy) {
+      const int y = int(yy);
+      double export_acc = 0.0;
+      for (int x = 0; x < n; ++x) {
+        const size_t i = g.idx(x, y);
+        float vx = g.velx[i], vy = g.vely[i];
+        const float speed = std::sqrt(vx * vx + vy * vy);
+        if (speed > 0.f) {
+          // Transverse bed slope, central difference on the BED (not the
+          // water surface: this is about which way a grain rolls, which is
+          // gravity acting on the bed, not the pressure gradient driving the
+          // water).
+          const int xm = std::max(x - 1, 0), xp = std::min(x + 1, n - 1);
+          const int ym = std::max(y - 1, 0), yp = std::min(y + 1, n - 1);
+          const float span_x = float(xp - xm) * cell_m;
+          const float span_y = float(yp - ym) * cell_m;
+          const float bx =
+              span_x > 0.f
+                  ? (ToMetres(g.height[g.idx(xp, y)], p) -
+                     ToMetres(g.height[g.idx(xm, y)], p)) / span_x
+                  : 0.f;
+          const float by =
+              span_y > 0.f
+                  ? (ToMetres(g.height[g.idx(x, yp)], p) -
+                     ToMetres(g.height[g.idx(x, ym)], p)) / span_y
+                  : 0.f;
+          // Downslope direction, minus the part already along the flow --
+          // what remains is the TRANSVERSE downslope component, a
+          // dimensionless slope.
+          const float ux = vx / speed, uy = vy / speed;
+          const float dsx = -bx, dsy = -by;
+          const float along = dsx * ux + dsy * uy;
+          const float tx = dsx - along * ux, ty = dsy - along * uy;
+          // tan(deviation) = coeff * transverse slope, so the lateral speed
+          // is coeff * |v| * (transverse slope), in the transverse direction.
+          float latx = p.transverse_slope_coeff * speed * tx;
+          float laty = p.transverse_slope_coeff * speed * ty;
+          const float latmag = std::sqrt(latx * latx + laty * laty);
+          // Bounded at 45 degrees of deflection. A transverse slope steep
+          // enough to demand more is a cliff, not a bank, and the
+          // small-angle closure has nothing to say about it.
+          if (latmag > speed) {
+            const float s = speed / latmag;
+            latx *= s;
+            laty *= s;
+          }
+          vx += latx;
+          vy += laty;
+        }
+
+        float dxc = -vx * dt_sub / cell_m;  // backtrace, in CELLS
+        float dyc = -vy * dt_sub / cell_m;
+        const float dist = std::sqrt(dxc * dxc + dyc * dyc);
+        float step_scale = 1.f;
+        if (dist > kMaxBacktraceCells) {
+          step_scale = kMaxBacktraceCells / dist;
+          dxc *= step_scale;
+          dyc *= step_scale;
+        }
+        const float src_x = float(x) + 0.5f + dxc;
+        const float src_y = float(y) + 0.5f + dyc;
+        float v = CatmullRomSample(g.sus, n, src_x, src_y);
+        if (!(v > 0.f)) v = 0.f;  // also catches NaN, which cannot be a mass
+        g.sus_b[i] = v;
+
+        // Border export: for a cell with a face pointing off the array, the
+        // water leaving through it carries this cell's sediment at this
+        // cell's concentration (`sus` is an equivalent solid DEPTH, so sus/h
+        // is a dimensionless volumetric concentration).
+        //
+        // THE TIME USED IS THIS SUB-STEP'S OWN `dt_sub * step_scale`, the
+        // same effective step the backtrace just took. Sharing one clock is
+        // what keeps the export estimate and the field's implicit border
+        // loss consistent; when they were allowed to differ (a nominal
+        // whole-cycle export against a clamped backtrace) the mass fixer had
+        // to absorb the gap and grew to |f-1| ~ 0.19.
+        float border_flux = 0.f;
+        for (int k = 0; k < 4; ++k) {
+          const int nx = x + kDx[k], ny = y + kDy[k];
+          if (nx < 0 || ny < 0 || nx >= n || ny >= n)
+            border_flux += g.flux[i][k];
+        }
+        const float h_m = g.h[i];
+        const float sus_m = ToMetres(g.sus[i], p);
+        if (border_flux > 0.f && h_m > p.eps_wet && sus_m > 0.f) {
+          const double vol = double(border_flux) *
+                             double(dt_sub * step_scale) * double(sus_m / h_m);
+          export_acc += std::min(vol, double(sus_m) * double(cell_area));
+        }
+      }
+      row_export[size_t(y)] = export_acc;
+    });
+    for (int y = 0; y < n; ++y) export_raw_m3 += row_export[size_t(y)];
+    g.sus.swap(g.sus_b);
+  }
+
+  const double export_m3 = std::min(export_raw_m3, std::max(before_m3, 0.0));
+  // NOTE the buffers: the sub-step loop above already swapped, so the result
+  // is in `sus` and the mass fixer works on it in place. Still gather-only --
+  // each cell touches its own slot and reads no other.
+  const double after_m3 = DeterministicSum(g.cells, [&](size_t i) {
+    return double(ToMetres(g.sus[i], p)) * double(cell_area);
+  });
+  const double target_m3 = std::max(before_m3 - export_m3, 0.0);
+  double fix = 1.0;
+  if (after_m3 > 0.0) fix = target_m3 / after_m3;
+  if (fix != 1.0) {
+    const float fixf = float(fix);
+    badlands::ParallelFor(size_t(n), [&](size_t yy) {
+      const int y = int(yy);
+      for (int x = 0; x < n; ++x) g.sus[g.idx(x, y)] *= fixf;
+    });
+  }
+  g.swe_sed_advect_fix_max =
+      std::max(g.swe_sed_advect_fix_max, std::fabs(fix - 1.0));
+  g.swe_sed_border_export_m3 += export_m3;
+}
+
+// ------------------------------------------------------------- talus_flux
+
+// Half one of the Jacobi twin of phase-0's `Cascade`: what each cell WANTS to
+// shed downslope, per neighbour, with nothing applied yet.
+//
+// READS (front buffers only): own and eight-neighbour `height`, own `soil`.
+// WRITES: `talus[i]` for the single `i` this thread owns. Nothing reads
+// `talus` during this pass.
+//
+// SOIL ONLY, and donor-limited to the soil actually present. `Cascade` moves
+// material through the substrate (bedrock sheds at `bedrock_erodibility`),
+// which is right for a serial pass modelling long-run rock creep; this one is
+// an avalanche, and BEDROCK DOES NOT AVALANCHE. A rock face stands at
+// whatever angle it was cut at -- that is why cliffs exist -- and only the
+// loose regolith on top of it flows to the repose angle. Making the transfer
+// soil-only is also what keeps the pass exactly conservative with no
+// substrate arithmetic at all: whatever leaves a donor as soil arrives as
+// soil.
+//
+// Shed magnitude is `settling * 0.5 * (largest excess)`, split between the
+// receiving neighbours in proportion to their own excess. NOT `Cascade`'s
+// per-neighbour `settling * excess * 0.5` applied eight times: Cascade
+// re-reads `height` after every single transfer (its own comment says so) and
+// is self-limiting because of it, while a Jacobi pass commits all eight at
+// once from stale state and would shed up to ~3x the excess in one step --
+// an oscillation, not a relaxation. Keying the total on the LARGEST excess
+// keeps one pass strictly under-relaxed and the sequence geometric.
+void TalusFlux(Grid& g, const Params& p) {
+  const int n = g.n;
+  const float cell_m = p.world_m / float(p.res);
+  const float tan_repose = std::tan(p.repose_angle_deg * 3.14159265f / 180.0f);
+  const float diag_m = cell_m * 1.41421356f;
+
+  badlands::ParallelFor(size_t(n), [&](size_t yy) {
+    const int y = int(yy);
+    for (int x = 0; x < n; ++x) {
+      const size_t i = g.idx(x, y);
+      std::array<float, 8> f{};
+      const float soil_m = ToMetres(g.soil[i], p);
+      if (!(soil_m > 0.f)) {
+        g.talus[i] = f;
+        continue;
+      }
+      const float z_i = ToMetres(g.height[i], p);
+      float excess[8] = {};
+      float excess_sum = 0.f, excess_max = 0.f;
+      for (int k = 0; k < 8; ++k) {
+        const int nx = x + kTdx[k], ny = y + kTdy[k];
+        if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
+        // Per-direction threshold using the ACTUAL centre-to-centre distance
+        // (cell_m orthogonally, cell_m*sqrt(2) diagonally). Phase-0's
+        // Cascade uses one `max_diff` for all eight, which makes its
+        // effective diagonal repose angle ~35 deg when it asks for 40; the
+        // angle is the shared quantity, and getting the distance right is
+        // strictly more faithful to it.
+        const bool diagonal = (kTdx[k] != 0) && (kTdy[k] != 0);
+        const float dist_m = diagonal ? diag_m : cell_m;
+        const float drop = z_i - ToMetres(g.height[g.idx(nx, ny)], p);
+        const float e = drop - tan_repose * dist_m;
+        if (e > 0.f) {
+          excess[k] = e;
+          excess_sum += e;
+          excess_max = std::max(excess_max, e);
+        }
+      }
+      if (excess_sum > 0.f) {
+        float move_total = p.settling * 0.5f * excess_max;
+        if (move_total > soil_m) move_total = soil_m;  // donor-limited
+        for (int k = 0; k < 8; ++k)
+          f[k] = move_total * (excess[k] / excess_sum);
+      }
+      g.talus[i] = f;
+    }
+  });
+}
+
+// ------------------------------------------------------------- talus_apply
+
+// The gather half: a cell's new soil is its own minus what it shed plus what
+// its neighbours sent it.
+//
+// READS (front buffers only): own and eight-neighbour `talus`, own `height`
+// and `soil`. WRITES: `height_b[i]`, `soil_b[i]`, then the swaps.
+//
+// EXACTLY CONSERVATIVE, by pairing rather than by tolerance: every entry
+// `talus[j][k]` is subtracted once (from j's own outflow sum) and added once
+// (by the neighbour it points at, which finds it at index `TalusOpposite(k)`
+// of j). TalusFlux never writes an entry pointing off the array, so nothing
+// escapes the domain and there is no border term to ledger -- material piles
+// against the map edge instead, which is the honest behaviour for a pass with
+// no knowledge of what is beyond it.
+void TalusApply(Grid& g, const Params& p) {
+  const int n = g.n;
+  badlands::ParallelFor(size_t(n), [&](size_t yy) {
+    const int y = int(yy);
+    for (int x = 0; x < n; ++x) {
+      const size_t i = g.idx(x, y);
+      float out_m = 0.f, in_m = 0.f;
+      for (int k = 0; k < 8; ++k) {
+        out_m += g.talus[i][size_t(k)];
+        const int nx = x + kTdx[k], ny = y + kTdy[k];
+        if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
+        in_m += g.talus[g.idx(nx, ny)][size_t(TalusOpposite(k))];
+      }
+      const float d_hu = ToHeightUnits(in_m - out_m, p);
+      g.height_b[i] = g.height[i] + d_hu;
+      // Cannot go negative: TalusFlux caps a cell's total shed at the soil it
+      // holds, and `in_m` only adds. The max() is a float-rounding guard.
+      g.soil_b[i] = std::max(0.f, g.soil[i] + d_hu);
+    }
+  });
+  g.height.swap(g.height_b);
+  g.soil.swap(g.soil_b);
+}
+
 }  // namespace pg
 
 namespace {
@@ -603,6 +1344,47 @@ ReduceResult DeterministicMaxDepth(const Grid& g, const Params& p) {
     if (chunk_max[c] > r.h_max) r.h_max = chunk_max[c];
   }
   return r;
+}
+
+// ------------------------------------------------------ sediment mass audit
+
+// How often RunSweCycles audits the sediment ledger. Every 10 cycles: often
+// enough that a leak is named within a few percent of a production run rather
+// than at the end of it, rare enough that the two extra whole-grid reductions
+// it costs stay in the noise against 10 cycles x swe_substeps fluid passes.
+constexpr int kMassAuditEveryCycles = 10;
+// Audit tolerance, as (relative term) + (absolute term):
+//
+//   RELATIVE, 1e-3 of everything the run has moved. This is what catches a
+//   real leak, which is always a FRACTION of the transported mass (a missing
+//   substrate term, a talus transfer that does not pair, an advection fixer
+//   pointed at the wrong total). 0.1% is far below any such bug and far above
+//   the double-precision summation noise of the reductions themselves
+//   (~1e-7 relative at 1e6 cells).
+//
+//   ABSOLUTE, 1e-6 of the starting solid volume. This is the float32
+//   QUANTISATION BUDGET, and it is not optional: `height` is a single-
+//   precision landform elevation, so at production settings (relief_m = 400,
+//   surfaces around 300 m) its representable step is ~2.4e-5 m -- the same
+//   order as a single cycle's unaccelerated bed delta. Every cell's update
+//   therefore rounds, the roundings random-walk, and after ~100 cycles on a
+//   1024^2 grid they accumulate to tens of cubic metres against a ~1e11 m3
+//   baseline. That drift is real, unavoidable in float32, and must not be
+//   reported as a mass leak; 1e-6 of the baseline sits comfortably above it
+//   and still catches anything structural.
+constexpr double kMassAuditRelTol = 1e-3;
+constexpr double kMassAuditAbsFrac = 1e-6;
+
+// Total solid on the grid, m^3: the bed (`height`, which already includes the
+// soil layer -- bedrock is implicitly height - soil, see Grid) plus the
+// suspended load, both crossing the units seam exactly once.
+double SolidVolumeM3(const Grid& g, const Params& p) {
+  const float cell_m = p.world_m / float(p.res);
+  const double cell_area = double(cell_m) * double(cell_m);
+  return DeterministicSum(g.cells, [&](size_t i) {
+    return (double(ToMetres(g.height[i], p)) + double(ToMetres(g.sus[i], p))) *
+           cell_area;
+  });
 }
 
 // --------------------------------------------------------- abort snapshot
@@ -688,6 +1470,17 @@ SweRunResult RunSweCycles(Grid& g, const Params& p, int cycles,
     return result;
   }
 
+  // Sediment mass audit baseline, captured HERE -- at phase-1 entry, i.e. on
+  // whatever bed and suspended load the caller hands over (in production,
+  // phase-0's finished landscape after SweWarmStart). The three ledger
+  // counters are snapshotted alongside it rather than assumed zero, so a
+  // caller that runs RunSweCycles more than once on the same Grid audits its
+  // own segment instead of re-auditing history.
+  const bool morpho = p.morfac > 0.f;
+  const double audit_baseline_m3 = morpho ? SolidVolumeM3(g, p) : 0.0;
+  const double audit_base_export = g.swe_sed_border_export_m3;
+  const double audit_base_created = g.swe_sed_morfac_created_m3;
+
   for (int cycle = 0; cycle < cycles; ++cycle) {
     // h_max floored at eps_wet: a bone-dry grid has zero wave speed, which
     // would divide by zero below. Flooring at the wet threshold gives a
@@ -725,12 +1518,66 @@ SweRunResult RunSweCycles(Grid& g, const Params& p, int cycles,
       }
     }
 
-    // Morpho hook -- EMPTY. Task 6 fills this in with SedExchange/SedAdvect/
-    // TalusFlux+TalusApply, run once per cycle (not per substep) after the
-    // fluid has advanced `swe_substeps` times, calling `ClampMorfacBedDelta`
-    // (declared in protogen.hpp, defined below in this file) on every bed
-    // delta it produces -- present and real today, just with no caller yet,
-    // so Task 6 activates this path instead of inventing it.
+    // Morpho hook (Task 6). ONCE per cycle, after the fluid has advanced
+    // `swe_substeps` times -- that is the staggering the whole design rests
+    // on: the fluid runs at its CFL dt, the bed sees one update per cycle
+    // covering all of it. `dt_morpho` is therefore the cycle's total fluid
+    // time, and the passes are sequenced HERE and nowhere else (no pass
+    // calls another).
+    if (morpho) {
+      const float dt_morpho = float(p.swe_substeps) * dt;
+      auto m0 = std::chrono::steady_clock::now();
+      SedExchange(g, p, dt_morpho);
+      auto m1 = std::chrono::steady_clock::now();
+      SedAdvect(g, p, dt_morpho);
+      auto m2 = std::chrono::steady_clock::now();
+      TalusFlux(g, p);
+      TalusApply(g, p);
+      auto m3 = std::chrono::steady_clock::now();
+      if (stats) {
+        stats->t_swe_sed_exchange += std::chrono::duration<double>(m1 - m0).count();
+        stats->t_swe_sed_advect += std::chrono::duration<double>(m2 - m1).count();
+        stats->t_swe_talus += std::chrono::duration<double>(m3 - m2).count();
+      }
+
+      // Periodic mass audit. The invariant, stated once here so the signs
+      // are not left implicit anywhere else:
+      //
+      //   solid_now = solid_baseline + morfac_created - border_export
+      //
+      // `morfac_created` is signed (negative while the landscape is net
+      // eroding, since MORFAC destroys the bed material it does not hand to
+      // `sus`); `border_export` is the solid SedAdvect ledgered as leaving
+      // through the open border. Everything else -- the substrate split,
+      // deposition, the whole talus pair -- is conservative by construction,
+      // so any residual here is a bug in one of them, not a physical term
+      // this expression forgot.
+      if ((cycle + 1) % kMassAuditEveryCycles == 0) {
+        const double solid_now = SolidVolumeM3(g, p);
+        const double created = g.swe_sed_morfac_created_m3 - audit_base_created;
+        const double exported = g.swe_sed_border_export_m3 - audit_base_export;
+        const double expected = audit_baseline_m3 + created - exported;
+        const double resid = solid_now - expected;
+        const double moved = std::fabs(created) + std::fabs(exported) +
+                             std::fabs(solid_now - audit_baseline_m3);
+        const double tol = kMassAuditRelTol * moved +
+                           kMassAuditAbsFrac * std::fabs(audit_baseline_m3);
+        if (!(std::fabs(resid) <= tol)) {
+          result.ok = false;
+          result.aborted_cycle = cycle;
+          char buf[288];
+          std::snprintf(buf, sizeof(buf),
+                        "cycle %d: sediment-mass audit -- residual %.6e m3 "
+                        "exceeds tolerance %.6e m3 (solid %.6e, baseline "
+                        "%.6e, morfac-created %.6e, border-export %.6e)",
+                        cycle, resid, tol, solid_now, audit_baseline_m3,
+                        created, exported);
+          result.reason = buf;
+          WriteAbortSnapshot(g, p, cycle);
+          return result;
+        }
+      }
+    }
 
     // Post-substep validity check -- see this function's header comment for
     // why this runs after EVERY cycle, including the last, rather than only
