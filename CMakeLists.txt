@@ -2165,12 +2165,10 @@ add_library(shapeshifter_core STATIC
     ${SHAPESHIFTER_DIR}/core/src/gizmo.cpp
     ${SHAPESHIFTER_DIR}/core/src/lines.cpp
     ${SHAPESHIFTER_DIR}/core/src/mesh_job.cpp
-    ${SHAPESHIFTER_DIR}/core/src/metal_impl.cpp
     ${SHAPESHIFTER_DIR}/core/src/navigation.cpp
     ${SHAPESHIFTER_DIR}/core/src/picking.cpp
     ${SHAPESHIFTER_DIR}/core/src/rhi_pipelines.cpp
     ${SHAPESHIFTER_DIR}/core/src/rhi_renderer.cpp
-    ${SHAPESHIFTER_DIR}/core/src/renderer.cpp
     ${SHAPESHIFTER_DIR}/core/src/scene.cpp
     ${SHAPESHIFTER_DIR}/core/src/sdf.cpp
 )
@@ -2184,7 +2182,6 @@ target_include_directories(shapeshifter_core
     PUBLIC
         ${SHAPESHIFTER_DIR}/core/include
         ${SHAPESHIFTER_DIR}/shaders          # shared_types.h, ground_grid.h, sdf_scene.h
-        ${SHAPESHIFTER_DIR}/vendor/metal-cpp
 )
 target_compile_options(shapeshifter_core PRIVATE -iquote${SHAPESHIFTER_DIR}/core/src)
 
@@ -2208,14 +2205,14 @@ target_link_libraries(shapeshifter_core PUBLIC
     "-framework Metal" "-framework Foundation"
     "-framework QuartzCore" "-framework CoreGraphics")
 
-# Match the app's deployment target (editors/shapeshifter/project.yml says
-# macOS 15.0). Without this the archive builds at the SDK default and the link
-# warns that it was "built for newer 'macOS' version (26.0) than being linked
-# (15.0)" -- which is not cosmetic: the app would declare a 15.0 minimum while
-# carrying objects free to use APIs that do not exist there. Only this target
-# is constrained; the rest of the repo has no such contract to honour.
-target_compile_options(shapeshifter_core PUBLIC -mmacosx-version-min=15.0)
-target_link_options(shapeshifter_core PUBLIC -mmacosx-version-min=15.0)
+# NO deployment-target override any more, and the reason is a real change in
+# what this target is. It used to be a standalone editor core that could
+# honestly promise macOS 15; it now links badlands_rhi, the render graph and
+# badlands_slang, all built at the SDK default. Pinning this one archive lower
+# than its own dependencies produced the mismatch warning from the other side --
+# "built for newer 'macOS' version (26.0) than being linked (15.0)" -- and the
+# promise was never keepable anyway once the engine came in. The app's
+# deploymentTarget follows the engine instead (editors/shapeshifter/project.yml).
 
 # shapeshifter_core_tests: the editor core's own suite, moved across as-is.
 # It is still on doctest rather than this repo's Catch2 — porting 15 files is

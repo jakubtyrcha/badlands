@@ -43,6 +43,33 @@ std::span<const uint8_t> Bytes(const void* p, size_t n) {
 
 } // namespace
 
+// Pure and allocation-free, so they are unit-tested with no device at all
+// (tests/core/renderer_tests.cpp). They came across from the metal-cpp renderer
+// unchanged -- packing a uniform struct is the one part of that file the RHI
+// port had no reason to touch.
+RaymarchUniforms build_raymarch_uniforms(simd_float4x4 view_proj, simd_float4x4 inv_view_proj,
+                                          float drawable_width_px, float drawable_height_px,
+                                          int32_t node_count, float near, float far) {
+    RaymarchUniforms uniforms;
+    uniforms.view_proj = view_proj;
+    uniforms.inv_view_proj = inv_view_proj;
+    uniforms.params0 = simd_make_float4(drawable_width_px, drawable_height_px,
+                                         static_cast<float>(node_count), 0.0f);
+    uniforms.params1 = simd_make_float4(near, far, 0.0f, 0.0f);
+    return uniforms;
+}
+GroundGridUniforms build_ground_grid_uniforms(simd_float4x4 view_proj, simd_float4x4 inv_view_proj,
+                                               float drawable_width_px, float drawable_height_px,
+                                               float half_extent, float minor_spacing,
+                                               float major_spacing) {
+    GroundGridUniforms uniforms;
+    uniforms.view_proj = view_proj;
+    uniforms.inv_view_proj = inv_view_proj;
+    uniforms.params0 = simd_make_float4(drawable_width_px, drawable_height_px, half_extent, 0.0f);
+    uniforms.params1 = simd_make_float4(minor_spacing, major_spacing, 0.0f, 0.0f);
+    return uniforms;
+}
+
 std::unique_ptr<RhiRenderer> RhiRenderer::Create(IRhiDevice& device,
                                                   slang::SlangCompiler& compiler,
                                                   Format color) {

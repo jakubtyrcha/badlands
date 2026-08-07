@@ -1,6 +1,6 @@
 #include <doctest.h>
 
-#include "renderer.h"
+#include "rhi_renderer.h"
 
 using namespace sq;
 

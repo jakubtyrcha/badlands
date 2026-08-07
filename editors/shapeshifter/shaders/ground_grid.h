@@ -5,7 +5,7 @@
 // the CPU tests (tests/core/ground_grid_tests.cpp).
 //
 // Dual-compile: included from both plain C++ and MSL, the same
-// __METAL_VERSION__ idiom sdf_scene.h uses. Every decision the fragment
+// dual-compile idiom sdf_scene.h uses. Every decision the fragment
 // shader makes about colour lives here; the .metal file only reconstructs
 // the ray, intersects y=0, and writes depth. That split is deliberate -- it
 // means the tiering, anti-aliasing and palette are all testable headlessly,
@@ -25,9 +25,6 @@
 typedef float2 sq_float2;
 #endif
 #define GG_CONST static const
-#elif defined(__METAL_VERSION__)
-typedef metal::float2 sq_float2;
-#define GG_CONST constant
 #else
 #include <cmath>
 #include <simd/simd.h>
@@ -88,15 +85,6 @@ inline float     gg_min(float a, float b)       { return min(a, b); }
 inline float     gg_max(float a, float b)       { return max(a, b); }
 inline sq_float2 gg_max2(sq_float2 a, float b)  { return max(a, sq_float2(b, b)); }
 inline sq_float2 gg_fract2(sq_float2 v)         { return frac(v); }
-inline sq_float2 gg_make2(float x, float y)     { return sq_float2(x, y); }
-inline sq_float4 gg_make4(float x, float y, float z, float w) { return sq_float4(x, y, z, w); }
-#elif defined(__METAL_VERSION__)
-inline float     gg_abs(float v)                { return metal::abs(v); }
-inline sq_float2 gg_abs2(sq_float2 v)           { return metal::abs(v); }
-inline float     gg_min(float a, float b)       { return metal::min(a, b); }
-inline float     gg_max(float a, float b)       { return metal::max(a, b); }
-inline sq_float2 gg_max2(sq_float2 a, float b)  { return metal::max(a, sq_float2(b)); }
-inline sq_float2 gg_fract2(sq_float2 v)         { return metal::fract(v); }
 inline sq_float2 gg_make2(float x, float y)     { return sq_float2(x, y); }
 inline sq_float4 gg_make4(float x, float y, float z, float w) { return sq_float4(x, y, z, w); }
 #else

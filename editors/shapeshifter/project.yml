@@ -1,14 +1,18 @@
 name: Shapeshifter
 options:
   bundleIdPrefix: com.jakubtyrcha
+  # Follows the engine, not the other way round: the editor now links
+  # badlands_rhi, the render graph and badlands_slang, which are built at the
+  # SDK default. Promising an older minimum than the libraries linked into the
+  # binary is a promise that cannot be kept.
   deploymentTarget:
-    macOS: "15.0"
+    macOS: "26.0"
   createIntermediateGroups: true
 
 settings:
   base:
     CLANG_CXX_LANGUAGE_STANDARD: c++20
-    MACOSX_DEPLOYMENT_TARGET: "15.0"
+    MACOSX_DEPLOYMENT_TARGET: "26.0"
 
 targets:
   # The C++ core and its test suite are NOT built here any more. They are CMake
@@ -26,8 +30,6 @@ targets:
     platform: macOS
     sources:
       - app/Sources
-      - path: shaders
-        includes: ["*.metal"]
     dependencies:
       - sdk: Metal.framework
       - sdk: QuartzCore.framework
@@ -71,7 +73,6 @@ targets:
       # app bundle -- so the binary needs to be told where to find it.
       LD_RUNPATH_SEARCH_PATHS:
         - "$(SRCROOT)/../../third_party/toolchains/slang/lib"
-      MTL_ENABLE_DEBUG_INFO: INCLUDE_SOURCE
 
 schemes:
   Shapeshifter:
