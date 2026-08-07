@@ -628,8 +628,11 @@ struct Grid {
   }
 };
 
-// Extracted from main so the sanity tests exercise the REAL loop rather than
-// a copy that can drift from it.
+// Wall-time accumulators for one run, filled in by RunSim (phase 0) and
+// optionally by RunSweCycles (phase 1, see below) so a caller -- main()'s
+// perf report, or a test that wants to check a pass actually ran -- reads
+// timings off a plain struct rather than the passes threading printf calls
+// of their own through the sim loop.
 struct SimStats {
   double t_drops = 0, t_grid = 0, t_settle = 0;
   // One-shot phase-0 -> phase-1 handoff (Task 5's SweWarmStart). NOT filled

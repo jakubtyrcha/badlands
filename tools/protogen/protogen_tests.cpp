@@ -161,9 +161,13 @@ void Determinism() {
 
 // --- 4. knob liveness ------------------------------------------------------
 // Two distinct values of a parameter must NOT give bit-identical output.
-// Both masking bugs found so far (the lobe-length clamp hiding
-// settling_velocity, the wander cap hiding jet turbulence) announced themselves
-// exactly this way, and both were spotted by eye, late.
+// The two masking bugs this technique originally caught (a lobe-length clamp
+// hiding a lake-plume settling knob, a wander cap hiding jet turbulence) both
+// lived in the standing-water/lake machinery Task 1 retired -- the bugs and
+// the knobs they hid are gone with it, but the lesson survives as this suite
+// and MorphoKnobLiveness/CyclesKnobLiveness below: every knob added since is
+// pinned live the same way, and both were spotted by eye, late, before this
+// technique existed.
 void KnobLiveness() {
   struct Knob { const char* name; void (*set)(Params&, int); };
   static const Knob knobs[] = {
