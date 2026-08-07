@@ -30,13 +30,14 @@ import output_transform;
 
 public static const uint kViewTriangleId = 1u;
 public static const uint kViewBarycentric = 2u;
-public static const uint kViewDepth = 3u;
-public static const uint kViewAlbedo = 4u;
-public static const uint kViewNormal = 5u;
-public static const uint kViewRoughness = 6u;
-public static const uint kViewMetallic = 7u;
-public static const uint kViewDisplacement = 8u;
-public static const uint kViewAo = 9u;
+public static const uint kViewUv = 3u;
+public static const uint kViewDepth = 4u;
+public static const uint kViewAlbedo = 5u;
+public static const uint kViewNormal = 6u;
+public static const uint kViewRoughness = 7u;
+public static const uint kViewMetallic = 8u;
+public static const uint kViewDisplacement = 9u;
+public static const uint kViewAo = 10u;
 
 ConstantBuffer<ResolveFrame> frame;
 Texture2D<uint> visbuffer;
@@ -256,6 +257,13 @@ float4 fs_resolve(VOut i) : SV_Target
     // straight back, so a readback returns the byte the view claims to show.
     if (view == kViewTriangleId) { return float4(SrgbToLinear(HashId(prim)), 1.0); }
     if (view == kViewBarycentric) { return float4(SrgbToLinear(saturate(bary.lambda)), 1.0); }
+    if (view == kViewUv) {
+        // frac(), so a tiling map READS as tiling: the plane's UVs run to 4 and
+        // an unwrapped view would clamp to a flat yellow corner and say nothing
+        // about the layout. Red is u, green is v -- the convention every DCC
+        // tool uses, so a rotated or flipped map is recognisable at a glance.
+        return float4(SrgbToLinear(float3(frac(uv), 0.0)), 1.0);
+    }
     if (view == kViewDepth) {
         // View DISTANCE normalized between near and far, white = near. Raw
         // reversed-Z would cluster against 1.0 under perspective and read as a

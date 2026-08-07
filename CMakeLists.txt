@@ -1812,7 +1812,7 @@ if(APPLE)
     # pack is SYNTHETIC (constant textures), so no assertion depends on a
     # shipped data file and the mip level cannot affect nine of the ten — which
     # confines mip prediction to the gradient test below, where it belongs.
-    foreach(view lit triangle-id barycentric depth albedo normal
+    foreach(view lit triangle-id barycentric uv depth albedo normal
                  roughness metallic displacement ao)
         string(REPLACE "-" "_" view_name "${view}")
         # --env none, and it matters for exactly one of the ten. The lit view's

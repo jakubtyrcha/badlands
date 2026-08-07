@@ -43,6 +43,7 @@ const std::array<DebugViewInfo, size_t(DebugView::kCount)>& DebugViews() {
       {"lit", "Lit"},
       {"triangle-id", "Triangle ID"},
       {"barycentric", "Barycentric"},
+      {"uv", "UV"},
       {"depth", "Depth"},
       {"albedo", "Albedo"},
       {"normal", "Normal"},

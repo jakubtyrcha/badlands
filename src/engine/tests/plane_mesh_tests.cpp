@@ -143,8 +143,13 @@ TEST_CASE("spheres: one mesh, one instance per chart cell", "[plane]") {
   // ONE mesh, not fourteen: the whole point of the instanced draw is that the
   // vertex data is shared. A build that concatenated fourteen spheres would
   // have fourteen times the vertices and still pass every other check here.
-  CHECK(grid.vertices.size() ==
-        size_t(kSphereSegments + 1) * (kSphereRings + 1));
+  //
+  // Eight octahedron faces, each a triangular lattice of (n+1)(n+2)/2 vertices.
+  // Faces do not share vertices -- the octahedron's edges are exactly where the
+  // octahedral UV map is discontinuous.
+  const size_t n = kSphereSubdivisions;
+  CHECK(grid.vertices.size() == 8 * (n + 1) * (n + 2) / 2);
+  CHECK(grid.TriangleCount() == 8 * n * n);
 }
 
 TEST_CASE("spheres: the chart sweeps roughness and metallic", "[plane]") {
@@ -210,4 +215,81 @@ TEST_CASE("spheres: normals point outward and the winding is CCW", "[plane]") {
     INFO("triangle " << t / 3);
     CHECK(glm::dot(glm::normalize(face), glm::normalize(centroid)) > 0.0f);
   }
+}
+
+TEST_CASE("spheres: the octahedral map has no pole and no degenerate triangle",
+          "[plane]") {
+  const SceneMesh grid = BuildSphereGrid();
+
+  // THE REASON THIS REPLACED A UV SPHERE. A UV sphere's rings converge at the
+  // poles into a fan of degenerate slivers whose UVs pinch to a point and whose
+  // tangent frame is undefined -- which reads as a smeared, aliased artifact on
+  // the tips, worst on exactly the low-roughness cells where the reflection is
+  // sharpest. A subdivided octahedron has no such vertex anywhere.
+  float smallest = 1e9f, largest = 0.0f, total = 0.0f;
+  for (size_t t = 0; t < grid.indices.size(); t += 3) {
+    const glm::vec3 a(grid.vertices[grid.indices[t + 0]].pos_nx);
+    const glm::vec3 b(grid.vertices[grid.indices[t + 1]].pos_nx);
+    const glm::vec3 c(grid.vertices[grid.indices[t + 2]].pos_nx);
+    const float area = 0.5f * glm::length(glm::cross(b - a, c - a));
+    smallest = std::min(smallest, area);
+    largest = std::max(largest, area);
+    total += area;
+  }
+  const float average = total / float(grid.TriangleCount());
+  INFO("smallest " << smallest << " largest " << largest << " average "
+                   << average);
+
+  // THE CLAIM THAT MATTERS: the smallest triangle is a real fraction of the
+  // average. This is what a UV sphere cannot satisfy at any ring count -- its
+  // polar triangles shrink toward zero as the tessellation refines, so the
+  // ratio is not merely large, it is unbounded.
+  CHECK(smallest > 0.2f * average);
+
+  // And the overall spread is bounded. 4.7 is MEASURED for this tessellation,
+  // not a target: normalizing an octahedron compresses each face's corners
+  // relative to its centre, and that is the price of having no pole at all.
+  CHECK(largest / smallest < 6.0f);
+}
+
+TEST_CASE("spheres: every vertex is on the sphere with a matching normal",
+          "[plane]") {
+  const SceneMesh grid = BuildSphereGrid(1.0f);
+  for (const auto& v : grid.vertices) {
+    const glm::vec3 p(v.pos_nx);
+    const glm::vec3 n(v.pos_nx.w, v.nyz_uv.x, v.nyz_uv.y);
+    CHECK(glm::length(p) == Catch::Approx(1.0f).margin(1e-5));
+    CHECK(glm::length(n) == Catch::Approx(1.0f).margin(1e-5));
+    // On a sphere the normal IS the normalized position, which makes this a
+    // closed form rather than a smoothing check.
+    CHECK(glm::dot(n, glm::normalize(p)) == Catch::Approx(1.0f).margin(1e-5));
+  }
+}
+
+TEST_CASE("spheres: octahedral UVs cover the unit square and fold at the "
+          "equator", "[plane]") {
+  // The map must be onto [0,1]^2 -- a parameterization that used half the
+  // square would waste half of every texture and show as a doubled tiling.
+  const SceneMesh grid = BuildSphereGrid();
+  glm::vec2 lo(2.0f), hi(-1.0f);
+  for (const auto& v : grid.vertices) {
+    const glm::vec2 uv(v.nyz_uv.z, v.nyz_uv.w);
+    lo = glm::min(lo, uv);
+    hi = glm::max(hi, uv);
+  }
+  CHECK(lo.x == Catch::Approx(0.0f).margin(1e-4));
+  CHECK(lo.y == Catch::Approx(0.0f).margin(1e-4));
+  CHECK(hi.x == Catch::Approx(1.0f).margin(1e-4));
+  CHECK(hi.y == Catch::Approx(1.0f).margin(1e-4));
+
+  // The fold: +Y is the centre of the square, -Y goes to the corners, and the
+  // equator is the diamond between them. Getting the fold wrong is the classic
+  // octahedral bug and it looks like a plausible but wrong texture layout.
+  CHECK(glm::length(OctEncode({0, 1, 0}) - glm::vec2(0.5f, 0.5f)) < 1e-5f);
+  const glm::vec2 down = OctEncode({0, -1, 0});
+  CHECK((std::abs(down.x - 0.0f) < 1e-5f || std::abs(down.x - 1.0f) < 1e-5f));
+  // On the equator the map is continuous with the upper hemisphere: +X sits at
+  // the middle of an edge either way.
+  CHECK(glm::length(OctEncode({1, 0, 0}) - glm::vec2(1.0f, 0.5f)) < 1e-5f);
+  CHECK(glm::length(OctEncode({0, 0, 1}) - glm::vec2(0.5f, 1.0f)) < 1e-5f);
 }

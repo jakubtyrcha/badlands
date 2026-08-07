@@ -33,6 +33,7 @@ enum class DebugView : uint32_t {
   Lit = 0,
   TriangleId,
   Barycentric,
+  Uv,
   Depth,
   Albedo,
   Normal,

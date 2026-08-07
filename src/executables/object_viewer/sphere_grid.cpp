@@ -1,6 +1,7 @@
 #include "executables/object_viewer/sphere_grid.hpp"
 
 #include <cmath>
+#include <vector>
 
 namespace badlands::object_viewer {
 
@@ -39,62 +40,166 @@ SphereGridBounds SphereGridExtent(float sphere_radius, float spacing) {
   return b;
 }
 
+glm::vec2 OctEncode(glm::vec3 dir) {
+  const float l1 = std::abs(dir.x) + std::abs(dir.y) + std::abs(dir.z);
+  if (!(l1 > 0.0f)) return glm::vec2(0.5f);
+  const glm::vec3 n = dir / l1;
+  glm::vec2 p(n.x, n.z);
+  if (n.y < 0.0f) {
+    // THE MIRROR FOLD. The lower hemisphere is reflected into the four corners
+    // of the square across the diagonals, which is what makes the map
+    // continuous over the whole sphere with no pole and no seam interior to a
+    // face -- every discontinuity lands exactly on an octahedron edge, where
+    // the tessellation already has vertices.
+    p = glm::vec2((1.0f - std::abs(n.z)) * (n.x >= 0.0f ? 1.0f : -1.0f),
+                  (1.0f - std::abs(n.x)) * (n.z >= 0.0f ? 1.0f : -1.0f));
+  }
+  return p * 0.5f + 0.5f;
+}
+
+namespace {
+
+// One subdivided octahedron face. Corners are unit axis vectors; the lattice is
+// generated on the octahedron's FLAT face and normalized afterwards, which is
+// what makes the octahedral UV exact rather than fitted -- the map is defined
+// on exactly those flat points.
+//
+// Faces do NOT share vertices. The octahedron's edges are precisely where the
+// UV map is discontinuous, so a shared vertex there would have to carry two
+// UVs; duplicating along the seams costs ~8% more vertices and removes the
+// whole class of seam artifact.
+void AppendOctaFace(SceneMesh& mesh, glm::vec3 a, glm::vec3 b, glm::vec3 c,
+                    float radius) {
+  const uint32_t n = kSphereSubdivisions;
+  const uint32_t base = uint32_t(mesh.vertices.size());
+
+  // Row-major triangular lattice: row `i` holds n - i + 1 vertices.
+  auto index_of = [&](uint32_t row, uint32_t col) {
+    // Sum of the lengths of the preceding rows.
+    const uint32_t before = row * (n + 1) - (row > 0 ? (row - 1) * row / 2 : 0);
+    return base + before + col;
+  };
+
+  for (uint32_t row = 0; row <= n; ++row) {
+    for (uint32_t col = 0; col + row <= n; ++col) {
+      const float wb = float(row) / float(n);
+      const float wc = float(col) / float(n);
+      const float wa = 1.0f - wb - wc;
+      const glm::vec3 on_face = a * wa + b * wb + c * wc;
+      const glm::vec3 normal = glm::normalize(on_face);
+      const glm::vec2 uv = OctEncode(on_face);
+
+      MeshVertex v;
+      const glm::vec3 p = normal * radius;
+      v.pos_nx = {p.x, p.y, p.z, normal.x};
+      v.nyz_uv = {normal.y, normal.z, uv.x, uv.y};
+      // Filled in below from the UV gradient. A sphere under an octahedral map
+      // has no closed-form tangent worth writing out, and deriving it from the
+      // triangles is both shorter and correct for any map.
+      v.tangent = {0.0f, 0.0f, 0.0f, 1.0f};
+      mesh.vertices.push_back(v);
+    }
+  }
+
+  for (uint32_t row = 0; row < n; ++row) {
+    for (uint32_t col = 0; col + row < n; ++col) {
+      const uint32_t v0 = index_of(row, col);
+      const uint32_t v1 = index_of(row, col + 1);
+      const uint32_t v2 = index_of(row + 1, col);
+      // (a, b, c) is ordered so the FACE faces outward; the lattice's own
+      // orientation is the opposite of the naive (v0, v1, v2), so the pair is
+      // spelled out here rather than assumed. The winding test is what settles
+      // it -- a reversed sphere still renders as a filled disc.
+      mesh.indices.insert(mesh.indices.end(), {v0, v2, v1});
+      if (col + row + 1 < n) {
+        const uint32_t v3 = index_of(row + 1, col + 1);
+        mesh.indices.insert(mesh.indices.end(), {v1, v2, v3});
+      }
+    }
+  }
+}
+
+// Per-vertex tangents from the UV gradient, accumulated over the triangles that
+// share each vertex and then orthonormalized against the normal.
+//
+// tangent.w carries the handedness, which three components cannot express --
+// negating T inverts the normal map's U response instead of its V. Derived from
+// the accumulated bitangent rather than assumed, because the octahedral map's
+// lower hemisphere is MIRRORED and therefore has the opposite handedness.
+void ComputeTangents(SceneMesh& mesh) {
+  std::vector<glm::vec3> tan(mesh.vertices.size(), glm::vec3(0.0f));
+  std::vector<glm::vec3> bitan(mesh.vertices.size(), glm::vec3(0.0f));
+
+  for (size_t t = 0; t + 2 < mesh.indices.size(); t += 3) {
+    const uint32_t i0 = mesh.indices[t], i1 = mesh.indices[t + 1],
+                   i2 = mesh.indices[t + 2];
+    const glm::vec3 p0(mesh.vertices[i0].pos_nx);
+    const glm::vec3 p1(mesh.vertices[i1].pos_nx);
+    const glm::vec3 p2(mesh.vertices[i2].pos_nx);
+    const glm::vec2 uv0(mesh.vertices[i0].nyz_uv.z, mesh.vertices[i0].nyz_uv.w);
+    const glm::vec2 uv1(mesh.vertices[i1].nyz_uv.z, mesh.vertices[i1].nyz_uv.w);
+    const glm::vec2 uv2(mesh.vertices[i2].nyz_uv.z, mesh.vertices[i2].nyz_uv.w);
+
+    const glm::vec3 e1 = p1 - p0, e2 = p2 - p0;
+    const glm::vec2 d1 = uv1 - uv0, d2 = uv2 - uv0;
+    const float det = d1.x * d2.y - d2.x * d1.y;
+    // A degenerate UV triangle contributes nothing rather than a NaN that would
+    // poison every vertex it touches.
+    if (std::abs(det) < 1e-12f) continue;
+    const float r = 1.0f / det;
+    const glm::vec3 t_dir = (e1 * d2.y - e2 * d1.y) * r;
+    const glm::vec3 b_dir = (e2 * d1.x - e1 * d2.x) * r;
+    for (uint32_t i : {i0, i1, i2}) {
+      tan[i] += t_dir;
+      bitan[i] += b_dir;
+    }
+  }
+
+  for (size_t i = 0; i < mesh.vertices.size(); ++i) {
+    const glm::vec3 n(mesh.vertices[i].pos_nx.w, mesh.vertices[i].nyz_uv.x,
+                      mesh.vertices[i].nyz_uv.y);
+    glm::vec3 t = tan[i] - n * glm::dot(n, tan[i]);
+    if (glm::length(t) < 1e-8f) {
+      // No usable gradient here: pick any tangent perpendicular to the normal
+      // rather than emitting a zero one, which would collapse the frame.
+      const glm::vec3 axis =
+          std::abs(n.y) < 0.99f ? glm::vec3(0, 1, 0) : glm::vec3(1, 0, 0);
+      t = glm::normalize(glm::cross(axis, n));
+    } else {
+      t = glm::normalize(t);
+    }
+    const float w = glm::dot(glm::cross(n, t), bitan[i]) < 0.0f ? -1.0f : 1.0f;
+    mesh.vertices[i].tangent = {t.x, t.y, t.z, w};
+  }
+}
+
+}  // namespace
+
 SceneMesh BuildSphereGrid(float sphere_radius, float spacing) {
   SceneMesh mesh;
 
-  // A UV sphere. Rings run pole to pole, segments around; the seam duplicates
-  // the first column of vertices so u reaches 1 rather than wrapping to 0 --
-  // without that the seam quad samples the whole texture backwards.
-  const uint32_t cols = kSphereSegments + 1;
-  mesh.vertices.reserve(size_t(cols) * (kSphereRings + 1));
-  for (uint32_t ring = 0; ring <= kSphereRings; ++ring) {
-    const float v = float(ring) / float(kSphereRings);
-    const float theta = v * kPi;  // 0 at +Y, pi at -Y
-    const float sin_t = std::sin(theta);
-    const float cos_t = std::cos(theta);
-    for (uint32_t seg = 0; seg <= kSphereSegments; ++seg) {
-      const float u = float(seg) / float(kSphereSegments);
-      const float phi = u * 2.0f * kPi;
-      const float sin_p = std::sin(phi);
-      const float cos_p = std::cos(phi);
-
-      const glm::vec3 n{sin_t * cos_p, cos_t, sin_t * sin_p};
-      const glm::vec3 p = n * sphere_radius;
-      // Tangent along increasing phi, which is the direction u runs -- so the
-      // normal map's U response follows the UV layout rather than fighting it.
-      const glm::vec3 t{-sin_p, 0.0f, cos_p};
-
-      MeshVertex vert;
-      vert.pos_nx = {p.x, p.y, p.z, n.x};
-      vert.nyz_uv = {n.y, n.z, u, v};
-      // w = +1: B = w * cross(N, T), which is right-handed against v growing
-      // towards -Y. The plane uses the same convention.
-      vert.tangent = {t.x, t.y, t.z, 1.0f};
-      mesh.vertices.push_back(vert);
+  // The eight octahedron faces, one per sign combination.
+  //
+  // THE CORNER ORDER DEPENDS ON THE SIGN PRODUCT. Taking (X, Y, Z) always would
+  // wind four of the eight faces inward, and a convex sphere with reversed
+  // winding still renders as a filled disc -- you simply see its inside back
+  // surface. The image cannot show that, which is why the winding is derived
+  // rather than eyeballed and a test asserts it.
+  for (int sx = -1; sx <= 1; sx += 2) {
+    for (int sy = -1; sy <= 1; sy += 2) {
+      for (int sz = -1; sz <= 1; sz += 2) {
+        const glm::vec3 x(float(sx), 0.0f, 0.0f);
+        const glm::vec3 y(0.0f, float(sy), 0.0f);
+        const glm::vec3 z(0.0f, 0.0f, float(sz));
+        if (sx * sy * sz > 0) {
+          AppendOctaFace(mesh, x, y, z, sphere_radius);
+        } else {
+          AppendOctaFace(mesh, x, z, y, sphere_radius);
+        }
+      }
     }
   }
-
-  mesh.indices.reserve(size_t(kSphereSegments) * kSphereRings * 6);
-  for (uint32_t ring = 0; ring < kSphereRings; ++ring) {
-    for (uint32_t seg = 0; seg < kSphereSegments; ++seg) {
-      const uint32_t i0 = ring * cols + seg;
-      const uint32_t i1 = i0 + 1;
-      const uint32_t i2 = i0 + cols;
-      const uint32_t i3 = i2 + 1;
-      // Counter-clockwise seen from OUTSIDE, matching FrontFace::Ccw with
-      // CullMode::Back.
-      //
-      // NOT the plane's order, and that is the trap this got wrong first time.
-      // The plane's rows advance along +z with the normal at +y; here ring
-      // advances DOWNWARD (theta from the +Y pole) while seg advances
-      // counter-clockwise seen from above, so the pair is handed the other way
-      // round. Reversed, a convex sphere still renders as a filled disc -- you
-      // simply see its inside back surface with inverted normals -- so the
-      // image cannot show this and a test has to.
-      mesh.indices.insert(mesh.indices.end(), {i0, i1, i2});
-      mesh.indices.insert(mesh.indices.end(), {i1, i3, i2});
-    }
-  }
+  ComputeTangents(mesh);
 
   // One instance per sphere. The draw slot IS the instance id, which is what
   // the visibility buffer packs, so no per-draw uniform is needed at all.

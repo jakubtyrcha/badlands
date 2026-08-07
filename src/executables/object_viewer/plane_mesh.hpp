@@ -24,6 +24,14 @@ namespace badlands::object_viewer {
 //
 // Winding is COUNTER-CLOCKWISE seen from +y (above), matching FrontFace::Ccw
 // with the plane's normal pointing up.
-SceneMesh BuildPlaneMesh(float half_extent = 5.0f, float uv_tiles = 4.0f);
+// The defaults, NAMED so an oracle can predict the parameterization instead of
+// repeating the numbers. A second copy of 5.0/4.0 in a test is a second thing
+// to update, and the failure mode is an assertion that quietly measures a
+// different plane than the one being drawn.
+inline constexpr float kPlaneHalfExtent = 5.0f;
+inline constexpr float kPlaneUvTiles = 4.0f;
+
+SceneMesh BuildPlaneMesh(float half_extent = kPlaneHalfExtent,
+                         float uv_tiles = kPlaneUvTiles);
 
 }  // namespace badlands::object_viewer

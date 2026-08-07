@@ -1478,6 +1478,7 @@ int RunDebugViewCheck(IRhiDevice& device, const Options& opt) {
   // indistinguishable from a run that passed.
   const bool geometry_view = opt.view == DebugView::TriangleId ||
                              opt.view == DebugView::Barycentric ||
+                             opt.view == DebugView::Uv ||
                              opt.view == DebugView::Depth;
   int assertions_run = 0;
   // THE BARYCENTRIC PARTITION IS MEASURED THROUGH AN IDENTITY TRANSFORM.
@@ -1638,6 +1639,69 @@ int RunDebugViewCheck(IRhiDevice& device, const Options& opt) {
       // flipped green channel, or a normal read from the wrong float4 lane.
       if (!agrees({0.5f, 1.0f, 0.5f}, "a flat normal over a +y plane")) return 1;
       break;
+    case DebugView::Uv: {
+      // CLOSED FORM, from the plane's own parameterization: it spans
+      // [-half, +half] and its UVs tile kPlaneUvTiles times across that span,
+      // so the uv at the world point under a pixel is exact. The view shows
+      // frac(), which is what the shader emits.
+      //
+      // NOT THE CENTRE PIXEL. The plane's centre lands on a tile boundary,
+      // where frac() is 0 or 1 depending on which side of an ulp the
+      // interpolation falls -- an assertion there is a coin toss. The scan
+      // below picks the first pixel whose PREDICTED uv sits comfortably inside
+      // a tile, so the measurement is real at any resolution.
+      const Camera uv_cam =
+          opt.near_plane_camera ? NearPlaneCamera() : CameraFor(Scene::Plane);
+      auto uv_at = [&](uint32_t x, uint32_t y) {
+        const glm::vec3 hit = PlaneHitPoint(uv_cam, x, y, opt.width, opt.height);
+        const float u = (hit.x / badlands::object_viewer::kPlaneHalfExtent *
+                             0.5f + 0.5f) *
+                        badlands::object_viewer::kPlaneUvTiles;
+        const float v = (hit.z / badlands::object_viewer::kPlaneHalfExtent *
+                             0.5f + 0.5f) *
+                        badlands::object_viewer::kPlaneUvTiles;
+        return glm::vec2(u - std::floor(u), v - std::floor(v));
+      };
+      auto inside_tile = [](glm::vec2 f) {
+        return std::min(std::min(f.x, 1.0f - f.x),
+                        std::min(f.y, 1.0f - f.y)) > 0.15f;
+      };
+
+      bool checked = false;
+      for (uint32_t dy = 0; dy < opt.height / 4 && !checked; ++dy) {
+        for (uint32_t dx = 0; dx < opt.width / 4 && !checked; ++dx) {
+          const uint32_t x = cx + dx, y = cy + dy;
+          if (x >= opt.width || y >= opt.height) continue;
+          const glm::vec2 f = uv_at(x, y);
+          if (!inside_tile(f)) continue;
+
+          const badlands::color::Rgb got{texel(x, y, 0), texel(x, y, 1),
+                                         texel(x, y, 2)};
+          const badlands::color::Rgb want = expect({f.x, f.y, 0.0f});
+          constexpr float kTol = 2.5f / 255.0f;
+          if (std::abs(got.r - want.r) > kTol ||
+              std::abs(got.g - want.g) > kTol ||
+              std::abs(got.b - want.b) > kTol) {
+            spdlog::error(
+                "object_viewer: the uv view at ({},{}) is "
+                "({:.4f},{:.4f},{:.4f}) but the plane's parameterization "
+                "predicts ({:.4f},{:.4f},{:.4f})",
+                x, y, got.r, got.g, got.b, want.r, want.g, want.b);
+            return 1;
+          }
+          ++assertions_run;
+          checked = true;
+        }
+      }
+      if (!checked) {
+        spdlog::error(
+            "object_viewer: found no pixel whose predicted uv sits inside a "
+            "tile -- the oracle asserted nothing, which a passing exit code "
+            "would hide");
+        return 1;
+      }
+      break;
+    }
     case DebugView::Barycentric: {
       // The three weights must sum to 1 wherever the surface is covered. That
       // holds for every pixel, so it is checked across the image rather than at

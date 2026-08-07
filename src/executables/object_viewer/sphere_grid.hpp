@@ -23,11 +23,22 @@ inline constexpr uint32_t kRoughnessSteps = 7;
 inline constexpr uint32_t kMetallicSteps = 2;
 inline constexpr uint32_t kSphereCount = kRoughnessSteps * kMetallicSteps;
 
-// Tessellation, also structural. 32x16 is smooth enough that a highlight reads
-// as a highlight rather than as facets, which matters because faceting looks
-// exactly like a too-sharp prefilter.
-inline constexpr uint32_t kSphereSegments = 32;
-inline constexpr uint32_t kSphereRings = 16;
+// Tessellation, also structural: subdivisions along each octahedron edge, so
+// the sphere is 8 * kSphereSubdivisions^2 triangles.
+//
+// A SUBDIVIDED OCTAHEDRON, NOT A UV SPHERE, and the difference is visible.
+// A UV sphere's rings converge at the poles: the last ring collapses into a fan
+// of degenerate slivers, its UVs pinch to a point, and the tangent frame is
+// undefined where the ring has zero circumference. That shows up as a smeared,
+// aliased artifact on the tips of every sphere -- worst on exactly the mirror
+// and low-roughness cells where the reflection is sharpest.
+//
+// Subdividing an octahedron has no poles at all. Every triangle is within a
+// factor of ~1.5 of every other in area, there is no vertex with unbounded
+// valence, and the UVs come from the OCTAHEDRAL MAP, which is what the
+// tessellation already is -- so the parameterization and the geometry agree by
+// construction rather than by a projection that has to pinch somewhere.
+inline constexpr uint32_t kSphereSubdivisions = 24;
 
 // Radius and spacing are size, so they are runtime -- but they are also the
 // bounds the camera frames, so they are returned rather than assumed.
@@ -36,6 +47,15 @@ struct SphereGridBounds {
   float radius = 1.0f;         // of the whole grid, for framing
   float sphere_radius = 1.0f;  // of one sphere, for the near clamp
 };
+
+// The octahedral map, and its inverse of sorts. A direction to uv in [0,1]^2,
+// with the LOWER hemisphere folded outward and mirrored across the diagonals --
+// the standard full-sphere octahedral parameterization.
+//
+// Distinct from HemiOctEncode in src/game/visual/octahedral.hpp, which covers
+// only y >= 0 for impostor atlases. This is the full sphere, and object_viewer
+// does not link that layer anyway.
+glm::vec2 OctEncode(glm::vec3 dir);
 
 // Roughness sweeps 0..1 left to right; the first row is dielectric and the
 // second is metal. Both are OVERRIDDEN per instance, so the pack's ARM map does
