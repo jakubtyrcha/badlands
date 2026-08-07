@@ -198,8 +198,10 @@ struct MetalViewport: NSViewRepresentable {
         let driver = DisplayLinkDriver(view: view, editor: editor)
         context.coordinator.driver = driver
 
-        view.onWindowChange = { inWindow in
-            driver.isPaused = !inWindow
+        // WEAK: the view owns this closure, so a strong capture would be a
+        // second path into the same cycle dismantleNSView breaks below.
+        view.onWindowChange = { [weak driver] inWindow in
+            driver?.isPaused = !inWindow
         }
 
         view.onMouseDown = { [vm] p, modifiers in vm.handleMouseDown(p, modifiers: modifiers) }
@@ -220,5 +222,18 @@ struct MetalViewport: NSViewRepresentable {
 
     func updateNSView(_ nsView: ViewportNSView, context: Context) {
         // no-op
+    }
+
+    /// Stops the display link when SwiftUI tears the viewport down.
+    ///
+    /// REQUIRED, unlike under `CAMetalDisplayLink`, whose `delegate` was weak
+    /// and left no cycle to break. `view.displayLink(target:selector:)` retains
+    /// its target STRONGLY, and the driver holds the link, so driver and link
+    /// keep each other alive forever. Without this the driver, its link and the
+    /// editor reference leak, and the link goes on firing `tick()` into a layer
+    /// nothing is showing.
+    static func dismantleNSView(_ nsView: ViewportNSView, coordinator: Coordinator) {
+        coordinator.driver?.invalidate()
+        coordinator.driver = nil
     }
 }
