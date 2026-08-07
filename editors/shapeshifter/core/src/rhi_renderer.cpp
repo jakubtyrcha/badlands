@@ -146,24 +146,18 @@ bool RhiRenderer::EnsureTables() {
     return true;
 }
 
-bool RhiRenderer::AttachLayer(void* ca_metal_layer, uint32_t width_px,
-                              uint32_t height_px) {
-    width_px_ = width_px;
-    height_px_ = height_px;
-    swapchain_ = device_->CreateSwapchain({.native_window = ca_metal_layer,
-                                           .width = width_px,
-                                           .height = height_px,
-                                           .format = color_format_,
-                                           .vsync = true,
-                                           .label = "shapeshifter"});
-    if (!swapchain_) {
-        spdlog::error("shapeshifter: could not create the swapchain");
-        return false;
-    }
-    return true;
+void RhiRenderer::AttachLayer(void* ca_metal_layer) {
+    // Stored, not used yet. SwiftUI calls this from makeNSView, BEFORE the view
+    // has been laid out, so the layer's drawableSize is still zero -- and a
+    // zero-sized CAMetalLayer does not return null from nextDrawable, it RAISES
+    // an Objective-C exception, which unwinds through C++ and Swift and aborts
+    // the process. The old path never met this because Swift handed over a
+    // drawable that CAMetalDisplayLink only produces once there is one.
+    layer_ = ca_metal_layer;
 }
 
 void RhiRenderer::SetViewportSize(uint32_t width_px, uint32_t height_px) {
+    if (width_px == 0 || height_px == 0) return;
     if (width_px == width_px_ && height_px == height_px_) return;
     width_px_ = width_px;
     height_px_ = height_px;
@@ -420,7 +414,26 @@ bool RhiRenderer::BuildFrame(graph::RenderGraph& g, graph::ResourceHandle color,
 
 void RhiRenderer::RenderFrame(const SceneDocument& doc, int32_t selected_id,
                               const Camera& camera) {
-    if (!swapchain_) return;
+    // No size yet means the view has not been laid out, so there is nothing to
+    // render into and nothing to render at. The display link starts ticking
+    // before that happens.
+    if (!layer_ || width_px_ == 0 || height_px_ == 0) {
+        return;
+    }
+
+    if (!swapchain_) {
+        swapchain_ = device_->CreateSwapchain({.native_window = layer_,
+                                               .width = width_px_,
+                                               .height = height_px_,
+                                               .format = color_format_,
+                                               .vsync = true,
+                                               .label = "shapeshifter"});
+        if (!swapchain_) {
+            spdlog::error("shapeshifter: could not create the swapchain");
+            return;
+        }
+        pending_resize_ = false; // created at the current size
+    }
 
     device_->BeginFrame();
     // AFTER BeginFrame, so a SKIPPED frame still recycles its allocator slot.

@@ -120,35 +120,42 @@ final class ViewportNSView: NSView {
     }
 }
 
-/// Drives per-frame rendering off a `CAMetalDisplayLink`, forwarding the
-/// presented drawable to core each callback.
+/// Drives per-frame rendering off a plain `CADisplayLink` — a TICK, nothing more.
+///
+/// NOT `CAMetalDisplayLink`, and the difference is load-bearing rather than
+/// stylistic. That class vends a drawable in every `Update`, and the RHI's
+/// swapchain now calls `nextDrawable` on the same layer: two consumers drawing
+/// from one drawable pool. The pool empties, and the display link simply STOPS
+/// CALLING BACK — no error, no crash, a window that renders one frame's worth of
+/// nothing and then sits there. Demoting `CAMetalDisplayLink` to a tick is not
+/// possible while it still hands out drawables; the fix is a timer that never
+/// touches the layer at all.
 @MainActor
-final class DisplayLinkDriver: NSObject, CAMetalDisplayLinkDelegate {
-    private let link: CAMetalDisplayLink
+final class DisplayLinkDriver: NSObject {
+    private var link: CADisplayLink?
     private let editor: sq.Editor
 
-    init(metalLayer: CAMetalLayer, editor: sq.Editor) {
-        self.link = CAMetalDisplayLink(metalLayer: metalLayer)
+    init(view: NSView, editor: sq.Editor) {
         self.editor = editor
         super.init()
-        link.delegate = self
+        let link = view.displayLink(target: self, selector: #selector(tick))
         link.add(to: .main, forMode: .common)
+        self.link = link
     }
 
     var isPaused: Bool {
-        get { link.isPaused }
-        set { link.isPaused = newValue }
+        get { link?.isPaused ?? true }
+        set { link?.isPaused = newValue }
     }
 
     func invalidate() {
-        link.invalidate()
+        link?.invalidate()
+        link = nil
     }
 
-    func metalDisplayLink(_ link: CAMetalDisplayLink, needsUpdate update: CAMetalDisplayLink.Update) {
-        // `update.drawable` is deliberately unused: the RHI's swapchain calls
-        // nextDrawable itself, so this callback is only a tick. The
-        // autoreleasepool stays load-bearing -- the RHI's Metal backend is ARC
-        // Objective-C++ and drains here each frame.
+    @objc private func tick() {
+        // The autoreleasepool stays load-bearing: the RHI's Metal backend is ARC
+        // Objective-C++ and drains its per-frame objects here.
         autoreleasepool {
             editor.render()
         }
@@ -177,7 +184,7 @@ struct MetalViewport: NSViewRepresentable {
             vm.handleViewportSizeChange()
         }
 
-        let driver = DisplayLinkDriver(metalLayer: view.metalLayer, editor: editor)
+        let driver = DisplayLinkDriver(view: view, editor: editor)
         context.coordinator.driver = driver
 
         view.onWindowChange = { inWindow in

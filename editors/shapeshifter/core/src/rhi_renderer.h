@@ -62,9 +62,12 @@ public:
                                                badlands::slang::SlangCompiler& compiler,
                                                badlands::rhi::Format color);
 
-    // Builds the swapchain over the view's CAMetalLayer. The pointer is the
-    // same one Swift already hands to Editor::attachLayer, borrowed.
-    bool AttachLayer(void* ca_metal_layer, uint32_t width_px, uint32_t height_px);
+    // Takes the view's CAMetalLayer -- the same pointer Swift already hands to
+    // Editor::attachLayer, borrowed. The swapchain is NOT created here: SwiftUI
+    // attaches the layer before it lays the view out, so the size is still zero
+    // at this point, and a zero-sized CAMetalLayer throws from nextDrawable
+    // rather than returning null. It is created on the first real size instead.
+    void AttachLayer(void* ca_metal_layer);
     void SetViewportSize(uint32_t width_px, uint32_t height_px);
 
     // Per-frame scene inputs, same contract as the metal-cpp renderer.
@@ -114,6 +117,7 @@ private:
     badlands::slang::SlangCompiler* compiler_ = nullptr;
     std::unique_ptr<RhiPipelines> pipelines_;
     std::unique_ptr<badlands::rhi::FrameAllocator> alloc_;
+    void* layer_ = nullptr; // borrowed; the swapchain is built from it lazily
     badlands::rhi::SwapchainPtr swapchain_;
     badlands::rhi::Format color_format_ = badlands::rhi::Format::RGBA16Float;
 

@@ -171,8 +171,11 @@ void Editor::attachLayer(void* caMetalLayer) {
                       "the viewport will be blank", shaders);
         return;
     }
-    impl_->renderer->AttachLayer(caMetalLayer, impl_->drawableWidthPx,
-                                 impl_->drawableHeightPx);
+    impl_->renderer->AttachLayer(caMetalLayer);
+    // A size may already have arrived if the view laid out before attaching.
+    if (impl_->drawableWidthPx > 0 && impl_->drawableHeightPx > 0) {
+        impl_->renderer->SetViewportSize(impl_->drawableWidthPx, impl_->drawableHeightPx);
+    }
 }
 
 void Editor::setViewportSize(float widthPts, float heightPts, float backingScale) {

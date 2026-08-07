@@ -201,6 +201,10 @@ TEST_CASE("shapeshifter: a skipped acquire presents nothing", "[ss-rhi]") {
   CHECK(null::PresentCount(*sc) == before);
 }
 
+#include <algorithm>
+#include <cstring>
+#include <utility>
+
 #include "badlands_assets.h"
 
 TEST_CASE("shapeshifter: a headless frame draws the scene", "[ss-rhi][dump]") {
@@ -219,18 +223,25 @@ TEST_CASE("shapeshifter: a headless frame draws the scene", "[ss-rhi][dump]") {
   REQUIRE(compiler);
 
   const uint32_t W = 512, H = 512;
-  auto renderer = sq::RhiRenderer::Create(*device, *compiler, Format::RGBA8Unorm);
+  // The APP renders at RGBA16Float; this dump started at RGBA8Unorm because it
+  // reads back as bytes. Running both is what tells "the renderer is wrong"
+  // apart from "the target format is".
+  const auto [fmt, tag] = GENERATE(
+      std::pair{Format::RGBA8Unorm, "rgba8"},
+      std::pair{Format::RGBA16Float, "rgba16f"});
+  CAPTURE(tag);
+  auto renderer = sq::RhiRenderer::Create(*device, *compiler, fmt);
   REQUIRE(renderer);
 
   auto color_tex = device->CreateTexture(
-      {.width = W, .height = H, .format = Format::RGBA8Unorm,
+      {.width = W, .height = H, .format = fmt,
        .usage = TextureUsage::RenderTarget | TextureUsage::CopySrc,
        .label = "dump_color"});
   auto depth_tex = device->CreateTexture(
       {.width = W, .height = H, .format = Format::Depth32Float,
        .usage = TextureUsage::DepthStencil, .label = "dump_depth"});
   auto readback = device->CreateBuffer(
-      {.size = uint64_t(W) * H * 4,
+      {.size = uint64_t(W) * H * 8, // enough for RGBA16Float too
        .usage = BufferUsage::CopyDst | BufferUsage::MapRead,
        .label = "dump_readback"});
   REQUIRE(color_tex); REQUIRE(depth_tex); REQUIRE(readback);
@@ -269,9 +280,30 @@ TEST_CASE("shapeshifter: a headless frame draws the scene", "[ss-rhi][dump]") {
   device->EndFrame();
   device->WaitIdle();
 
+  const size_t bpp = (fmt == Format::RGBA8Unorm) ? 4 : 8;
+  std::vector<uint8_t> raw(size_t(W) * H * bpp);
+  REQUIRE(readback->Read(0, raw));
+
+  // Normalise to RGBA8 so one set of assertions covers both formats. Half-float
+  // is decoded by hand rather than pulled in as a dependency for a debug dump.
   std::vector<uint8_t> pixels(size_t(W) * H * 4);
-  REQUIRE(readback->Read(0, pixels));
-  badlands_write_png("/tmp/shapeshifter_frame.png", pixels.data(), W, H);
+  if (bpp == 4) {
+    pixels = raw;
+  } else {
+    auto half_to_float = [](uint16_t h) {
+      const uint32_t sign = (h >> 15) & 1, exp = (h >> 10) & 0x1F, man = h & 0x3FF;
+      if (exp == 0) return (sign ? -1.f : 1.f) * float(man) / 1024.0f / 16384.0f;
+      const uint32_t bits = (sign << 31) | ((exp + 112) << 23) | (man << 13);
+      float f; std::memcpy(&f, &bits, 4); return f;
+    };
+    for (size_t i = 0; i < size_t(W) * H * 4; ++i) {
+      uint16_t h; std::memcpy(&h, raw.data() + i * 2, 2);
+      const float v = half_to_float(h);
+      pixels[i] = uint8_t(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f);
+    }
+  }
+  badlands_write_png((std::string("/tmp/shapeshifter_frame_") + tag + ".png").c_str(),
+                     pixels.data(), W, H);
 
   auto at = [&](uint32_t x, uint32_t y) { return &pixels[(size_t(y) * W + x) * 4]; };
 
