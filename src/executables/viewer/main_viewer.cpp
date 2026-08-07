@@ -21,6 +21,9 @@ int main(int argc, char** argv) {
   // category as --generator/--lod below: screenshot affordances, not a
   // stable CLI.
   std::string clip_name;
+  // Character viewer only: the rig manifest to load instead of the shipped
+  // Quaternius one. Naming a rig implies --character, the same way --clip does.
+  std::string rig_path;
   // Whether the flag was SEEN is tracked separately from its value: the value
   // is clamped into [0,1], so no in-band sentinel could survive to mean
   // "unset", and `--anim-time -1` would silently pin frame 0 instead of playing.
@@ -51,6 +54,9 @@ int main(int argc, char** argv) {
                        badlands::ModelViewerView::kMultiLodLevel);
     } else if (std::strcmp(argv[i], "--character") == 0) {
       character_mode = true;
+    } else if (std::strcmp(argv[i], "--rig") == 0 && i + 1 < argc) {
+      rig_path = argv[++i];
+      character_mode = true;  // naming a rig implies the character viewer
     } else if (std::strcmp(argv[i], "--clip") == 0 && i + 1 < argc) {
       clip_name = argv[++i];
       character_mode = true;  // naming a clip implies the character viewer
@@ -64,11 +70,12 @@ int main(int argc, char** argv) {
   badlands::SdlViewerApp app({.window_title = "badlands_viewer"});
   return app.Run(
       argc, argv,
-      [character_mode, clip_name, anim_time, anim_time_set, generator_index,
-       shadow_debug_mode, lod](const badlands::RenderContext& /*ctx*/)
+      [character_mode, clip_name, rig_path, anim_time, anim_time_set,
+       generator_index, shadow_debug_mode, lod](const badlands::RenderContext& /*ctx*/)
           -> std::unique_ptr<badlands::AppView> {
         if (character_mode) {
           auto view = std::make_unique<badlands::CharacterViewerView>();
+          if (!rig_path.empty()) view->SetManifestPath(rig_path);
           if (!clip_name.empty()) view->SetInitialClipName(clip_name);
           if (anim_time_set) view->SetFixedAnimTime(anim_time);
           return view;

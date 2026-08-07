@@ -45,10 +45,14 @@ scripts/screenshot.sh badlands_viewer /tmp/t.png --generator 1 --lod 5
 
 ## badlands_viewer holds TWO AppViews, chosen at startup
 - **`ModelViewerView` is the default; `--character` selects `CharacterViewerView`.** `SdlViewerApp` takes a view FACTORY, not a switchable view, so there is no in-session toggle between foliage and characters.
-- **`--clip <logical-name>` and `--anim-time <0..1>` also imply `--character`.** The name is a key in the manifest (`assets/characters/quaternius/clips.json`), e.g. `walk`, not a filename; `--anim-time` pins playback so a `--screenshot` frame is reproducible.
+- **`--clip <logical-name>`, `--anim-time <0..1>` and `--rig <path>` also imply `--character`.** The name is a key in the manifest (`assets/characters/quaternius/clips.json`), e.g. `walk`, not a filename; `--anim-time` pins playback so a `--screenshot` frame is reproducible; `--rig` names a manifest instead of the shipped Quaternius one.
 ```sh
 scripts/screenshot.sh badlands_viewer /tmp/c.png --character --clip walk --anim-time 0.5
+scripts/screenshot.sh badlands_viewer /tmp/r.png --rig assets/characters/0ad_biped/rig.json
 ```
+- **Attachment axis triads are always drawn, at every attachment** — which is every joint plus every surviving socket, so the Quaternius rig shows 53 and the 0 A.D. biped 83. No toggle, which is also what keeps `--screenshot` deterministic.
+- **`assets/characters/0ad/<slug>/` is 31 WHOLE creature families — 940 clips, 84 MB LFS** (`biped`, `horse`, `wolf`, `ursidae_armature`, …). They exist to be browsed, so the panel's clip list has a substring filter (the one control there). Their clips carry 0 A.D.'s names, so none has `idle`/`attack`; the game still points at `quaternius`.
+- **Its skeleton draws long spokes from the root.** `knee_*`, `elbow_*`, `handIK_*` and `footIK_*` are real joints, siblings of `hip` under the synthetic `__root__` — kept deliberately by the exporter, as Unreal keeps its Mannequin's. They also stretch the framing bounds, so the body sits smaller in view than the Quaternius rig does.
 - **`ModelViewerView`'s generator list is: sphere, then `TreeCatalog()`, then one entry per prop** discovered under `assets/models/*/*.usdc` and **sorted by name** — `--generator <n>` indexes it, so an unsorted order would change which model a headless screenshot captures. The `.usdc` parses lazily inside `generate` (7 MB / 100k tris each); materials resolve eagerly via the `MaterialLibrary` cache.
 - **A prop's prims are merged into ONE mesh** (treasure_chest is 5, rock_moss_set_01 is 6, all sharing one pack). That merge is a viewer presentation choice — `BuildImportedModels` still returns the list.
 - **The prop's LOD chain is cached per generator (`prop_preview_`), not rebuilt per LOD click.** Parsing a `.usdc` and welding + decimating it is ~a second, and `RebuildScene` runs on every radio change.
