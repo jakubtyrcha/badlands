@@ -816,3 +816,66 @@ TEST_CASE("roundness rounds a shape without letting it leave its box") {
         }
     }
 }
+
+TEST_CASE("every shape mirrors under a negative scale rather than vanishing") {
+    // A negative scale component should MIRROR a shape, not delete it. Cube and
+    // Sphere are the two branches that bypass sdf_safe_half_extents, so they
+    // were the two that took the half-extents unsigned -- and a negative extent
+    // makes sd_box's `abs(q) - half` positive everywhere, i.e. empty space.
+    //
+    // The wireframe builder already assumes otherwise: append_node_wireframe
+    // builds its matrix from simd_abs(node.scale) and cites "the evaluator
+    // measures against abs(half_extents)" as the reason. That was true of six
+    // shapes out of eight. A mirrored node drew a full wireframe around
+    // nothing rendered and nothing pickable.
+    for (const Shape shape : {Shape::Cube, Shape::Sphere, Shape::Prism,
+                              Shape::Octahedron, Shape::Vesica, Shape::Cone,
+                              Shape::Capsule, Shape::Pyramid}) {
+        CAPTURE(static_cast<int>(shape));
+        SceneDocument doc;
+        Node node;
+        node.id = 1;
+        node.shape = shape;
+        node.scale = {-1.0f, 1.0f, 1.0f};
+        doc.add(node);
+
+        // The centre of a solid is inside it, whichever way its axes point.
+        const auto d = evaluate_scene_sdf(doc, simd_float3{0.0f, 0.0f, 0.0f});
+        REQUIRE(d.has_value());
+        CHECK(*d < 0.0f);
+    }
+}
+
+TEST_CASE("no shape evaluates to NaN at a degenerate scale") {
+    // The sibling of the mirror sweep above, for the OTHER degenerate scale a
+    // SceneDocument::add can carry that the UI cannot produce.
+    //
+    // ASSERTED ON sdf_eval_node, NOT through evaluate_scene_sdf, and that is
+    // the whole reason this test can see anything. sdf_fold reduces with
+    // std::fmin, which RETURNS THE OTHER OPERAND when one is NaN -- so a NaN
+    // node folds to FLT_MAX and the scene query comes back finite, tidy and
+    // wrong, with the shape simply absent. picking.cpp calls sdf_eval_node
+    // directly and gets the NaN unlaundered, which is where it does damage:
+    // every comparison against it is false, so the trace neither advances nor
+    // reports a hit and the node is unpickable.
+    for (const Shape shape : {Shape::Cube, Shape::Sphere, Shape::Prism,
+                              Shape::Octahedron, Shape::Vesica, Shape::Cone,
+                              Shape::Capsule, Shape::Pyramid}) {
+        CAPTURE(static_cast<int>(shape));
+        Node node;
+        node.id = 1;
+        node.shape = shape;
+        node.scale = {1.0f, 0.0f, 1.0f}; // flat: zero half-extent on y
+        const SdfNode sn = local_sdf_node(node);
+
+        // Both sides of the collapsed axis, and the axis itself: a division by
+        // a zero extent gives inf off it and 0/0 exactly on it.
+        for (const simd_float3 p : {simd_float3{0.0f, 0.0f, 0.0f},
+                                    simd_float3{0.3f, 0.0f, 0.2f},
+                                    simd_float3{0.0f, 0.7f, 0.0f},
+                                    simd_float3{1.5f, -2.0f, 0.4f}}) {
+            CAPTURE(p.x); CAPTURE(p.y); CAPTURE(p.z);
+            CHECK(std::isfinite(sdf_eval_node(sn, p)));
+        }
+    }
+}

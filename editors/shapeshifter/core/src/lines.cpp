@@ -6,6 +6,8 @@
 
 #include <ground_grid.h> // kGroundAxisY -- shared with the ground plate's shader
 
+#include <sdf_scene.h>   // SDF_MIN_HALF_EXTENT -- the same floor the evaluator uses
+
 #include "gizmo.h"
 #include "math_util.h"      // trs_matrix
 #include "scene.h"
@@ -188,7 +190,15 @@ void append_rounded_box_edges(std::vector<LineVertex>& out, const simd_float4x4&
     // Unit-local half-width of each face's flat portion. Anisotropic, because
     // the rounding radius is a single world length while unit-local space
     // divides each axis by its own half-extent.
-    const simd_float3 flat = 0.5f * (simd_float3{1.0f, 1.0f, 1.0f} - rb / half);
+    // FLOORED, and by the evaluator's own constant. rb is zero whenever any
+    // extent is, so an unfloored divisor makes this 0/0 -- NaN positions
+    // straight into the vertex buffer, for a node the shader's cube branch
+    // deliberately keeps benign. Reachable through SceneDocument::add, which is
+    // the caller the surrounding comments already cite as the reason to defend.
+    const simd_float3 safe_half =
+        simd_max(simd_abs(half), simd_float3{SDF_MIN_HALF_EXTENT, SDF_MIN_HALF_EXTENT,
+                                             SDF_MIN_HALF_EXTENT});
+    const simd_float3 flat = 0.5f * (simd_float3{1.0f, 1.0f, 1.0f} - rb / safe_half);
     for (int axis = 0; axis < 3; ++axis) {
         const int b = (axis + 1) % 3;
         const int c = (axis + 2) % 3;

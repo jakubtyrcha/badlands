@@ -58,6 +58,11 @@ final class ViewportNSView: NSView {
         let scale = window?.backingScaleFactor ?? 2.0
         metalLayer.contentsScale = scale
         metalLayer.wantsExtendedDynamicRangeContent = true
+        // NOT the colourspace: the RHI's swapchain tags the layer from
+        // SwapchainDesc::color_space, and setting it here too would be a second
+        // owner of one property — with this one winning, because layout runs
+        // long after the swapchain is built. GetColorSpace() would then report
+        // a space the layer does not have.
         onSizeChange?(bounds.width, bounds.height, scale)
     }
 
@@ -120,33 +125,44 @@ final class ViewportNSView: NSView {
     }
 }
 
-/// Drives per-frame rendering off a `CAMetalDisplayLink`, forwarding the
-/// presented drawable to core each callback.
+/// Drives per-frame rendering off a plain `CADisplayLink` — a TICK, nothing more.
+///
+/// NOT `CAMetalDisplayLink`, and the difference is load-bearing rather than
+/// stylistic. That class vends a drawable in every `Update`, and the RHI's
+/// swapchain now calls `nextDrawable` on the same layer: two consumers drawing
+/// from one drawable pool. The pool empties, and the display link simply STOPS
+/// CALLING BACK — no error, no crash, a window that renders one frame's worth of
+/// nothing and then sits there. Demoting `CAMetalDisplayLink` to a tick is not
+/// possible while it still hands out drawables; the fix is a timer that never
+/// touches the layer at all.
 @MainActor
-final class DisplayLinkDriver: NSObject, CAMetalDisplayLinkDelegate {
-    private let link: CAMetalDisplayLink
+final class DisplayLinkDriver: NSObject {
+    private var link: CADisplayLink?
     private let editor: sq.Editor
 
-    init(metalLayer: CAMetalLayer, editor: sq.Editor) {
-        self.link = CAMetalDisplayLink(metalLayer: metalLayer)
+    init(view: NSView, editor: sq.Editor) {
         self.editor = editor
         super.init()
-        link.delegate = self
+        let link = view.displayLink(target: self, selector: #selector(tick))
         link.add(to: .main, forMode: .common)
+        self.link = link
     }
 
     var isPaused: Bool {
-        get { link.isPaused }
-        set { link.isPaused = newValue }
+        get { link?.isPaused ?? true }
+        set { link?.isPaused = newValue }
     }
 
     func invalidate() {
-        link.invalidate()
+        link?.invalidate()
+        link = nil
     }
 
-    func metalDisplayLink(_ link: CAMetalDisplayLink, needsUpdate update: CAMetalDisplayLink.Update) {
-        autoreleasepool { // load-bearing: drains metal-cpp autoreleased objects each frame
-            editor.render(Unmanaged.passUnretained(update.drawable as AnyObject).toOpaque())
+    @objc private func tick() {
+        // The autoreleasepool stays load-bearing: the RHI's Metal backend is ARC
+        // Objective-C++ and drains its per-frame objects here.
+        autoreleasepool {
+            editor.render()
         }
     }
 }
@@ -173,11 +189,13 @@ struct MetalViewport: NSViewRepresentable {
             vm.handleViewportSizeChange()
         }
 
-        let driver = DisplayLinkDriver(metalLayer: view.metalLayer, editor: editor)
+        let driver = DisplayLinkDriver(view: view, editor: editor)
         context.coordinator.driver = driver
 
-        view.onWindowChange = { inWindow in
-            driver.isPaused = !inWindow
+        // WEAK: the view owns this closure, so a strong capture would be a
+        // second path into the same cycle dismantleNSView breaks below.
+        view.onWindowChange = { [weak driver] inWindow in
+            driver?.isPaused = !inWindow
         }
 
         view.onMouseDown = { [vm] p, modifiers in vm.handleMouseDown(p, modifiers: modifiers) }
@@ -198,5 +216,18 @@ struct MetalViewport: NSViewRepresentable {
 
     func updateNSView(_ nsView: ViewportNSView, context: Context) {
         // no-op
+    }
+
+    /// Stops the display link when SwiftUI tears the viewport down.
+    ///
+    /// REQUIRED, unlike under `CAMetalDisplayLink`, whose `delegate` was weak
+    /// and left no cycle to break. `view.displayLink(target:selector:)` retains
+    /// its target STRONGLY, and the driver holds the link, so driver and link
+    /// keep each other alive forever. Without this the driver, its link and the
+    /// editor reference leak, and the link goes on firing `tick()` into a layer
+    /// nothing is showing.
+    static func dismantleNSView(_ nsView: ViewportNSView, coordinator: Coordinator) {
+        coordinator.driver?.invalidate()
+        coordinator.driver = nil
     }
 }

@@ -16,15 +16,38 @@ constexpr float kEps = 1e-4f;
 // distance-scaled 5e-4) because this runs a handful of times per mouse move
 // rather than once per pixel, and because the hit point becomes a spawn's
 // position -- so the budget is better spent here than there.
-constexpr float kTraceHitEps = 1e-5f;
+// DISTANCE-SCALED, like the viewport's, and this is a fix rather than a tuning.
+// An ABSOLUTE epsilon was the bug: the shape SDFs are bounds, not exact
+// distances, and the cross-section contraction makes them underestimate badly
+// on a flattened box -- so the trace crawls toward the surface in ever-smaller
+// steps and exhausts its budget on rays that pass straight through the solid.
+// Measured on a sphere at aspect 20, an absolute 1e-5 missed 21.8% of interior
+// rays, and raising the budget to 1024 steps STILL missed 0.3% at 982 steps.
+// The budget was never the problem.
+//
+// Kept 10x tighter than the viewport's 5e-4*t, because the reason picking chose
+// tighter still holds: this runs a handful of times per mouse move rather than
+// once per pixel, and the hit point becomes a spawn's position.
+inline float trace_hit_eps(float t) { return std::fmax(1e-5f, 5e-5f * t); }
 constexpr float kTraceMaxDist = 1e3f;   // far beyond the camera's 90-unit radius clamp
-constexpr int kTraceMaxSteps = 192;
+// 384, not 192: at aspect 20 the scaled epsilon needs 261 steps in the worst
+// case. An isotropic shape still hits in ONE step, so this costs the common
+// case nothing.
+constexpr int kTraceMaxSteps = 384;
 // Floor on a step, so a ray running exactly along a surface cannot stall and
 // burn the whole budget without advancing.
 constexpr float kTraceMinStep = 1e-6f;
-// Central-difference offset for the normal. Comfortably above kTraceHitEps so
-// the four taps straddle the surface rather than all landing inside its
-// tolerance band, which would leave the gradient dominated by float noise.
+// Central-difference offset for the normal. ABSOLUTE while the hit epsilon
+// above is distance-scaled, so past t = 20 the accepted hit sits further from
+// the surface than the taps that measure the gradient there -- and the camera's
+// 90-unit radius clamp makes that the ordinary case, not an exotic one.
+//
+// It survives that anyway, which is why this is a fixed constant and not a
+// function of t: the SDF is smooth, so the tap-to-tap difference stays near
+// 1.15e-3 while float error at t = 90 is a few parts in 1e6. Measured normals
+// agree with the analytic sphere to within a dot product of 1.0 at 2, 20, 60
+// and 90 units out ("the surface normal holds up at picking distance",
+// picking_tests.cpp) -- change either epsilon and that test is the arbiter.
 constexpr float kNormalEps = 1e-3f;
 
 // Tetrahedron-offset gradient (iq's): 4 evaluations rather than the 6 a naive
@@ -77,7 +100,7 @@ std::optional<RayHit> raycast_node(const Node& node, const Ray& world) {
         // unclamped. From inside, |d| is still a lower bound on the distance to
         // the boundary, so stepping by it cannot overshoot the exit surface.
         const float advance = std::fabs(dist);
-        if (advance < kTraceHitEps) {
+        if (advance < trace_hit_eps(t)) {
             const simd_float3 normal = local_normal(sn, q);
             return RayHit{t, node.position + simd_act(node.rotation, q),
                           simd_act(node.rotation, normal)};

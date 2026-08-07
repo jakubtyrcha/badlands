@@ -588,6 +588,19 @@ class MetalSwapchain final : public ISwapchain {
       layer_.framebufferOnly = NO;  // the lab copies the backbuffer for tests
       layer_.maximumDrawableCount = depth_;
       layer_.displaySyncEnabled = desc_.vsync;
+      // The size too, and NOT only in Resize(). A layer nobody has sized
+      // derives its own drawableSize at the first nextDrawable, from
+      // bounds * contentsScale in double -- so without this line the LAYER
+      // decides how big the surface is and the descriptor merely hopes to
+      // agree. Everything else in the frame (the depth target, the viewport,
+      // the projection) is sized from the descriptor.
+      //
+      // They only have to disagree once. Acquire refuses any drawable that does
+      // not match the descriptor, and Resize() early-returns on an unchanged
+      // size, so there is no path back: the surface stays black for the life of
+      // the process. Setting it here makes the descriptor authoritative at
+      // creation, which is what Resize() already does for every size after it.
+      layer_.drawableSize = CGSizeMake(desc_.width, desc_.height);
       // BEFORE the pixel format is set, because a failed tag can change it --
       // which is only permitted here, at creation, before anyone has seen it.
       ApplyColorSpace(/*allow_format_change=*/true);
@@ -632,8 +645,22 @@ class MetalSwapchain final : public ISwapchain {
     // sized for this frame.
     if (drawable.texture.width != desc_.width ||
         drawable.texture.height != desc_.height) {
+      // A RUN of these is not transient, it is a wedge: the layer and the
+      // descriptor disagree about a size neither will change on its own, and
+      // the surface stays black for as long as the app runs. One frame is
+      // normal and silent; a run says so once, because "the window went black
+      // and nothing logged" is the failure this whole path is prone to.
+      if (++size_mismatches_ == kMismatchRunToReport) {
+        spdlog::error(
+            "rhi/metal: swapchain '{}' has been handed {}x{} drawables for {} "
+            "consecutive frames while sized {}x{}; the surface is wedged",
+            desc_.label, uint32_t(drawable.texture.width),
+            uint32_t(drawable.texture.height), kMismatchRunToReport,
+            desc_.width, desc_.height);
+      }
       return {AcquireStatus::Skip, nullptr};
     }
+    size_mismatches_ = 0;
 
     drawable_ = drawable;
     acquired_ = true;
@@ -817,6 +844,10 @@ class MetalSwapchain final : public ISwapchain {
   size_t next_ = 0;
   bool acquired_ = false;
   uint64_t presented_ = 0;
+  // Consecutive size-mismatched drawables, reported once per run. A genuine
+  // resize produces one or two; a wedge produces every frame from now on.
+  uint32_t size_mismatches_ = 0;
+  static constexpr uint32_t kMismatchRunToReport = 30;
 };
 
 // ---------------------------------------------------------------------------

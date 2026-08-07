@@ -777,7 +777,14 @@ TEST_CASE("raycast_scene hits lie on the SDF's zero set, for rotated and non-uni
             REQUIRE(hit.has_value());
             const auto d = evaluate_scene_sdf(doc, hit->hit.point);
             REQUIRE(d.has_value());
-            CHECK(std::fabs(*d) < 1e-4f);
+            // Scaled by the distance travelled, because the trace's hit epsilon
+            // is (see picking.cpp). A fixed absolute bound was the right shape
+            // of assertion only while the epsilon was absolute -- and that
+            // epsilon was the bug: on a contracted field it made the trace
+            // crawl and miss interior rays entirely. The 3x is margin over the
+            // epsilon itself; at these eye distances it is ~1.2e-3 world units,
+            // still three orders tighter than any geometry being distinguished.
+            CHECK(std::fabs(*d) < 3.0f * (1e-5f + 5e-5f * hit->hit.t));
         }
     }
 }
@@ -915,5 +922,70 @@ TEST_CASE("Editor: spawn/pick/select/nodeName integration, scene built entirely 
         char buf[64];
         editor->nodeName(99, buf, sizeof(buf));
         CHECK(std::string(buf) == "");
+    }
+}
+
+// --- anisotropic shapes, which the unit-node cases above never reach --------
+//
+// Every ray test above uses unit_node: scale (1,1,1). That is one aspect ratio
+// of each shape, and it leaves the whole cross-section-contraction path -- the
+// machinery that exists precisely FOR non-cubic boxes -- untested. These sweep
+// flattened shapes instead.
+
+TEST_CASE("raycast_node: no interior ray misses a flattened shape") {
+    // The claim is narrow and total: if a ray's closest approach is INSIDE the
+    // solid, the trace must find the surface. Anything else is a click that
+    // selects nothing, or selects whatever is behind.
+    struct Case { Shape shape; simd_float3 scale; const char* name; };
+    const std::array<Case, 3> cases = {{
+        {Shape::Sphere, {1.0f, 0.1f, 1.0f}, "sphere, aspect 10"},
+        {Shape::Sphere, {2.0f, 0.1f, 2.0f}, "sphere, aspect 20"},
+        {Shape::Vesica, {2.0f, 0.3f, 2.0f}, "vesica, flattened"},
+    }};
+
+    for (const Case& c : cases) {
+        CAPTURE(c.name);
+        Node node = unit_node(c.shape);
+        node.scale = c.scale;
+        const SdfNode sn = local_sdf_node(node);
+
+        int interior = 0, missed = 0;
+        for (int i = -80; i <= 80; ++i) {
+            for (int j = -80; j <= 80; ++j) {
+                const float x = i * 0.025f;
+                const float y = j * (c.scale.y / 160.0f);
+                // Only rays that genuinely pass through the solid: the ray runs
+                // down -z, so its closest approach is (x, y, 0).
+                if (sdf_eval_node(sn, simd_float3{x, y, 0.0f}) >= 0.0f) continue;
+                ++interior;
+                if (!raycast_node(node, Ray{{x, y, 10.0f}, {0.0f, 0.0f, -1.0f}})) {
+                    ++missed;
+                }
+            }
+        }
+        CAPTURE(interior);
+        CAPTURE(missed);
+        CHECK(interior > 1000); // the sweep really did cover the shape
+        CHECK(missed == 0);
+    }
+}
+
+TEST_CASE("raycast_node: the surface normal holds up at picking distance") {
+    // The hit epsilon is distance-scaled (5e-5*t) while kNormalEps is a fixed
+    // 1e-3, so past t = 20 an accepted hit sits FURTHER from the surface than
+    // the taps that measure the gradient there. The camera clamps its orbit at
+    // 90 units, which makes those distances ordinary rather than exotic.
+    //
+    // A sphere is the shape to ask: its normal has a closed form the trace does
+    // not share, so agreement is evidence rather than tautology.
+    for (const float distance : {2.0f, 20.0f, 60.0f, 90.0f}) {
+        CAPTURE(distance);
+        // Off-axis, so an axis-aligned answer cannot pass by accident.
+        const simd_float3 dir = simd_normalize(simd_float3{-0.3f, -0.2f, -1.0f});
+        const auto hit = raycast_node(unit_node(Shape::Sphere),
+                                      Ray{-dir * distance, dir});
+        REQUIRE(hit.has_value());
+        const simd_float3 analytic = simd_normalize(hit->point);
+        CHECK(simd_dot(hit->normal, analytic) > 0.999f);
     }
 }
