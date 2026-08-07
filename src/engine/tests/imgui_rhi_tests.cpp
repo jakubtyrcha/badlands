@@ -97,7 +97,8 @@ std::unique_ptr<Harness> MakeHarness() {
 
 // Runs one frame: `draw` populates the background draw list, then the graph
 // clears to black and the ImGui pass composites over it.
-void RenderFrame(Harness& h, const std::function<void()>& draw) {
+void RenderFrame(Harness& h, const std::function<void()>& draw,
+                 const float clear[4] = nullptr) {
   h.device->BeginValidationScope();
   h.device->BeginFrame();
   ImGui_ImplRHI_NewFrame(h.device->CurrentFrame());
@@ -110,7 +111,7 @@ void RenderFrame(Harness& h, const std::function<void()>& draw) {
   auto out = graph.ImportTexture(h.target.get(), ResourceState::Undefined, "ui");
   const float black[4] = {0, 0, 0, 1};
   graph.AddRasterPass("clear")
-      .ColorTarget(out, LoadOp::Clear, StoreOp::Store, black)
+      .ColorTarget(out, LoadOp::Clear, StoreOp::Store, clear ? clear : black)
       .Execute([](const graph::RasterContext&) {});
   const bool added = ImGui_ImplRHI_AddPass(ImGui::GetDrawData(), graph, out);
   REQUIRE(added);
@@ -350,4 +351,67 @@ TEST_CASE("imgui: a frame that outgrows the ring still renders", "[imgui]") {
   CHECK(c.r > 240);
   CHECK(c.g < 16);
   CHECK(c.b < 16);
+}
+
+// --- The overlay's accumulated alpha -----------------------------------------
+
+TEST_CASE("imgui: overlapping translucent draws accumulate alpha correctly",
+          "[imgui]") {
+  // THE ONE PROPERTY PREMULTIPLIED BLENDING EXISTS FOR, and nothing else here
+  // could see it.
+  //
+  // ImGui now renders into a separate OVERLAY layer that is composited over the
+  // scene later, rather than straight onto an opaque surface. Every other case
+  // in this file draws over an opaque black clear, where premultiplied and
+  // non-premultiplied produce identical RGB and the layer's own alpha is never
+  // read -- so the blend state could be wrong and every one of them would pass.
+  // The same is true of the debug-line fringe assertion: over a transparent
+  // clear, a SINGLE draw with blending disabled writes exactly what blending
+  // would have produced. Only OVERLAP distinguishes them.
+  //
+  // Two 50%-alpha rects: the overlap must reach 1 - 0.5*0.5 = 0.75 (alpha 191).
+  // A replacing blend leaves it at 0.5 (128), and an additive one saturates
+  // to 1 (255).
+  auto up = MakeHarness();
+  Harness& h = *up;
+  const float transparent[4] = {0, 0, 0, 0};
+  RenderFrame(
+      h,
+      [] {
+        auto* dl = ImGui::GetBackgroundDrawList();
+        dl->AddRectFilled(ImVec2(10, 10), ImVec2(60, 60),
+                          IM_COL32(255, 255, 255, 128));
+        dl->AddRectFilled(ImVec2(40, 40), ImVec2(90, 90),
+                          IM_COL32(255, 255, 255, 128));
+      },
+      transparent);
+
+  const Rgba single = h.At(20, 20);   // first rect only
+  const Rgba overlap = h.At(50, 50);  // both
+  const Rgba empty = h.At(95, 95);    // neither
+  INFO("single a=" << int(single.a) << " overlap a=" << int(overlap.a)
+                   << " empty a=" << int(empty.a));
+
+  CHECK(empty.a == 0);                            // the clear survived
+  CHECK(single.a >= 126);
+  CHECK(single.a <= 130);                         // one draw: 0.5
+  // The load-bearing assertion. 191 is source-over; 128 would mean the second
+  // draw REPLACED the first, 255 that they were added.
+  CHECK(overlap.a >= 188);
+  CHECK(overlap.a <= 194);
+
+  // AND THE COLOUR, which is where the two blend states actually differ.
+  //
+  // PremultipliedAlphaBlend and AlphaBlend share their ALPHA factors exactly,
+  // so every assertion above passes under either -- the first version of this
+  // test proved that by failing to go red. They differ in the COLOUR factor:
+  // the shader already multiplies by alpha, so AlphaBlend's SrcAlpha applies it
+  // a SECOND time and every translucent draw comes out too dark.
+  //
+  // White premultiplied by its own alpha has rgb == a exactly, at any alpha.
+  // Double-multiplied it is a*a: 64 instead of 128 for a half-alpha draw.
+  CHECK(single.r >= single.a - 2);
+  CHECK(single.r <= single.a + 2);
+  CHECK(overlap.r >= overlap.a - 2);
+  CHECK(overlap.r <= overlap.a + 2);
 }

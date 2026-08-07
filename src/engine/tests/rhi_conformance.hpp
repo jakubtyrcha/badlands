@@ -1096,6 +1096,100 @@ inline void CheckSwapchainResize(IRhiDevice& device) {
   device.WaitIdle();
 }
 
+// The colour space a swapchain was asked for must be the one it reports, and
+// the default must stay untagged sRGB -- every call site written before colour
+// spaces existed relies on that being a no-op.
+inline void CheckSwapchainReportsItsColorSpace(IRhiDevice& device) {
+  auto plain = device.CreateSwapchain({.width = 32, .height = 32,
+                                       .label = "default_cs"});
+  REQUIRE(plain);
+  CHECK(plain->GetColorSpace() == ColorSpace::Srgb);
+
+  auto p3 = device.CreateSwapchain({.width = 32,
+                                    .height = 32,
+                                    .color_space = ColorSpace::DisplayP3,
+                                    .label = "p3"});
+  REQUIRE(p3);
+  CHECK(p3->GetColorSpace() == ColorSpace::DisplayP3);
+
+  // Extended-range headless is legal on both backends: nothing is presented,
+  // so there is no transfer for a compositor to get wrong. This is the case
+  // the two-sink test depends on -- it is how the EDR path is reachable on a
+  // machine with no HDR display.
+  auto edr = device.CreateSwapchain(
+      {.width = 32,
+       .height = 32,
+       .format = Format::RGBA16Float,
+       .color_space = ColorSpace::ExtendedLinearDisplayP3,
+       .label = "edr"});
+  REQUIRE(edr);
+  CHECK(edr->GetFormat() == Format::RGBA16Float);
+  CHECK(edr->GetColorSpace() == ColorSpace::ExtendedLinearDisplayP3);
+}
+
+// An extended-range surface ON A REAL WINDOW with no colour space has no
+// defined transfer, so it must be refused at creation rather than presented and
+// guessed at. Both backends share ValidateSwapchainDesc precisely so they
+// cannot disagree about this (rule 13).
+//
+// A fake non-null window handle is enough FOR A REFUSAL, because the refusal
+// happens before either backend touches the handle. That keeps the check on
+// Null too, where a real window is impossible -- and a refusal only Metal could
+// test is a refusal Null could quietly stop performing.
+//
+// IT IS NOT ENOUGH FOR AN ACCEPTANCE. Metal's swapchain really does message the
+// handle (`layer_.device = ...`), so a desc that passes validation with a fake
+// one segfaults -- which is exactly what the first version of this check did.
+// So the "it is the combination, not the format" half of the claim is made the
+// only way it can be: by CheckSwapchainReportsItsColorSpace accepting the same
+// extended-range format with no window at all.
+inline void CheckUntaggedExtendedRangeSurfaceIsRefused(IRhiDevice& device) {
+  int not_a_window = 0;
+  auto sc = device.CreateSwapchain(
+      {.native_window = &not_a_window,
+       .width = 32,
+       .height = 32,
+       .format = Format::RGBA16Float,
+       .color_space = ColorSpace::Srgb,
+       .label = "untagged_float"});
+  CHECK(sc == nullptr);
+
+  // AND THE MIRROR IMAGE. An 8-bit surface tagged extended-linear has the
+  // compositor read sRGB-encoded bytes as linear intensities -- wrong in the
+  // same way and for the same reason, and the validator originally checked only
+  // one direction.
+  auto linear_8bit = device.CreateSwapchain(
+      {.native_window = &not_a_window,
+       .width = 32,
+       .height = 32,
+       .format = Format::BGRA8Unorm,
+       .color_space = ColorSpace::ExtendedLinearDisplayP3,
+       .label = "linear_8bit"});
+  CHECK(linear_8bit == nullptr);
+}
+
+// A swapchain's FORMAT is fixed once it has been reported. Resize may re-tag
+// the surface, but it must never swap the format underneath a caller who has
+// already built pipelines against it -- there is no path that rebuilds them,
+// and a pipeline whose colour format does not match its attachment does not
+// fail loudly: it renders a wrong image.
+inline void CheckResizeKeepsTheFormat(IRhiDevice& device) {
+  for (Format f : {Format::BGRA8Unorm, Format::RGBA8Unorm}) {
+    auto sc = device.CreateSwapchain(
+        {.width = 32, .height = 32, .format = f, .label = "stable_format"});
+    REQUIRE(sc);
+    const Format before = sc->GetFormat();
+    const ColorSpace cs_before = sc->GetColorSpace();
+    sc->Resize(64, 48);
+    CHECK(sc->GetFormat() == before);
+    CHECK(sc->GetColorSpace() == cs_before);
+    sc->Resize(0, 0);  // minimize, the other size a real window reaches
+    CHECK(sc->GetFormat() == before);
+    sc->Resize(32, 32);
+    CHECK(sc->GetFormat() == before);
+  }
+}
+
 // A wild offset must be refused, not wrapped past the guard.
 //
 // `offset + size > capacity` is unsigned arithmetic: an offset near
@@ -2249,6 +2343,9 @@ inline void RunAllConformanceChecks(IRhiDevice& device) {
   CheckSwapchainAcquirePresentCycle(device);
   CheckSwapchainSkipsWhenZeroSized(device);
   CheckSwapchainResize(device);
+  CheckSwapchainReportsItsColorSpace(device);
+  CheckUntaggedExtendedRangeSurfaceIsRefused(device);
+  CheckResizeKeepsTheFormat(device);
   CheckTextureCreationAndViews(device);
   CheckComputePipelineReportsWorkgroupSize(device);
   CheckReflectionLookupByName(device);

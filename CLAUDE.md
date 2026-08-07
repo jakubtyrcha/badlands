@@ -41,6 +41,7 @@ are touching:
 ## Working agreement
 - **Frontload interface design.** Clarify details and assumptions with the user *before* building. Make autonomous decisions only for implementation details — never for interfaces or architecture.
 - **The rendering/engine interface is general and stable.** Keep it game-agnostic (no game types in `src/engine/` or `src/core/`). ALWAYS get user approval before changing the rendering/engine interface.
+- **NEVER ADD ANYTHING TO A UI WITHOUT EXPLICIT APPROVAL — game UI AND debug ImGui alike.** No window, panel, tab, text line, checkbox, slider, plot or menu entry unless I asked for that specific element. This binds even when the element would feed a feature I *did* approve: the feature is approved, its UI is not.
 - **UI is two separate surfaces:** game UI (in-world pane) vs debug UI (Dear ImGui). Do not conflate them.
 - **Don't build debug controls that weren't asked for.** No ImGui panels/toggles/sliders, no env-var hooks, no "demo mode" switches unless the user asks. Ship the feature with fixed constants; do NOT add a config struct, a style object, or plumbing whose only purpose is to feed a control that doesn't exist. If tuning genuinely needs a knob, ask first.
 - **Simplest thing for data presentation.** To show data/results, reach for the simplest option: write files and point to the paths, print a table. Build elaborate tools/visualizations/galleries only when explicitly asked.

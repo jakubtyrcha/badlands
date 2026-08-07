@@ -48,9 +48,12 @@ std::unique_ptr<LinePass> LinePass::Create(IRhiDevice& device,
        .fragment_entry = "fs_lines",
        .color_formats = {target_format},
        // The conical antialias fringe is an ALPHA RAMP, so without blending the
-       // lines render as hard-edged quads with visible corners -- the first
-       // real caller of the blend state, and the reason it landed first.
-       .blend_states = {AlphaBlend()},
+       // lines render as hard-edged quads with visible corners.
+       //
+       // PREMULTIPLIED, because this draws into the UI overlay rather than onto
+       // a surface: a layer that accumulates several translucent draws and is
+       // composited later only composes associatively in that form.
+       .blend_states = {PremultipliedAlphaBlend()},
        .cull_mode = CullMode::None,
        .label = "debug_lines"});
   if (!pass->pipeline_) return nullptr;
