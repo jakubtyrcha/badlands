@@ -202,8 +202,11 @@ SDF_STATIC_ASSERT(sizeof(SdfNode) == 64, "SdfNode must be 64 bytes");
 // Floor on a half-extent, guarding the cross-section contraction's division.
 // Node::scale is clamped to kNodeScaleMin by every drag, but SceneDocument::add
 // takes a Node verbatim, so the field can hold whatever a test or a future
-// importer puts there -- and a zero would otherwise produce inf, then NaN, and
-// a NaN propagates through the CSG fold to the whole scene.
+// importer puts there -- and a zero would otherwise produce inf, then NaN.
+// A NaN does NOT announce itself: sdf_fold reduces with fmin, which returns the
+// other operand rather than propagating, so the node folds to FLT_MAX and
+// merely disappears. picking.cpp evaluates a node directly and gets it raw,
+// where every comparison against it is false and the trace stalls.
 #define SDF_MIN_HALF_EXTENT 1e-5f
 
 // ---------------------------------------------------------------------------
@@ -481,25 +484,31 @@ inline float sdf_eval_node(SdfNode node, sq_float3 p) {
     const int shape = int(node.pos_shape.w);
     const float param = node.params.x;
 
-    // ABS, but deliberately NOT sdf_safe_half_extents. These two are the only
-    // branches with no division, so they need no floor -- and not flooring is
-    // what keeps a zero-scale cube behaving exactly as it did before rounding
-    // existed. They DO need the absolute value: a negative scale component must
-    // mirror a shape, and taking a negative half-extent unsigned makes
-    // sd_box's `abs(q) - half` positive everywhere, i.e. empty space. Six of
-    // the eight shapes got this from sdf_safe_half_extents below; these two
-    // silently did not, and append_node_wireframe's simd_abs(node.scale)
-    // already assumed otherwise.
+    // ABS, but deliberately NOT sdf_safe_half_extents -- for the CUBE ALONE.
+    // sd_box divides by nothing, so it needs no floor, and not flooring is what
+    // keeps a zero-scale cube behaving exactly as it did before rounding
+    // existed: the field of a flat square, which is a real answer. It DOES need
+    // the absolute value: a negative scale component must mirror a shape, and
+    // taking a negative half-extent unsigned makes sd_box's `abs(q) - half`
+    // positive everywhere, i.e. empty space. Six of the eight shapes got this
+    // from sdf_safe_half_extents below; the cube silently did not, and
+    // append_node_wireframe's simd_abs(node.scale) already assumed otherwise.
     const sq_float3 abs_half = sdf_abs(half_extents);
     if (shape == SDF_SHAPE_CUBE) {
         const float rb = sdf_shape_roundness(param) * sdf_reduce_min(abs_half);
         return sdf_sd_box(q, abs_half - sdf_make3(rb, rb, rb)) - rb;
     }
-    if (shape == SDF_SHAPE_SPHERE) {
-        return sdf_sd_ellipsoid(q, abs_half);
-    }
 
     const sq_float3 h = sdf_safe_half_extents(half_extents);
+    // FLOORED, unlike the cube above, because sdf_sd_ellipsoid divides by the
+    // radii twice: a zero half-extent gives inf/inf = NaN at every point rather
+    // than the flat disc a flat sphere should be. It reached here because the
+    // sphere shares the cube's "no division" exemption, which was only ever
+    // true of the cube.
+    if (shape == SDF_SHAPE_SPHERE) {
+        return sdf_sd_ellipsoid(q, h);
+    }
+
     if (shape == SDF_SHAPE_OCTAHEDRON) {
         // The one shape that distinguishes no axis, so it contracts all three
         // onto s = min(h) rather than just the cross-section.
