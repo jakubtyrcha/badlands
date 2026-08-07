@@ -370,6 +370,7 @@ add_library(badlands_engine STATIC
     src/engine/animation/sampler.cpp
     src/engine/animation/animation_set.cpp
     src/engine/animation/skeleton_lines.cpp
+    src/engine/animation/attachment_lines.cpp
     src/engine/ui/imgui_impl_wgpu_custom.cpp
     src/engine/ui/editor_ui.cpp
     src/engine/ui/ui_renderer.cpp

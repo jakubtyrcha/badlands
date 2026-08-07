@@ -27,6 +27,7 @@
 
 #include "engine/animation/animation_clip.hpp"
 #include "engine/animation/animation_set.hpp"
+#include "engine/animation/attachment_lines.hpp"
 #include "engine/animation/pose.hpp"
 #include "engine/animation/sampler.hpp"
 #include "engine/animation/skeleton.hpp"
@@ -382,4 +383,245 @@ TEST_CASE("the emitter applies its world transform", "[animation]") {
     CHECK(line.start.x == Catch::Approx(100.0f).margin(1e-3));
     CHECK(line.start.z == Catch::Approx(-50.0f).margin(1e-3));
   }
+}
+
+// ---------------------------------------------------------------------------
+// Markers and attachments.
+//
+// The manifests below are written in-test, so these assert against the loader's
+// contract and never against assets/characters/.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Writes a manifest naming the fixture skeleton and one clip, with `extra`
+// spliced in as additional top-level entries (a "sockets" array, a "family") and
+// `clip_body` as the clip's own object body.
+std::string WriteManifest(const std::string& filename, const std::string& extra,
+                          const std::string& clip_body) {
+  const std::string skeleton_file =
+      std::filesystem::path(WriteOzz(*BuildRawSkeleton(), filename + "_skeleton.ozz"))
+          .filename()
+          .string();
+  const std::string clip_file =
+      std::filesystem::path(WriteOzz(*BuildRawAnimation(), filename + "_clip.ozz"))
+          .filename()
+          .string();
+
+  const std::filesystem::path path = TempDir() / (filename + ".json");
+  std::ofstream out(path);
+  REQUIRE(out.good());
+  out << "{\n  \"skeleton\": \"" << skeleton_file << "\",\n"
+      << extra << "  \"clips\": { \"only\": { \"file\": \"" << clip_file << "\""
+      << clip_body << " } }\n}\n";
+  out.close();
+  return path.string();
+}
+
+// A one-joint skeleton, so a Pose can be sized against something SMALLER than
+// the fixture -- which is the only way to exercise the emitters' bounds guard.
+Skeleton LoadTinySkeleton() {
+  ozz::animation::offline::RawSkeleton raw;
+  raw.roots.resize(1);
+  raw.roots[0].name = "lonely";
+  raw.roots[0].transform = ozz::math::Transform::identity();
+  REQUIRE(raw.Validate());
+  ozz::animation::offline::SkeletonBuilder builder;
+  std::optional<Skeleton> skeleton =
+      Skeleton::Load(WriteOzz(*builder(raw), "tiny_skeleton.ozz"));
+  REQUIRE(skeleton.has_value());
+  return std::move(*skeleton);
+}
+
+// The fixture posed at `ratio`, with models() filled.
+Pose PoseAt(const Fixture& fixture, float ratio) {
+  Pose pose(fixture.skeleton);
+  ClipSampler sampler;
+  sampler.Reset(fixture.skeleton);
+  REQUIRE(sampler.Sample(fixture.clip, ratio, pose));
+  REQUIRE(LocalToModel(fixture.skeleton, pose));
+  return pose;
+}
+
+}  // namespace
+
+TEST_CASE("a clip carries free-form named markers", "[animation]") {
+  const std::string manifest = WriteManifest(
+      "markers", "", R"(, "markers": { "event": 0.5, "sound": 2.0 })");
+  std::optional<AnimationSet> set = AnimationSet::Load(manifest);
+  REQUIRE(set.has_value());
+
+  CHECK(set->clip_marker(0, "event") == Catch::Approx(0.5f));
+  // An authored value outside [0,1] is clamped, not trusted into a sampler.
+  CHECK(set->clip_marker(0, "sound") == Catch::Approx(1.0f));
+  // An undeclared marker is absent, which is distinguishable from one at 0.
+  CHECK_FALSE(set->clip_marker(0, "load").has_value());
+  // Authored order, which is what the debug panel lists.
+  REQUIRE(set->clip_marker_count(0) == 2);
+  CHECK(set->clip_marker_name(0, 0) == "event");
+  CHECK(set->clip_marker_value(0, 1) == Catch::Approx(1.0f));
+}
+
+TEST_CASE("the legacy pivot field is the marker named pivot", "[animation]") {
+  // The shipped Quaternius manifest authors this form, so it must keep working
+  // with no edit -- that is what makes the marker table additive.
+  const std::string manifest =
+      WriteManifest("legacy_pivot", "", R"(, "pivot": 0.25)");
+  std::optional<AnimationSet> set = AnimationSet::Load(manifest);
+  REQUIRE(set.has_value());
+
+  CHECK(set->clip_pivot(0) == Catch::Approx(0.25f));
+  CHECK(set->clip_marker(0, "pivot") == Catch::Approx(0.25f));
+
+  // Absent, the pivot still degrades to "the whole clip is phase one".
+  const std::string bare = WriteManifest("bare_pivot", "", "");
+  std::optional<AnimationSet> bare_set = AnimationSet::Load(bare);
+  REQUIRE(bare_set.has_value());
+  CHECK(bare_set->clip_pivot(0) == Catch::Approx(1.0f));
+  CHECK_FALSE(bare_set->clip_marker(0, "pivot").has_value());
+}
+
+TEST_CASE("every joint is an attachment, and ids are joint indices",
+          "[animation]") {
+  // A manifest with no "sockets" is exactly the shipped Quaternius shape, so
+  // this is also the graceful-degradation case.
+  const std::string manifest = WriteManifest("joints_only", "", "");
+  std::optional<AnimationSet> set = AnimationSet::Load(manifest);
+  REQUIRE(set.has_value());
+
+  REQUIRE(set->attachment_count() == kFixtureJoints);
+  CHECK(set->family().empty());
+  for (int i = 0; i < kFixtureJoints; ++i) {
+    CHECK(set->attachment_name(i) == set->skeleton().joint_names()[i]);
+    CHECK(set->FindAttachment(set->attachment_name(i)) == i);
+  }
+  CHECK(set->FindAttachment("no_such_thing") == -1);
+
+  // The invariant that makes a joint attachment's transform provable: for a
+  // POSED frame, not the rest pose.
+  Fixture fixture = LoadFixture();
+  const Pose pose = PoseAt(fixture, 0.5f);
+  for (int i = 0; i < kFixtureJoints; ++i) {
+    const glm::mat4 expected = ToMat4(pose.models()[static_cast<size_t>(i)]);
+    const glm::mat4 actual = set->AttachmentTransform(i, pose);
+    for (int c = 0; c < 4; ++c) {
+      for (int r = 0; r < 4; ++r) {
+        CHECK(actual[c][r] == Catch::Approx(expected[c][r]).margin(1e-4));
+      }
+    }
+  }
+}
+
+TEST_CASE("a socket composes parent-then-offset", "[animation]") {
+  // The offset is a pure ROTATION and the parent a pure TRANSLATION, which is
+  // what makes the two orderings distinguishable: parent*offset keeps the
+  // parent's origin, offset*parent rotates it. With an identity rotation both
+  // orderings agree and the reversal -- "the sword is attached but points the
+  // wrong way" -- would sail through.
+  const glm::mat4 offset =
+      glm::rotate(glm::mat4(1.0f), glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+  std::string sockets = "  \"family\": \"Fixture\",\n  \"sockets\": [ { \"name\": "
+                        "\"hand_item\", \"parent\": \"child_a\", \"offset\": [";
+  for (int i = 0; i < 16; ++i) {
+    sockets += (i > 0 ? ", " : "") + std::to_string(offset[i / 4][i % 4]);
+  }
+  sockets += "] } ],\n";
+
+  const std::string manifest = WriteManifest("socket_offset", sockets, "");
+  std::optional<AnimationSet> set = AnimationSet::Load(manifest);
+  REQUIRE(set.has_value());
+
+  CHECK(set->family() == "Fixture");
+  REQUIRE(set->attachment_count() == kFixtureJoints + 1);
+  const int socket = set->FindAttachment("hand_item");
+  REQUIRE(socket == kFixtureJoints);  // joints first, then sockets
+
+  Fixture fixture = LoadFixture();
+  const Pose pose = PoseAt(fixture, 0.5f);
+  const int parent = set->FindAttachment("child_a");
+  REQUIRE(parent >= 0);
+
+  const glm::mat4 expected = ToMat4(pose.models()[static_cast<size_t>(parent)]) * offset;
+  const glm::mat4 actual = set->AttachmentTransform(socket, pose);
+  for (int c = 0; c < 4; ++c) {
+    for (int r = 0; r < 4; ++r) {
+      CHECK(actual[c][r] == Catch::Approx(expected[c][r]).margin(1e-4));
+    }
+  }
+
+  // Spelled out, so a regression names the failure rather than showing a matrix
+  // diff: the socket sits AT its parent and is turned by the offset.
+  const glm::vec3 parent_origin(ToMat4(pose.models()[static_cast<size_t>(parent)])[3]);
+  CHECK(glm::vec3(actual[3]).x == Catch::Approx(parent_origin.x).margin(1e-4));
+  CHECK(glm::vec3(actual[3]).y == Catch::Approx(parent_origin.y).margin(1e-4));
+  CHECK(glm::vec3(actual[0]).y == Catch::Approx(1.0f).margin(1e-4));  // X -> +Y
+
+  // And it FOLLOWS the animation: the parent chain moves with the root, so the
+  // same id at another ratio is somewhere else.
+  const Pose start = PoseAt(fixture, 0.0f);
+  CHECK(set->AttachmentTransform(socket, start)[3].x !=
+        Catch::Approx(actual[3].x).margin(1e-3));
+}
+
+TEST_CASE("a socket colliding with a joint is dropped", "[animation]") {
+  // `weapon_R` and `prop-weapon_R` are duplicates in the 0 A.D. corpus, a
+  // millimetre apart. The joint is the animated one, so the joint wins -- and a
+  // packer that failed to collapse them must not produce two "child_a"s here.
+  const std::string sockets =
+      "  \"sockets\": [ { \"name\": \"child_a\", \"parent\": \"root\" },\n"
+      "                 { \"name\": \"orphan\", \"parent\": \"no_such_joint\" } ],\n";
+  const std::string manifest = WriteManifest("socket_collision", sockets, "");
+  std::optional<AnimationSet> set = AnimationSet::Load(manifest);
+  REQUIRE(set.has_value());
+
+  // Both sockets are rejected: one collides, one names a parent that is not a
+  // joint. Neither failure costs the rest of the manifest.
+  CHECK(set->attachment_count() == kFixtureJoints);
+  CHECK(set->FindAttachment("orphan") == -1);
+
+  // "child_a" still resolves -- to the JOINT, whose offset is identity.
+  const int child_a = set->FindAttachment("child_a");
+  REQUIRE(child_a >= 0);
+  CHECK(child_a < kFixtureJoints);
+
+  Fixture fixture = LoadFixture();
+  const Pose pose = PoseAt(fixture, 0.5f);
+  const glm::mat4 expected = ToMat4(pose.models()[static_cast<size_t>(child_a)]);
+  CHECK(set->AttachmentTransform(child_a, pose)[3].y ==
+        Catch::Approx(expected[3].y).margin(1e-4));
+}
+
+TEST_CASE("the attachment emitter appends three lines per attachment",
+          "[animation]") {
+  const std::string manifest = WriteManifest("attachment_axes", "", "");
+  std::optional<AnimationSet> set = AnimationSet::Load(manifest);
+  REQUIRE(set.has_value());
+
+  Fixture fixture = LoadFixture();
+  const Pose pose = PoseAt(fixture, 0.5f);
+
+  const glm::mat4 world =
+      glm::translate(glm::mat4(1.0f), glm::vec3(100.0f, 0.0f, -50.0f));
+  DebugLineBuffer lines;
+  EmitAttachmentAxes(*set, pose, world, lines);
+
+  const size_t expected = static_cast<size_t>(3 * set->attachment_count());
+  REQUIRE(lines.lines.size() == expected);
+  // The world transform reaches the triads, not only the bones.
+  for (const DebugLine& line : lines.lines) {
+    CHECK(line.start.z == Catch::Approx(-50.0f).margin(1e-3));
+  }
+
+  // Appending is additive and clears nothing, matching EmitSkeletonLines -- one
+  // frame's debug lines come from several emitters sharing one buffer.
+  EmitAttachmentAxes(*set, pose, world, lines);
+  CHECK(lines.lines.size() == 2 * expected);
+
+  // A pose sized against another skeleton appends nothing rather than reading
+  // past the joint matrices.
+  const Skeleton tiny = LoadTinySkeleton();
+  Pose undersized(tiny);
+  DebugLineBuffer none;
+  EmitAttachmentAxes(*set, undersized, world, none);
+  CHECK(none.lines.empty());
 }
