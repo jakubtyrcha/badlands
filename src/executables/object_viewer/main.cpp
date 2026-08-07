@@ -13,11 +13,13 @@
 // rot; it is the real one, with a different sink.
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <spdlog/spdlog.h>
@@ -79,7 +81,73 @@ namespace {
 // segment covers these texels and not those" are different claims, and a
 // headless run that could not say which it was checking would be checking
 // neither.
-enum class Scene { Clear, Lines, Grid, Plane, Spheres };
+// EVERY SCENE IS REACHABLE FROM --scene, and one table says so.
+//
+// The names used to live twice -- once in the parser's if-chain and once in the
+// error message listing the options -- and adding `spheres` updated only the
+// first. The message then advertised four scenes when five existed, which is
+// how you get told a real scene does not exist. Same failure the DebugViews()
+// table already prevents for the debug views, and a test iterates this enum for
+// the same reason.
+enum class Scene { Clear, Lines, Grid, Plane, Spheres, kCount };
+
+struct SceneInfo {
+  std::string_view name;
+  Scene scene;
+};
+
+inline constexpr std::array<SceneInfo, size_t(Scene::kCount)> kScenes = {{
+    {"clear", Scene::Clear},
+    {"lines", Scene::Lines},
+    {"grid", Scene::Grid},
+    {"plane", Scene::Plane},
+    {"spheres", Scene::Spheres},
+}};
+
+// COMPILE-TIME, not a test case. The table lives in this file's anonymous
+// namespace, and a static_assert catches the same defect earlier than a test
+// could: adding a Scene without a name stops the BUILD rather than producing a
+// binary whose error message lies about what exists.
+//
+// The array's size alone does not catch it -- a sixth enum value just
+// default-constructs a sixth entry with an empty name, which compiles happily.
+constexpr bool EverySceneIsNamedExactlyOnce() {
+  for (size_t i = 0; i < size_t(Scene::kCount); ++i) {
+    int found = 0;
+    for (const auto& s : kScenes) {
+      if (size_t(s.scene) == i) ++found;
+    }
+    if (found != 1) return false;
+  }
+  for (const auto& s : kScenes) {
+    if (s.name.empty()) return false;
+  }
+  return true;
+}
+static_assert(EverySceneIsNamedExactlyOnce(),
+              "every Scene needs exactly one entry in kScenes: --scene parses "
+              "from that table and its error message lists it, so a missing "
+              "name makes a real scene unreachable AND unadvertised");
+
+// Returns Scene::kCount if `name` matches nothing. REFUSES rather than guessing:
+// no prefix matching and no plural forgiveness, because a run that silently
+// picks a scene you did not ask for produces a picture that looks fine.
+Scene SceneFromName(std::string_view name) {
+  for (const auto& s : kScenes) {
+    if (s.name == name) return s.scene;
+  }
+  return Scene::kCount;
+}
+
+// The options, joined -- built FROM the table so it cannot go stale.
+std::string SceneNameList() {
+  std::string out;
+  for (const auto& s : kScenes) {
+    if (!out.empty()) out += '|';
+    out += s.name;
+  }
+  return out;
+}
 
 struct Options {
   bool headless = false;
@@ -243,14 +311,12 @@ bool ParseArgs(int argc, char** argv, Options& opt) {
     } else if (a == "--scene") {
       if (!value(v)) return false;
       scene_given = true;
-      if (std::strcmp(v, "clear") == 0) opt.scene = Scene::Clear;
-      else if (std::strcmp(v, "lines") == 0) opt.scene = Scene::Lines;
-      else if (std::strcmp(v, "grid") == 0) opt.scene = Scene::Grid;
-      else if (std::strcmp(v, "plane") == 0) opt.scene = Scene::Plane;
-      else if (std::strcmp(v, "spheres") == 0) opt.scene = Scene::Spheres;
-      else {
-        spdlog::error(
-            "object_viewer: unknown scene '{}' (clear|lines|grid|plane)", v);
+      const Scene parsed = SceneFromName(v);
+      if (parsed != Scene::kCount) {
+        opt.scene = parsed;
+      } else {
+        spdlog::error("object_viewer: unknown scene '{}' ({})", v,
+                      SceneNameList());
         return false;
       }
     } else if (a == "--debug-view") {
