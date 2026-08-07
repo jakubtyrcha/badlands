@@ -15,12 +15,17 @@
 //
 // What is new relative to the reference:
 //   * parallel over particles via the repo's Taskflow pool, deterministically
+//   * phase-1 shallow-water + Exner morphodynamics (protogen_swe.cpp), the
+//     phase-0 -> phase-1 handoff below, and the output boundary this file
+//     pulls in from src/mapgen/ -- see tools/protogen/README.md.
 //
-// build (Taskflow is header-only, so this stays a standalone TU -- no CMake):
-//   c++ -O3 -std=c++20 \
-//     -I<repo>/src -I<repo>/third_party/FastNoiseLite \
-//     -I<repo>/build/_deps/taskflow-src \
-//     protogen.cpp <repo>/src/core/parallel.cpp -o protogen
+// NOT a single-TU build any more (Task 2 split it): this file is phase-0 +
+// the whole-sim driver + the output boundary; protogen_swe.cpp is the
+// phase-1 SWE/morpho passes; protogen_tests.cpp is the `--test` suite. No
+// CMake target either way -- Taskflow is header-only, so hand-listing the
+// TUs on one `c++` invocation is still simpler than a build system entry.
+// The exact, current build line is tools/protogen/README.md's "Build and
+// run" section, not repeated here where it would drift out of sync.
 
 #include <algorithm>
 #include <array>
@@ -1618,22 +1623,28 @@ double FractionDrainsOffMap(const Grid& g) {
   return g.cells ? double(drains) / double(g.cells) : 0.0;
 }
 
-// End-of-phase-1 print: depression count, off-map drainage fraction, and
-// the two advection-fixer diagnostics carried on `Grid` since Task 6.
-// Matters most for a MORFAC-accelerated production run, where a dry-start
-// or otherwise ill-posed advection step can quietly destroy suspended load
-// -- `swe_sed_advect_fix_max`/`swe_sed_advect_fix_residual_m3` are how that
-// would show up here rather than only in the (rarer) mass-audit tripwire.
-void PrintRunDiagnostics(const Grid& g) {
+// Depression count, off-map drainage fraction, and the two advection-fixer
+// diagnostics carried on `Grid` since Task 6. Called TWICE by a `--cycles >
+// 0` run that completes -- once on the phase-0-finished grid (right after
+// the first WriteWorldArtifacts), once on the phase-1-finished one -- so the
+// two prints together are the "before vs after phase 1" comparison Task 8's
+// full-run validation is built around; a `--cycles 0` run gets only the
+// first. The advection-fixer numbers are naturally 0 on the phase-0-only
+// print (phase 1 has not run yet). Matters most for a MORFAC-accelerated
+// production run, where a dry-start or otherwise ill-posed advection step
+// can quietly destroy suspended load -- `swe_sed_advect_fix_max`/
+// `swe_sed_advect_fix_residual_m3` are how that would show up here rather
+// than only in the (rarer) mass-audit tripwire.
+void PrintRunDiagnostics(const Grid& g, const char* phase_label) {
   const int depressions = CountLocalMinima8(g);
   const double off_map_frac = FractionDrainsOffMap(g);
   std::printf(
-      "protogen: phase-1 diagnostics\n"
+      "protogen: %s diagnostics\n"
       "  depressions (8-neighbour local minima on the final bed): %d\n"
       "  cells draining off-map (D8 on the final bed): %.2f%%\n"
       "  advection fixer: worst |factor-1| %.4e, unplaced residual %.4e m3\n",
-      depressions, 100.0 * off_map_frac, g.swe_sed_advect_fix_max,
-      g.swe_sed_advect_fix_residual_m3);
+      phase_label, depressions, 100.0 * off_map_frac,
+      g.swe_sed_advect_fix_max, g.swe_sed_advect_fix_residual_m3);
 }
 
 // ------------------------------------------------- perf report (Task 7) ----
@@ -1865,6 +1876,18 @@ int main(int argc, char** argv) {
   // rivers.bin with the phase-1-finished state once it completes.
   if (!WriteWorldArtifacts(BuildInputsFromGrid(g, p), p.out)) return 1;
 
+  // Task 8 fix: PrintRunDiagnostics's own comment says Task 8's full-run
+  // validation needs a BASELINE, but until this call this function only ever
+  // fired after phase 1 -- a `--cycles 0` run (exactly the baseline call)
+  // never printed a depression count or drainage fraction at all. Both
+  // diagnostics read only the finished `g`, which right here is the
+  // phase-0-finished state, so this call is well-formed with no phase-1
+  // dependency; the second call below (once phase 1 completes) reports the
+  // SAME two numbers again on the phase-1-finished state, so a single
+  // `--cycles > 0` run prints its own before/after without needing a
+  // separate `--cycles 0` invocation to compare against.
+  PrintRunDiagnostics(g, "phase-0");
+
   int cycles_run = 0;
   if (p.cycles > 0) {
     std::printf("protogen: phase 1 -- warm start + %d cycles "
@@ -1934,7 +1957,7 @@ int main(int argc, char** argv) {
       // phase-1 run happened and find the right dump tag.
       if (!WriteWorldArtifacts(BuildInputsFromGrid(g, p, cycles_run), p.out))
         return 1;
-      PrintRunDiagnostics(g);
+      PrintRunDiagnostics(g, "phase-1");
     }
 
     WritePerfReport(g, p, st, cycles_run);
