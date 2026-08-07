@@ -334,6 +334,7 @@ TexturePtr MakeLayerArray(IRhiDevice& dev, const char* label, bool arm) {
                                 .array_layers = kTerrainLayers,
                                 .format = Format::RGBA8Unorm,
                                 .usage = TextureUsage::Sampled | TextureUsage::CopyDst,
+                                .dimension = TextureDimension::Tex2DArray,
                                 .label = label});
   if (!tex) return nullptr;
 

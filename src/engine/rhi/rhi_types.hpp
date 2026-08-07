@@ -284,6 +284,36 @@ struct BufferDesc {
   std::string label;  // debug only; backends may surface it in captures
 };
 
+// What a texture IS, stated rather than inferred.
+//
+// This used to be derived from `array_layers > 1`, which made one value mean
+// two things (rule 5): a 6-layer array and a cube map are indistinguishable
+// under that rule, and a cube is not an array that happens to have six slices --
+// it samples by direction and filters across face boundaries.
+enum class TextureDimension : uint8_t {
+  Tex2D,       // array_layers must be 1
+  Tex2DArray,  // array_layers layers, sampled by index
+  Cube,        // exactly 6 square layers, sampled by direction
+};
+
+const char* ToString(TextureDimension d);
+
+// How a VIEW reads the texture underneath it. Not the same question as
+// TextureDimension: the prefilter renders into one face of a cube through a
+// Tex2D view, and the resolve samples that same cube through a Cube view.
+enum class TextureViewDimension : uint8_t {
+  // The texture's own dimension. A REQUEST-ONLY value: ResolveViewDesc replaces
+  // it with the concrete one, exactly as it replaces a `mip_count` of 0 with
+  // the real count -- so ITextureView::GetDesc() never reports Auto and a
+  // caller reading it back cannot be told "some dimension" (rule 5).
+  Auto,
+  Tex2D,       // one layer, as a flat 2D image -- the render-target-per-face case
+  Tex2DArray,
+  Cube,        // requires a Cube texture and exactly 6 layers from layer 0
+};
+
+const char* ToString(TextureViewDimension d);
+
 struct TextureDesc {
   uint32_t width = 1;
   uint32_t height = 1;
@@ -291,6 +321,11 @@ struct TextureDesc {
   uint32_t mip_levels = 1;
   Format format = Format::Undefined;
   TextureUsage usage = TextureUsage::None;
+  // Defaults to Tex2D, which every call site written before this field wanted.
+  // A Tex2DArray is REFUSED at 1 layer and a Cube at anything but 6 -- see
+  // ResolveTextureDesc, which is a creation-time precondition and not
+  // validation (rule 13).
+  TextureDimension dimension = TextureDimension::Tex2D;
   std::string label;
 };
 
@@ -310,6 +345,10 @@ struct TextureViewDesc {
   uint32_t mip_count = 0;    // 0 = all remaining
   uint32_t base_layer = 0;
   uint32_t layer_count = 0;  // 0 = all remaining
+  // Defaults to the texture's own dimension, which is what every view written
+  // before this field wanted. A Cube view onto a non-cube texture, or onto
+  // anything but all six faces, is refused by ResolveViewDesc.
+  TextureViewDimension dimension = TextureViewDimension::Auto;
   std::string label;
 };
 

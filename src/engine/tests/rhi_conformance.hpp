@@ -362,12 +362,176 @@ inline void CheckViewsSurviveTextureDestroy(IRhiDevice& device) {
   CHECK(view->GetFormat() == Format::RGBA8Unorm);
 }
 
+// --- Cube textures ----------------------------------------------------------
+//
+// A cube is not an array that happens to have six slices: it is sampled by
+// direction and the hardware filters across face boundaries. What makes one
+// USABLE is the PAIR of views below -- render into one face through a Tex2D
+// view, sample the whole thing through a Cube view -- so a check that only
+// created the texture would prove nothing about the case IBL needs.
+
+inline void CheckCubeTexturesAndTheirViews(IRhiDevice& device) {
+  auto cube = device.CreateTexture({.width = 16, .height = 16,
+                                    .array_layers = 6,
+                                    .mip_levels = 3,
+                                    .format = Format::RGBA16Float,
+                                    .usage = TextureUsage::Sampled |
+                                             TextureUsage::RenderTarget |
+                                             TextureUsage::CopyDst,
+                                    .dimension = TextureDimension::Cube,
+                                    .label = "env_cube"});
+  REQUIRE(cube);
+  CHECK(cube->GetArrayLayers() == 6);
+  CHECK(cube->GetMipLevels() == 3);
+
+  // The SAMPLING view: all six faces, all mips, read by direction.
+  ITextureView* sampled = cube->CreateView(
+      {.dimension = TextureViewDimension::Cube, .label = "env_cube.sample"});
+  REQUIRE(sampled != nullptr);
+  CHECK(sampled->GetDesc().layer_count == 6);
+  CHECK(sampled->GetDesc().mip_count == 3);
+  CHECK(sampled->GetDesc().dimension == TextureViewDimension::Cube);
+
+  // The PREFILTER TARGET view: one face, one mip, as a flat 2D image.
+  ITextureView* face =
+      cube->CreateView({.base_mip = 1,
+                        .mip_count = 1,
+                        .base_layer = 3,
+                        .layer_count = 1,
+                        .dimension = TextureViewDimension::Tex2D,
+                        .label = "env_cube.f3m1"});
+  REQUIRE(face != nullptr);
+  CHECK(face->GetDesc().base_mip == 1);
+  CHECK(face->GetDesc().base_layer == 3);
+  CHECK(face->GetDesc().layer_count == 1);
+  CHECK(face->GetDesc().dimension == TextureViewDimension::Tex2D);
+
+  // Two views over the SAME range differing only in dimension must not collide
+  // in the view cache. The cache key already had to grow once, when two views
+  // differing only in COUNT silently returned each other -- dimension is the
+  // same defect with a new field.
+  ITextureView* as_array =
+      cube->CreateView({.dimension = TextureViewDimension::Tex2DArray});
+  REQUIRE(as_array != nullptr);
+  CHECK(as_array != sampled);
+  CHECK(as_array->GetDesc().dimension == TextureViewDimension::Tex2DArray);
+  CHECK(sampled->GetDesc().dimension == TextureViewDimension::Cube);
+}
+
 // --- Creation-time refusals -------------------------------------------------
 //
 // These deliberately provoke errors, so they are NOT part of
 // RunAllConformanceChecks -- that aggregate runs inside a validation scope and
 // asserts it stays clean. Each suite calls them as its own TEST_CASE instead,
 // which still gets them run against every backend (rule 6).
+
+// The four ways a dimension can contradict the layers beside it. All refused at
+// CREATION, not by the validation decorator: an object that cannot be encoded
+// must not exist in a release build either (rule 13).
+inline void CheckCubeDimensionMismatchesAreRefused(IRhiDevice& device) {
+  const std::string log = CaptureLog([&] {
+    // Five faces is not a cube.
+    CHECK(device.CreateTexture({.width = 16, .height = 16,
+                                .array_layers = 5,
+                                .format = Format::RGBA16Float,
+                                .usage = TextureUsage::Sampled,
+                                .dimension = TextureDimension::Cube,
+                                .label = "five_faces"}) == nullptr);
+    // Nor is a non-square one: a face is square by construction, and a
+    // rectangular "cube" samples to garbage rather than failing.
+    CHECK(device.CreateTexture({.width = 16, .height = 8,
+                                .array_layers = 6,
+                                .format = Format::RGBA16Float,
+                                .usage = TextureUsage::Sampled,
+                                .dimension = TextureDimension::Cube,
+                                .label = "oblong_cube"}) == nullptr);
+    // A plain 2D texture has exactly one layer. Before the dimension field this
+    // silently became an array, which is the ambiguity it exists to remove.
+    CHECK(device.CreateTexture({.width = 16, .height = 16,
+                                .array_layers = 3,
+                                .format = Format::RGBA8Unorm,
+                                .usage = TextureUsage::Sampled,
+                                .dimension = TextureDimension::Tex2D,
+                                .label = "layered_2d"}) == nullptr);
+  });
+  INFO(log);
+  CHECK(log.find("five_faces") != std::string::npos);
+  CHECK(log.find("oblong_cube") != std::string::npos);
+  CHECK(log.find("layered_2d") != std::string::npos);
+}
+
+inline void CheckCubeViewsOnBadTargetsAreRefused(IRhiDevice& device) {
+  auto flat = device.CreateTexture({.width = 16, .height = 16,
+                                    .array_layers = 6,
+                                    .format = Format::RGBA16Float,
+                                    .usage = TextureUsage::Sampled,
+                                    .dimension = TextureDimension::Tex2DArray,
+                                    .label = "six_layer_array"});
+  REQUIRE(flat);
+  auto cube = device.CreateTexture({.width = 16, .height = 16,
+                                    .array_layers = 6,
+                                    .format = Format::RGBA16Float,
+                                    .usage = TextureUsage::Sampled,
+                                    .dimension = TextureDimension::Cube,
+                                    .label = "real_cube"});
+  REQUIRE(cube);
+
+  const std::string log = CaptureLog([&] {
+    // Six layers is NECESSARY but not sufficient -- the underlying texture must
+    // have been created as a cube, because that is what the backend encodes.
+    CHECK(flat->CreateView({.dimension = TextureViewDimension::Cube}) ==
+          nullptr);
+    // A cube view must cover six layers, so a base that leaves fewer behind it
+    // cannot produce one.
+    CHECK(cube->CreateView({.base_layer = 2,
+                            .dimension = TextureViewDimension::Cube}) ==
+          nullptr);
+    // ... and neither can an explicit count that is not six.
+    CHECK(cube->CreateView({.layer_count = 3,
+                            .dimension = TextureViewDimension::Cube}) ==
+          nullptr);
+  });
+  INFO(log);
+  CHECK(log.find("six_layer_array") != std::string::npos);
+  CHECK(log.find("real_cube") != std::string::npos);
+}
+
+// Write() validated the data SIZE and nothing else, so a mip or layer past the
+// end reached the backend -- on Metal, a replaceRegion into a slice that does
+// not exist. Invisible while every texture had one layer; a cube has six.
+//
+// Null did not check even the size, which is rule 6 all over again: the two
+// backends disagreed about a documented contract and the shared suite could not
+// see it because nothing asked.
+inline void CheckTextureWriteBoundsAreRefused(IRhiDevice& device) {
+  auto cube = device.CreateTexture({.width = 4, .height = 4,
+                                    .array_layers = 6,
+                                    .mip_levels = 2,
+                                    .format = Format::RGBA8Unorm,
+                                    .usage = TextureUsage::Sampled |
+                                             TextureUsage::CopyDst,
+                                    .dimension = TextureDimension::Cube,
+                                    .label = "write_bounds_cube"});
+  REQUIRE(cube);
+  std::vector<uint8_t> mip0(4 * 4 * 4, 0x7f);
+
+  const std::string log = CaptureLog([&] {
+    cube->Write(0, 6, AsBytes(mip0));  // layer past the last face
+    cube->Write(2, 0, AsBytes(mip0));  // mip past the last level
+    std::vector<uint8_t> stub(8, 0);
+    cube->Write(0, 0, AsBytes(stub));  // short data for a 4x4 RGBA8 level
+  });
+  INFO(log);
+  CHECK(log.find("layer 6") != std::string::npos);
+  CHECK(log.find("mip 2") != std::string::npos);
+  CHECK(log.find("short") != std::string::npos);
+
+  // A write that IS in bounds still goes through, so the guard refuses rather
+  // than disabling the path.
+  const std::string clean =
+      CaptureLog([&] { cube->Write(1, 5, AsBytes(mip0)); });
+  CHECK(clean.empty());
+}
 
 // Resources the public API cannot produce, so that the paths guarding against
 // them are reachable. CreateBuffer always returns a shared_ptr and every view
@@ -554,6 +718,7 @@ inline void CheckCreateViewAfterDestroyIsRefused(IRhiDevice& device) {
                                    .array_layers = 2,
                                    .format = Format::RGBA8Unorm,
                                    .usage = TextureUsage::Sampled,
+                                   .dimension = TextureDimension::Tex2DArray,
                                    .label = "dead_tex"});
   REQUIRE(tex);
   ITextureView* before = tex->GetDefaultView();  // populates the cache
@@ -1681,6 +1846,7 @@ inline void CheckSlicedViewsHonourTheirRange(IRhiDevice& device) {
                                    .format = Format::RGBA8Unorm,
                                    .usage = TextureUsage::Sampled |
                                             TextureUsage::CopyDst,
+                                   .dimension = TextureDimension::Tex2DArray,
                                    .label = "sliced"});
   REQUIRE(tex);
 
@@ -1729,6 +1895,7 @@ inline void CheckOutOfRangeViewsAreRefused(IRhiDevice& device) {
                                    .mip_levels = 2,
                                    .format = Format::RGBA8Unorm,
                                    .usage = TextureUsage::Sampled,
+                                   .dimension = TextureDimension::Tex2DArray,
                                    .label = "small"});
   REQUIRE(tex);
   CHECK(tex->CreateView({.base_layer = 9}) == nullptr);
@@ -1826,6 +1993,7 @@ inline void CheckTextureCreationAndViews(IRhiDevice& device) {
                                    .format = Format::RGBA8Unorm,
                                    .usage = TextureUsage::Sampled |
                                             TextureUsage::CopyDst,
+                                   .dimension = TextureDimension::Tex2DArray,
                                    .label = "layers"});
   REQUIRE(tex);
   CHECK(tex->GetWidth() == 32);
@@ -2347,6 +2515,7 @@ inline void RunAllConformanceChecks(IRhiDevice& device) {
   CheckUntaggedExtendedRangeSurfaceIsRefused(device);
   CheckResizeKeepsTheFormat(device);
   CheckTextureCreationAndViews(device);
+  CheckCubeTexturesAndTheirViews(device);
   CheckComputePipelineReportsWorkgroupSize(device);
   CheckReflectionLookupByName(device);
   CheckBindingTableAcceptsEveryKind(device);

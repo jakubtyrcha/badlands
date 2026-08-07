@@ -98,6 +98,28 @@ MTLSamplerAddressMode ToMtl(AddressMode m) {
   return MTLSamplerAddressModeClampToEdge;
 }
 
+MTLTextureType ToMtlTextureType(TextureDimension d) {
+  switch (d) {
+    case TextureDimension::Tex2D: return MTLTextureType2D;
+    case TextureDimension::Tex2DArray: return MTLTextureType2DArray;
+    case TextureDimension::Cube: return MTLTextureTypeCube;
+  }
+  return MTLTextureType2D;
+}
+
+// A VIEW's type, which need not be the texture's: the prefilter renders into
+// one face through a 2D view of a cube. Auto never reaches here -- ResolveViewDesc
+// has already replaced it with a concrete dimension.
+MTLTextureType ToMtlTextureType(TextureViewDimension d) {
+  switch (d) {
+    case TextureViewDimension::Tex2D: return MTLTextureType2D;
+    case TextureViewDimension::Tex2DArray: return MTLTextureType2DArray;
+    case TextureViewDimension::Cube: return MTLTextureTypeCube;
+    case TextureViewDimension::Auto: break;
+  }
+  return MTLTextureType2D;
+}
+
 MTLLoadAction ToMtl(LoadOp op) {
   switch (op) {
     case LoadOp::Load: return MTLLoadActionLoad;
@@ -415,21 +437,32 @@ class MetalTexture final : public ITexture, public MetalResource {
     // Keyed on the whole resolved range: keying on (base_mip, base_layer)
     // alone made two views that differ only in COUNT collide, so the second
     // request silently got the first one's range.
-    const ViewKey key{r->base_mip, r->mip_count, r->base_layer, r->layer_count};
+    // The DIMENSION is part of the key, like the counts already are: two views
+    // over one range that read it differently -- a cube and a flat array -- are
+    // two views, and a key that omitted this handed the second caller the
+    // first's.
+    const ViewKey key{r->base_mip, r->mip_count, r->base_layer, r->layer_count,
+                      r->dimension};
     auto it = views_.find(key);
     if (it != views_.end()) return it->second.get();
 
     // A whole-resource view is the texture itself. Anything narrower needs a
     // real Metal view object -- without this the slicing was accepted and
     // ignored, and every view sampled the whole resource.
+    //
+    // THE TYPE COUNTS TOWARDS "WHOLE". A 2D-array view of a whole cube covers
+    // the same range but is a different texture type, so taking the shortcut
+    // would hand back a cube-typed handle for it.
+    const MTLTextureType view_type = ToMtlTextureType(r->dimension);
     id<MTLTexture> handle = texture_;
     const bool whole = r->base_mip == 0 && r->base_layer == 0 &&
                        r->mip_count == std::max(1u, desc_.mip_levels) &&
-                       r->layer_count == std::max(1u, desc_.array_layers);
+                       r->layer_count == std::max(1u, desc_.array_layers) &&
+                       view_type == texture_.textureType;
     if (!whole) {
       handle = [texture_
           newTextureViewWithPixelFormat:texture_.pixelFormat
-                            textureType:texture_.textureType
+                            textureType:view_type
                                  levels:NSMakeRange(r->base_mip, r->mip_count)
                                  slices:NSMakeRange(r->base_layer,
                                                     r->layer_count)];
@@ -455,14 +488,16 @@ class MetalTexture final : public ITexture, public MetalResource {
   void Write(uint32_t mip, uint32_t layer,
              std::span<const uint8_t> data) override {
     if (!texture_) return;
+    // Shared with Null, and it now checks the INDICES too. replaceRegion writes
+    // into the slice it is handed, so a layer past the end was a write through
+    // a bad index rather than anything Metal would report -- harmless while
+    // every texture had one layer, and reachable the moment a cube has six.
+    if (!ValidateTextureWrite(desc_, GetLabel(), mip, layer, data.size())) {
+      return;
+    }
     const uint32_t w = std::max(1u, desc_.width >> mip);
     const uint32_t h = std::max(1u, desc_.height >> mip);
     const uint32_t bpr = w * FormatByteSize(desc_.format);
-    if (data.size() < size_t(bpr) * h) {
-      spdlog::error("rhi/metal: Write to '{}' is short ({} < {})",
-                    GetLabel(), data.size(), size_t(bpr) * h);
-      return;
-    }
     [texture_ replaceRegion:MTLRegionMake2D(0, 0, w, h)
                 mipmapLevel:mip
                       slice:layer
@@ -475,7 +510,8 @@ class MetalTexture final : public ITexture, public MetalResource {
 
  private:
   // base_mip, mip_count, base_layer, layer_count -- all four, see CreateView.
-  using ViewKey = std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>;
+  using ViewKey = std::tuple<uint32_t, uint32_t, uint32_t, uint32_t,
+                             TextureViewDimension>;
 
   id<MTLTexture> texture_;
   TextureDesc desc_;
@@ -1372,12 +1408,29 @@ class MetalDevice final : public IRhiDevice {
   }
 
   TexturePtr CreateTexture(const TextureDesc& d) override {
+    // Creation-time refusal, shared with Null so the two cannot disagree about
+    // what can exist (rule 13). Before the descriptor, because a cube with five
+    // faces must not reach Metal at all.
+    if (!ValidateTextureDesc(d)) return nullptr;
+
     MTLTextureDescriptor* td = [[MTLTextureDescriptor alloc] init];
-    td.textureType = d.array_layers > 1 ? MTLTextureType2DArray : MTLTextureType2D;
+    // STATED, not inferred from the layer count. A cube and a six-layer array
+    // are different textures that the old `array_layers > 1` rule could not
+    // tell apart.
+    td.textureType = ToMtlTextureType(d.dimension);
     td.pixelFormat = ToMtl(d.format);
     td.width = d.width;
     td.height = d.height;
-    td.arrayLength = d.array_layers;
+    // A CUBE'S SIX FACES ARE IMPLICIT IN METAL. MTLTextureTypeCube requires
+    // arrayLength == 1 and gives the texture six slices anyway; arrayLength on
+    // a cube counts CUBES, which is what MTLTextureTypeCubeArray is for.
+    // Passing 6 here trips a descriptor assertion rather than returning nil, so
+    // this is not something a null check downstream could have caught.
+    //
+    // The RHI keeps array_layers == 6 regardless: GetArrayLayers(), the view
+    // ranges and Write()'s `layer` all address faces 0..5, which is exactly
+    // what Metal's own `slice` parameter takes.
+    td.arrayLength = d.dimension == TextureDimension::Cube ? 1 : d.array_layers;
     td.mipmapLevelCount = d.mip_levels;
     td.usage = ToMtlUsage(d.usage);
     // Depth and render targets must be private; everything else stays shared
