@@ -1676,6 +1676,171 @@ void MorfacClampScaffold() {
         ok, buf);
 }
 
+// --- W1. lake prefill lands EXACTLY on the PriorityFlood spill surface -----
+// SweWarmStart's step 1 sets h[i] = max(0, flood_level_m - bed_m) from the
+// SAME PriorityFlood this file already treats as the fill oracle
+// (SweFillOracle above compares against it only AFTER 600 cycles of
+// simulated rain; this checks the warm start's own construction directly,
+// with zero simulation in between). bed+h must therefore equal the spill
+// surface to float rounding, not merely approach it -- "near-exact by
+// construction" is the brief's own phrase for this.
+void WarmStartLakeLevel() {
+  Params p;
+  p.res = 32;
+  p.world_m = 64.0f * float(p.res);
+  p.relief_m = 1.0f;
+  p.bowl = true;
+  p.bowl_rim_m = 20.0f;
+  p.bowl_well_m = 15.0f;
+  p.bowl_sigma_frac = 0.15f;
+
+  Grid g(p.res);
+  InitTerrain(g, p);  // InitBowl: ramp + gaussian well -> one closed basin
+
+  std::vector<float> filled;
+  std::vector<int32_t> outlet_of;
+  PriorityFlood(g, filled, outlet_of);
+
+  SweWarmStart(g, p);
+
+  // A tight 3x3 block around the well centre -- deep interior of a basin
+  // whose e-folding radius (bowl_sigma_frac * world_m) is ~4.8 cells, so
+  // this stays well clear of the shoreline. That matters: step 2 (channel
+  // depth) is deliberately excluded from true lake-interior cells, but the
+  // shoreline ring can legitimately carry a channel depth DEEPER than the
+  // lake prefill (a real spillway outflow) -- see SweWarmStart's own
+  // comment -- so only the interior is asserted here.
+  const int cx = p.res / 2, cy = p.res / 2;
+  double max_abs_err = 0.0;
+  int checked = 0;
+  for (int dy = -1; dy <= 1; ++dy)
+    for (int dx = -1; dx <= 1; ++dx) {
+      const size_t i = g.idx(cx + dx, cy + dy);
+      const float spill_m = filled[i] * p.relief_m;
+      const float surface_m = g.height[i] * p.relief_m + g.h[i];
+      max_abs_err =
+          std::max(max_abs_err, double(std::fabs(surface_m - spill_m)));
+      ++checked;
+    }
+
+  char buf[200];
+  std::snprintf(buf, sizeof(buf),
+                "max|surface-spill| over %d interior cells = %.3e m", checked,
+                max_abs_err);
+  // Float rounding only (bed_m + (spill_m - bed_m) vs spill_m, both computed
+  // from the same floats h[i] itself used): 1e-4 m is many orders above
+  // float32 noise at this ~20 m scale (ULP ~1e-6) and many orders below
+  // anything a real physical effect could produce.
+  Check("WarmStartLakeLevel: interior bed+h == PriorityFlood spill surface",
+        max_abs_err < 1e-4, buf);
+}
+
+// --- W2. warm start is close to the fluid solver's OWN steady state --------
+// A carved valley (slope + V-convergence) feeding a real depression
+// partway down, NOT at the outflow edge -- water generated upslope must fill
+// the basin before it can continue downhill as a channel. SweWarmStart, then
+// a modest run of FLUID-ONLY cycles (no re-seeding) with rain at the real
+// climate rate (Params' own default runoff_m_per_yr/evaporation_m_per_yr,
+// not SweFillOracle's synthetic-fast 800 m/yr): if the warm start is close
+// to the fluid solver's own steady state, the water surface should barely
+// move, because there is almost nothing left for the solver to DO.
+//
+// This is also the integration proof that Task 4's fluid passes accept a
+// realistic (not hand-crafted-flat) initial state without misbehaving --
+// RunSweCycles must return ok=true throughout.
+void WarmStartProximity() {
+  Params p;
+  p.res = 48;
+  p.world_m = 32.0f * float(p.res);  // 1536 m, 32 m cells
+  p.relief_m = 1.0f;
+  p.terrain = Params::Terrain::Valley;
+  p.bowl_rim_m = 30.0f;        // 30 m fall, y=0 -> outflow edge
+  p.bowl_well_m = 8.0f;        // V-convergence magnitude
+  p.bowl_sigma_frac = 0.12f;   // reused below as the carved pit's sigma
+
+  Grid g(p.res);
+  InitTerrain(g, p);  // InitAnalytic's Valley: ramp down +y plus a V in x
+
+  // Carve a real depression into the valley floor, 62% of the way down (well
+  // short of the outflow edge) -- "slope feeding a depression", not a basin
+  // sitting at the map's own low point where InitBowl already puts one.
+  const float cell_m = p.world_m / float(p.res);
+  const float pit_x = 0.5f * p.world_m, pit_y = 0.62f * p.world_m;
+  const float sigma_m = p.bowl_sigma_frac * p.world_m;
+  const float pit_depth_m = 12.0f;
+  for (int y = 0; y < g.n; ++y)
+    for (int x = 0; x < g.n; ++x) {
+      const float wx = x * cell_m - pit_x, wy = y * cell_m - pit_y;
+      const float r2 = wx * wx + wy * wy;
+      const float pit = pit_depth_m * std::exp(-r2 / (2.0f * sigma_m * sigma_m));
+      g.height[g.idx(x, y)] -= pit / p.relief_m;
+    }
+
+  SweWarmStart(g, p);
+
+  std::vector<float> surface0(g.cells);
+  for (size_t i = 0; i < g.cells; ++i)
+    surface0[i] = g.height[i] * p.relief_m + g.h[i];
+
+  // Rain at the REAL rate -- Params' own defaults (runoff_m_per_yr = 1,
+  // evaporation_m_per_yr = 0.8), the actual climate clock phase-1 runs on,
+  // not a synthetic-fast rate. Left untouched deliberately.
+  const int cycles = 50;
+  SweRunResult r = RunSweCycles(g, p, cycles);
+
+  double linf = 0.0;
+  size_t worst_i = 0;
+  for (size_t i = 0; i < g.cells; ++i) {
+    const float surface1 = g.height[i] * p.relief_m + g.h[i];
+    const double d = std::fabs(double(surface1) - double(surface0[i]));
+    if (d > linf) { linf = d; worst_i = i; }
+  }
+
+  // Bound: 0.03 m, chosen from MEASURED numbers on this exact fixture, not
+  // picked to just clear the bar:
+  //   - direct rain accumulation over the run's own simulated time is
+  //     negligible by comparison. At this fixture's scale (a several-metre
+  //     deep prefilled basin, 32 m cells) the CFL dt is a few seconds, so 50
+  //     cycles x 50 substeps covers on the order of 1e4 simulated seconds --
+  //     against a real runoff rate of ~3e-8 m/s that is a few mm of NEW rain
+  //     globally, an order of magnitude below the bound on its own. The
+  //     drift this test measures is therefore almost entirely the warm
+  //     start's own OWN construction residual relaxing, not new water.
+  //   - THIS BOUND CAUGHT A REAL BUG DURING DEVELOPMENT, which is why the
+  //     number is 0.03 m and not something looser: step 2's first attempt
+  //     reused Descend's regime-width Manning closure verbatim (width =
+  //     channel_width_coeff*sqrt(Q), a SUB-GRID channel narrower than one
+  //     cell -- correct for a particle walking a continuous position, but
+  //     SweFlux has no such concept; its own A_pipe (SweFlux's comment) is
+  //     `cell_m * own_h`, i.e. it already conveys across the FULL CELL). On
+  //     this exact fixture that mismatch measured 0.123 m of drift --
+  //     4x over this bound -- concentrated exactly at the first channel cell
+  //     below the lake's spill (seeded 0.121 m there, relaxed to 0.020 m by
+  //     cycle 300: a 6x overshoot). Using `cell_m` as the conveyance width
+  //     instead (what SweWarmStart ships with) measures 0.0154 m on the same
+  //     fixture -- an 8x reduction. This test is what caught it; the bound
+  //     stays tight so a regression back to the wrong model fails loudly.
+  //   - Honesty about what this does NOT cleanly catch: a uniform 2x
+  //     rescaling of the (already-correct) depth formula measures ~0.029 m
+  //     over-primed -- just under this bound, not comfortably separated. A
+  //     uniform UNDER-estimate is even less visible over a short window
+  //     (measured ~0.007 m at 0.5x): the correction is rate-limited by how
+  //     much water the wet-dry front can actually move in `cycles` substeps
+  //     (mass conservation), not by how wrong the estimate was, so an
+  //     under-primed channel looks deceptively close-to-correct here. What
+  //     this bound reliably guards against is a WRONG PHYSICAL MODEL for the
+  //     conveyance (the bug above, and anything of similar magnitude), not
+  //     an arbitrary uniform rescaling of a structurally-correct one.
+  const bool ok = r.ok && linf < 0.03;
+  char buf[260];
+  std::snprintf(buf, sizeof(buf),
+                "status ok=%d; L-inf water-surface drift over %d cycles = "
+                "%.4f m (worst cell %zu)",
+                r.ok, cycles, linf, worst_i);
+  Check("WarmStartProximity: warm start ~ fluid solver's own steady state",
+        ok, buf);
+}
+
 int RunAll() {
   std::printf("protogen sanity tests (small grids, production 16 m cells)\n");
   MassConservation();
@@ -1718,6 +1883,10 @@ int RunAll() {
   SweLakeMomentumDissipation();
   SweManningConvergence();
   MorfacClampScaffold();
+
+  std::printf("\n  phase-0 -> phase-1 warm start (Task 5)\n");
+  WarmStartLakeLevel();
+  WarmStartProximity();
 
   std::printf("\n  %d passed, %d failed, %d pending", g_pass, g_fail, g_pending);
   if (g_pending_ready)

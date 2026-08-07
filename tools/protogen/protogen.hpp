@@ -444,6 +444,20 @@ void SweFlux(Grid& g, const Params& p, float dt);
 void SweDepth(Grid& g, const Params& p, float dt);
 void SweVelocity(Grid& g, const Params& p);
 
+// The phase-0 -> phase-1 handoff (Task 5). ONE-SHOT plain CPU code, run
+// EXACTLY ONCE between phase-0's finished bed and phase-1's first
+// RunSweCycles call -- NOT a Jacobi pass, and deliberately NOT part of the
+// SweFlux/SweDepth/SweVelocity dispatch list above (that list is the frozen
+// future GPU dispatch order; this runs once on the CPU, off that list, by
+// design). Starting phase 1 bone dry means waiting on real rain
+// (`runoff_m_per_yr`, ~1 m/yr) to fill even a modest lake from nothing, which
+// is on the order of 1e8 substeps; this instead seeds `h` near the true
+// steady state -- lakes prefilled to their spill level, channels prefilled to
+// a Manning normal depth -- so a production run's fluid cycles MAINTAIN the
+// water surface rather than spend nearly all of it filling one. See
+// protogen_swe.cpp for the two-step derivation.
+void SweWarmStart(Grid& g, const Params& p);
+
 // Outcome of RunSweCycles: `ok` false means a tripwire fired -- non-finite
 // state or a CFL-derived dt collapsed below `dt_floor_s`. `aborted_cycle`/
 // `reason` name where and why, so a caller (test or, from Task 7, the

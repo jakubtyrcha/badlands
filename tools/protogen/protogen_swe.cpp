@@ -44,6 +44,9 @@
 #include "protogen.hpp"
 
 #include "core/parallel.hpp"
+#include "mapgen/erosion.hpp"
+#include "mapgen/field2d.hpp"
+#include "mapgen/hydrology.hpp"
 
 using namespace pg;
 
@@ -379,6 +382,166 @@ void SweVelocity(Grid& g, const Params& p) {
       g.vely[i] = (g.flux[i][2] - g.flux[i][3]) / denom;
     }
   });
+}
+
+// ---------------------------------------------------------------- warm start
+
+// The phase-0 -> phase-1 handoff (Task 5). ONE-SHOT plain CPU code, called
+// EXACTLY ONCE between phase-0's finished bed and phase-1's first
+// RunSweCycles call -- see the "why" in protogen.hpp's declaration. NOT a
+// Jacobi pass and deliberately NOT on the SweFlux/SweDepth/SweVelocity
+// dispatch list above: that list is the frozen future GPU dispatch order,
+// this runs once on the CPU before it, using ordinary priority-flood/D8
+// algorithms that have no GPU-shaped equivalent here.
+void SweWarmStart(Grid& g, const Params& p) {
+  const int n = g.n;
+  const float cell_m = p.world_m / float(p.res);
+
+  // --- step 1: lakes ---------------------------------------------------
+  //
+  // PriorityFlood (protogen.cpp) raises every cell to the lowest elevation
+  // on any path to the map edge -- its spill level. `filled` and `g.height`
+  // are the SAME dimensionless-times-relief_m units used everywhere else in
+  // this file, so `(filled[i] - g.height[i]) * relief_m` is the depth a lake
+  // sits at, at exact hydrostatic fill.
+  //
+  // filled[i] >= g.height[i] always (PriorityFlood only ever raises a cell),
+  // so `max(0, ...)` is a no-op algebraically; it stays explicit only as a
+  // guard against float rounding making the difference a few ULPs negative
+  // at a cell PriorityFlood left untouched. Outside every depression
+  // flood_level_m == bed_m exactly (PriorityFlood does not touch a cell it
+  // does not flood), so this same expression already gives h = 0 there with
+  // no separate "is this cell in a depression" branch needed.
+  std::vector<float> filled;
+  std::vector<int32_t> outlet_of;  // unused here; PriorityFlood's other output
+  PriorityFlood(g, filled, outlet_of);
+
+  for (size_t i = 0; i < g.cells; ++i) {
+    const float bed_m = g.height[i] * p.relief_m;
+    const float flood_level_m = filled[i] * p.relief_m;
+    g.h[i] = std::max(0.0f, flood_level_m - bed_m);
+  }
+
+  // --- step 2: channels -------------------------------------------------
+  //
+  // Route D8 flow over the surface step 1 just produced (the FLOODED
+  // surface, not the raw bed) and turn its per-cell drainage area into a
+  // discharge, then a Manning channel depth. Routing on the flooded surface
+  // rather than the raw bed is what makes a null lake_tag safe here: every
+  // depression the raw bed had has already been leveled to its spill height
+  // by step 1, so this surface has no depressions of its own left for
+  // route_flow's internal priority-flood to invent an exit through (see
+  // route_flow's own header comment on why an untagged shallow margin is
+  // otherwise unsafe -- that risk is specifically about REAL depressions in
+  // the input, and there are none left here by construction). The only
+  // "flat" spots route_flow's internal flood can still find are the lake
+  // tops step 1 already leveled correctly; falling back to its own in_lake
+  // flags those and keeps them on the flood-tree receiver rather than
+  // steepest descent, which is exactly correct on a flat lake top (there is
+  // no real gradient to descend) and funnels each lake's accumulated area
+  // toward its one real spill point -- reproducing step 1's own basin
+  // structure rather than fighting it.
+  badlands::mapgen::Field2D<float> surface(n, n);
+  for (size_t i = 0; i < g.cells; ++i) surface.data[i] = filled[i] * p.relief_m;
+
+  const badlands::mapgen::FlowRouting routing = badlands::mapgen::route_flow(
+      surface, cell_m, badlands::mapgen::kEpsilonM, /*lake_tag=*/nullptr);
+  const float cell_area_m2 = cell_m * cell_m;
+  const badlands::mapgen::Field2D<float> drainage_area_m2 =
+      badlands::mapgen::accumulate_drainage(routing, cell_area_m2);
+
+  const float runoff_rate_mps = p.runoff_m_per_yr / float(kSecondsPerYear);
+  const float diag_m = cell_m * 1.41421356f;  // sqrt(2)
+
+  for (int y = 0; y < n; ++y) {
+    for (int x = 0; x < n; ++x) {
+      const size_t i = g.idx(x, y);
+      // In-lake cells are excluded on purpose, not merely left to fall out
+      // of the arithmetic below: on the flooded surface's flat lake tops the
+      // only "slope" route_flow's receiver graph can report is the
+      // epsilon-per-BFS-step tilt its OWN flood used to break ties, which is
+      // bookkeeping, not a physical gradient. Feeding that into Manning's
+      // S^-0.6 would manufacture an arbitrarily large "channel" depth in the
+      // middle of a lake that already sits at the exactly-correct level from
+      // step 1 -- precisely the epsilon-leakage step 1's exactness would
+      // otherwise be undone by.
+      if (routing.in_lake[i]) continue;
+
+      const int32_t rcv = routing.receiver[i];
+      if (rcv < 0) continue;  // border: base level, no channel to seed
+
+      const float Q = drainage_area_m2.data[i] * runoff_rate_mps;
+      if (!(Q > 0.0f)) continue;
+
+      const int rx = int(rcv) % n, ry = int(rcv) / n;
+      const bool diagonal = (rx != x) && (ry != y);
+      const float dist_m = diagonal ? diag_m : cell_m;
+      const float drop_m = routing.water_level[i] - routing.water_level[size_t(rcv)];
+      // Floored exactly like Descend's S_h (protogen.cpp's Manning depth
+      // block, "river_graph's kMinChannelSlope") and river_graph.hpp's own
+      // kMinChannelSlope: Manning divides by sqrt(S), so an unfloored flat
+      // reach (a receiver step whose flood levels tie, or float noise on an
+      // otherwise-flat dry reach) would give an infinite depth rather than a
+      // merely-large one. Same value, 1e-4, for the same reason.
+      const float S = std::max(drop_m / dist_m, 1e-4f);
+
+      // Manning's normal-depth closure, d = (n*q/sqrt(S))^0.6 with q the
+      // UNIT discharge (m^2/s) -- the same closed form Descend uses
+      // off-channel (protogen.cpp) and SweManningConvergence (this file's S8
+      // test) validates SweFlux's OWN dynamics against. Two deliberate
+      // departures from Descend's literal instance of that formula:
+      //
+      // 1. CONVEYANCE WIDTH is `cell_m`, NOT Descend's regime width
+      //    `channel_width_coeff*sqrt(Q)`. Descend's regime width models a
+      //    sub-grid channel narrower than one cell, appropriate for a
+      //    particle walking a continuous position. SweFlux has no such
+      //    concept: its own A_pipe is `cell_m * own_h` (see SweFlux's
+      //    comment), i.e. it already treats a cell's full width as the
+      //    conveyance -- so seeding a depth calibrated for a NARROWER
+      //    channel systematically overshoots what SweFlux's own steady
+      //    state needs, and every seeded cell downstream of any real
+      //    confluence has to visibly relax back down before
+      //    WarmStartProximity's water surface stops moving. Measured on that
+      //    fixture (a lake spilling into a channelled valley, cell_m = 32 m):
+      //    the regime-width formula measured 0.123 m of L-inf drift over 50
+      //    fluid-only cycles, concentrated exactly at the first post-spill
+      //    channel cell (seeded 0.121 m, relaxed to 0.020 m by cycle 300 --
+      //    a 6x overshoot). Using `cell_m` as the width instead measured
+      //    0.015 m over the same 50 cycles, an 8x improvement, because it is
+      //    seeding the SAME quantity SweFlux's own dynamics converge to
+      //    rather than a different physical model's answer.
+      // 2. ROUGHNESS is the PHASE-1 `p.swe_manning_n`, not phase-0's
+      //    `p.manning_n`: this depth seeds phase-1's `h`, and the fluid
+      //    cycles that run after this warm start drag against swe_manning_n
+      //    (SweFlux's B = g*swe_manning_n^2/h^(4/3)), so using that SAME
+      //    roughness here is what makes the seeded depth close to what
+      //    those cycles would themselves settle to at this discharge. The
+      //    two Manning knobs are deliberately independent (see
+      //    Params::swe_manning_n's own comment) and share a default value
+      //    today only by coincidence.
+      const float q = Q / cell_m;
+      const float manning_depth_m =
+          std::pow(p.swe_manning_n * q / std::sqrt(S), 0.6f);
+
+      // Channel depth may raise h but never lower it: a channel cell right
+      // at a lake's shoreline can compute a depth shallower than the lake's
+      // own exact prefill there (step 1 already got that cell right), and
+      // must not be allowed to undercut it.
+      float& h = g.h[i];
+      if (manning_depth_m > h) h = manning_depth_m;
+    }
+  }
+
+  // Face fluxes start at exactly zero. Safe, not merely convenient, FROM a
+  // well-balanced start: SweWellBalancedness (this file's own S1 test)
+  // proves a flat lake with zero flux stays exactly flat and exactly still,
+  // and step 1 above hands SweFlux precisely that inside every lake -- a
+  // spatially uniform head with nothing to accelerate a spurious flux from
+  // on the very first substep. Outside lakes, a channel cell's flux starts
+  // at zero too; SweFlux's own acceleration term (dt*g*A_over_L*dhead) picks
+  // it up from the head difference step 2 just seeded, which is what
+  // WarmStartProximity checks stays small rather than assumed.
+  std::fill(g.flux.begin(), g.flux.end(), std::array<float, 4>{0.f, 0.f, 0.f, 0.f});
 }
 
 }  // namespace pg
