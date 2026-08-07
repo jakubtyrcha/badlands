@@ -2168,6 +2168,7 @@ add_library(shapeshifter_core STATIC
     ${SHAPESHIFTER_DIR}/core/src/metal_impl.cpp
     ${SHAPESHIFTER_DIR}/core/src/navigation.cpp
     ${SHAPESHIFTER_DIR}/core/src/picking.cpp
+    ${SHAPESHIFTER_DIR}/core/src/rhi_pipelines.cpp
     ${SHAPESHIFTER_DIR}/core/src/renderer.cpp
     ${SHAPESHIFTER_DIR}/core/src/scene.cpp
     ${SHAPESHIFTER_DIR}/core/src/sdf.cpp
