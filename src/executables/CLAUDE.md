@@ -9,8 +9,17 @@ Each app owns an `AppView` and builds its scene from the world itself; the app s
 | `badlands_ai_sandbox` | the AI harness, driven by a `--mode` |
 | `badlands_viewer` | model/LOD viewer, plus the character/skeleton viewer (`--character`) |
 | `badlands_mapview` | the map tool (see `src/mapgen/CLAUDE.md`) |
+| `badlands_patch_export` | the map tool's headless half: coarse-world windows → height/biome/hillshade PNGs |
 | `badlands_rhi_lab` | the RHI/Slang/visibility-buffer MVP — PNG by default, `--window` for a live camera |
 | `badlands_object_viewer` | the RHI + render-graph successor to `badlands_viewer` |
+
+## `badlands_patch_export` has no `AppView`, and no GPU at all
+It links `badlands_patch_providers` plus the `assets` crate for the PNG write —
+no engine, no SDL, no Dawn. It lives here because it is an app with CLI flags,
+not because it renders. It is the offline half of the map tool: the same
+`CoarseWorldPatchSource::Fetch` mapview uses, written to images instead of a
+swapchain, so a stage-2 change can be judged without a display. See
+`patch_export/README.md`.
 
 ## The RHI apps are not `AppView`s, and they share a shell
 `badlands_rhi_lab` and `badlands_object_viewer` build on `badlands_rhi` (+
