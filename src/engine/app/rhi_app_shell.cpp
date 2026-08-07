@@ -2,11 +2,10 @@
 
 #include <algorithm>
 
-#include <SDL3/SDL_metal.h>
 #include <spdlog/spdlog.h>
 
+#include "engine/app/platform_surface.hpp"
 #include "engine/app/surface_size.hpp"
-#include "engine/rhi/metal/metal_rhi.hpp"
 
 namespace badlands::rhi_app {
 
@@ -32,12 +31,11 @@ std::unique_ptr<AppShell> AppShell::Create(IRhiDevice& device,
     return nullptr;
   }
 
-  SDL_MetalView view = SDL_Metal_CreateView(shell->window_);
-  if (!view) {
-    spdlog::error("rhi_app: SDL_Metal_CreateView failed: {}", SDL_GetError());
-    return nullptr;
-  }
-  shell->metal_view_ = view;
+  // THE ONLY PER-OS STEP in this file. Everything below -- the resize
+  // coalescing, the focus dance, the pacing -- is the same on both targets,
+  // which is why the seam is three functions rather than a framework.
+  shell->surface_ = CreateNativeSurface(shell->window_);
+  if (!shell->surface_.Valid()) return nullptr;  // it logged why
 
   // PIXELS, not points. On a HiDPI display these differ by the backing scale,
   // and using points renders at half resolution into a full-size drawable --
@@ -67,7 +65,7 @@ std::unique_ptr<AppShell> AppShell::Create(IRhiDevice& device,
   }
 
   shell->swapchain_ = device.CreateSwapchain(
-      {.native_window = SDL_Metal_GetLayer(view),
+      {.native_window = shell->surface_.handle,
        .width = shell->applied_width_,
        .height = shell->applied_height_,
        .format = format,
@@ -99,9 +97,9 @@ ColorSpace AppShell::SurfaceColorSpace() const {
 }
 
 AppShell::~AppShell() {
-  // Order matters: the swapchain holds the layer the view owns.
+  // Order matters: the swapchain holds the layer the native surface owns.
   swapchain_.reset();
-  if (metal_view_) SDL_Metal_DestroyView(SDL_MetalView(metal_view_));
+  DestroyNativeSurface(surface_);
   if (window_) SDL_DestroyWindow(window_);
   SDL_Quit();
 }
@@ -125,10 +123,12 @@ RunStats AppShell::Run(const AppShellCallbacks& cb, uint64_t max_frames) {
   const double tick_freq = double(SDL_GetPerformanceFrequency());
 
   while (running_) {
-    // Metal hands back autoreleased objects every frame -- nextDrawable and
-    // each command buffer. Without a pool per frame they accumulate for the
-    // life of the run and it looks like a GPU memory leak.
-    metal::AutoreleasePoolScope pool;
+    // Empty on Windows, an autorelease pool on macOS: Metal hands back
+    // autoreleased objects every frame -- nextDrawable and each command buffer
+    // -- and without a pool per frame they accumulate for the life of the run
+    // and look exactly like a GPU memory leak. The emptiness of the other arm
+    // is what keeps this loop free of #if.
+    PlatformFrameScope frame_scope;
 
     SDL_Event e;
     while (SDL_PollEvent(&e)) {

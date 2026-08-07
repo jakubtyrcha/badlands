@@ -275,11 +275,31 @@ target_include_directories(badlands_ibl PUBLIC
 # SDL — the RHI runs headless, and a swapchain is only one of its consumers.
 # APPLE-gated because acquiring a native surface is per-platform; the loop above
 # it is not, so DX12 adds an arm rather than a second shell.
+# The target itself is NOT platform-gated any more -- only its per-OS arm is.
+# That is the difference between "DX12 adds an arm" and "DX12 needs a second
+# shell": the loop, the app layer and the ImGui composite all compile on both.
+add_library(badlands_rhi_app STATIC
+    src/engine/app/rhi_app_shell.cpp
+    src/engine/app/rhi_app.cpp)
 if(APPLE)
-    add_library(badlands_rhi_app STATIC src/engine/app/rhi_app_shell.cpp)
-    target_link_libraries(badlands_rhi_app PUBLIC badlands_rhi SDL3::SDL3)
-    target_include_directories(badlands_rhi_app PUBLIC ${CMAKE_SOURCE_DIR}/src)
+    target_sources(badlands_rhi_app PRIVATE
+        src/engine/app/platform_surface_mac.mm)
+    set_source_files_properties(src/engine/app/platform_surface_mac.mm
+        PROPERTIES COMPILE_FLAGS "-fno-objc-arc")
+elseif(WIN32)
+    target_sources(badlands_rhi_app PRIVATE
+        src/engine/app/platform_surface_win.cpp)
 endif()
+target_link_libraries(badlands_rhi_app PUBLIC
+    badlands_rhi badlands_render_graph badlands_slang badlands_imgui_rhi
+    assets SDL3::SDL3)
+target_sources(badlands_rhi_app PRIVATE
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp)
+target_include_directories(badlands_rhi_app PUBLIC
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
+    ${CMAKE_SOURCE_DIR}/src/crates/assets/include)
 
 
 if(APPLE)

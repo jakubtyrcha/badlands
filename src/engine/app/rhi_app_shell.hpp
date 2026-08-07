@@ -24,9 +24,10 @@
 // A second copy of that list is a second copy of every one of those bugs, fixed
 // in one place and not the other.
 //
-// PLATFORM: Metal only for now, because acquiring a native surface is
-// per-platform (SDL_Metal_CreateView here, an HWND + swapchain for DX12). The
-// loop above it is not, so DX12 adds an arm rather than a second shell.
+// PLATFORM: the per-OS parts live in platform_surface.hpp -- the native
+// surface, the per-frame scope, and the backend choice. Nothing in this file is
+// Metal-specific any more, which is what makes "DX12 adds an arm rather than a
+// second shell" a fact rather than an intention.
 
 #include <cstdint>
 #include <functional>
@@ -35,6 +36,7 @@
 
 #include <SDL3/SDL.h>
 
+#include "engine/app/platform_surface.hpp"
 #include "engine/rhi/rhi_device.hpp"
 
 namespace badlands::rhi_app {
@@ -161,7 +163,7 @@ class AppShell {
 
   rhi::IRhiDevice* device_ = nullptr;
   SDL_Window* window_ = nullptr;
-  void* metal_view_ = nullptr;  // SDL_MetalView; opaque so this header is plain
+  NativeSurface surface_;
   rhi::SwapchainPtr swapchain_;
 
   uint32_t applied_width_ = 0;
