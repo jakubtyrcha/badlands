@@ -25,13 +25,19 @@
 namespace badlands::mapgen {
 
 // The metre<->code mapping for an export. Recorded in the tool's sidecar so a
-// consumer can decode back to metres, and SHARED ACROSS A BATCH so windows stay
-// comparable: per-image autoscale silently makes two windows of the same world
-// unreadable against each other.
+// consumer can decode back to metres -- an autoscaled image whose range is not
+// written down is a picture, not data.
 struct ExportRange {
   float lo_m = 0.0f;
   float hi_m = 0.0f;
 };
+
+// Full-scale depth for the water channel and the hillshade's water tint. FIXED,
+// never derived from a run's own maximum: blue has to mean the same depth in
+// every image ever exported, or two runs cannot be read against each other.
+// Height has no such constant available -- worlds differ by hundreds of metres,
+// so its range is per-image and recorded instead.
+inline constexpr float kExportWaterDepthM = 8.0f;
 
 // Height as grayscale with the WATERMAP LAYERED ON TOP in the blue channel:
 //

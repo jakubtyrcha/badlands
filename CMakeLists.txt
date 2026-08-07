@@ -784,6 +784,20 @@ add_executable(badlands_mapview
     src/executables/mapview/main_mapview.cpp)
 target_link_libraries(badlands_mapview PRIVATE badlands_mapview_view badlands_patch_providers)
 
+# badlands_patch_export: the map tool's OFFLINE half -- cuts windows out of a
+# coarse world through the same Fetch mapview uses and writes them as images.
+# Headless and GPU-free: it links the providers plus the `assets` crate for the
+# PNG write, and nothing else. The PNG dependency stops HERE, which is what
+# keeps it out of src/mapgen/ (see patch_export.hpp).
+add_executable(badlands_patch_export
+    src/executables/patch_export/main.cpp)
+target_link_libraries(badlands_patch_export PRIVATE badlands_patch_providers assets)
+target_include_directories(badlands_patch_export PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/crates/assets/include)
+if(APPLE)
+    target_link_options(badlands_patch_export PRIVATE "-Wl,-ld_new")
+endif()
+
 # badlands_terrain_cluster_tests: Catch2 invariants for the terrain cluster-LOD
 # DAG build (error monotonicity, sphere nesting, crack-free seams, grid
 # arithmetic). Pure CPU on synthetic MapData heightfields — compiles just the

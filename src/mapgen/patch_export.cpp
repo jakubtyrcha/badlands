@@ -16,10 +16,6 @@ namespace {
 // picked to be readable, not physical -- they only ever reach an image. The
 // depth scales are in metres so they stay meaningful across resolutions.
 
-// Full-scale depth for the hillshade's water tint: past this a lake is drawn at
-// its darkest and stops carrying information.
-constexpr float kWaterTintDepthM = 8.0f;
-
 constexpr Rgb kLandTone{190, 195, 185};   // dry ground, before shading
 constexpr Rgb kWaterShallow{72, 132, 172};
 constexpr Rgb kWaterDeep{16, 40, 70};
@@ -148,7 +144,7 @@ std::vector<uint8_t> encode_hillshade_rgba(const PatchData& patch) {
         // Water is drawn FLAT: it is a surface of its own, and relighting it
         // with the bed's normal would print the bed's relief onto a lake.
         put(rgba, i, lerp_rgb(kWaterShallow, kWaterDeep,
-                              depth / kWaterTintDepthM));
+                              depth / kExportWaterDepthM));
         continue;
       }
       const glm::vec3 n = glm::normalize(glm::vec3(
