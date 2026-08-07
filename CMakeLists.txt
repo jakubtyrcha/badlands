@@ -2559,6 +2559,7 @@ add_executable(shapeshifter_core_tests
     ${SHAPESHIFTER_DIR}/tests/core/lines_tests.cpp
     ${SHAPESHIFTER_DIR}/tests/core/mesh_job_tests.cpp
     ${SHAPESHIFTER_DIR}/tests/core/navigation_tests.cpp
+    ${SHAPESHIFTER_DIR}/tests/core/pack_baseline_tests.cpp
     ${SHAPESHIFTER_DIR}/tests/core/picking_tests.cpp
     ${SHAPESHIFTER_DIR}/tests/core/renderer_tests.cpp
     ${SHAPESHIFTER_DIR}/tests/core/scene_tests.cpp
