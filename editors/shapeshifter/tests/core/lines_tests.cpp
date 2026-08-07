@@ -10,6 +10,7 @@
 #include "lines.h"
 #include "sdf.h"   // evaluate_scene_sdf -- the zero-set cross-check below
 #include "scene.h"
+#include "placement_helper.h"
 
 using namespace sq;
 

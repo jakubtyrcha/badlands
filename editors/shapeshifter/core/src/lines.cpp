@@ -70,11 +70,13 @@ void append_ring(std::vector<LineVertex>& out, const simd_float4x4& m, simd_floa
 //
 // Sound because every shape here is convex, hence star-shaped about its centre,
 // so each ray meets the surface exactly once.
-std::vector<simd_float2> sample_profile(const Node& node) {
-    const SdfNode sn = local_sdf_node(node);
-    // abs, matching sdf_safe_half_extents: a negative scale component mirrors
-    // the shape rather than inverting it, and the profile must agree.
-    const simd_float3 scale = simd_abs(node.scale); // unit-local -> the node's rigid frame
+std::vector<simd_float2> sample_profile(const Node& node, simd_float3 half_extents) {
+    const SdfNode sn = local_sdf_node(node, half_extents);
+    // The full extent, since the profile is sampled in UNIT-local coordinates
+    // and this maps them into the node's rigid frame. Already absolute and
+    // already carrying any inherited uniform scale, because it came from a
+    // resolved placement.
+    const simd_float3 scale = 2.0f * half_extents;
     // Every shape is inscribed in the unit box, so no surface sits beyond its
     // half-diagonal; 0.9 brackets that with room to spare.
     constexpr float kOutside = 0.9f;
@@ -269,8 +271,8 @@ void append_octahedron_edges(std::vector<LineVertex>& out, const simd_float4x4& 
 // a capsule and a vesica is entirely in that profile, so nothing here has to
 // know which it is drawing.
 void append_lathe_shape(std::vector<LineVertex>& out, const simd_float4x4& m, simd_float4 color,
-                        const Node& node) {
-    append_lathe(out, m, color, sample_profile(node), 2);
+                        const Node& node, simd_float3 half_extents) {
+    append_lathe(out, m, color, sample_profile(node, half_extents), 2);
     append_ring(out, m, color, 0.0f, 0.5f, kShapeRingSegments);
 }
 
@@ -689,21 +691,24 @@ std::vector<LineVertex> build_scene_lines(const SceneDocument& doc, int32_t sele
         } else {
             continue; // unselected Add: already visible live via the raymarch
         }
-        append_node_wireframe(out, node, color, eye_world);
+        append_node_wireframe(out, node, doc.placement(node.id), color, eye_world);
     }
     return out;
 }
 
-void append_node_wireframe(std::vector<LineVertex>& out, const Node& node, simd_float4 color,
+void append_node_wireframe(std::vector<LineVertex>& out, const Node& node,
+                           const NodePlacement& placement, simd_float4 color,
                            simd_float3 eye_world) {
-    // simd_abs, NOT node.world_from_local(). The evaluator measures against
+    // half_extents rather than the node's raw scale, and the difference is
+    // load-bearing twice over. The evaluator measures against
     // abs(half_extents) (sdf_safe_half_extents), so a negative scale component
-    // mirrors the solid; passing the raw scale here would flip the outline
-    // instead and draw an asymmetric shape -- a cone, a pyramid -- tip-down
-    // against a tip-up surface. Unreachable through the UI, where every drag
-    // clamps to kNodeScaleMin, but SceneDocument::add takes a Node verbatim.
-    const simd_float4x4 m = trs_matrix(node.position, node.rotation, simd_abs(node.scale));
-    const simd_float3 half = 0.5f * simd_abs(node.scale);
+    // mirrors the solid; drawing the raw scale would flip the outline instead
+    // and put an asymmetric shape -- a cone, a pyramid -- tip-down against a
+    // tip-up surface. And the box is the node's own scale times whatever
+    // uniform scale it inherits, which only the document can resolve.
+    const simd_float3 half = placement.half_extents;
+    const simd_float4x4 m =
+        trs_matrix(placement.frame.position, placement.frame.rotation, 2.0f * half);
     const float param = node.shape_param;
     // Zero-roundness threshold: below it the rounded builders would draw every
     // edge twice for no visible gain, so the sharp forms take over.
@@ -715,7 +720,7 @@ void append_node_wireframe(std::vector<LineVertex>& out, const Node& node, simd_
             break;
         case Shape::Sphere:     append_sphere_outline(out, m, color, eye_world); break;
         case Shape::Cone:       append_cone_edges(out, m, color, param); break;
-        case Shape::Capsule:    append_lathe_shape(out, m, color, node); break;
+        case Shape::Capsule:    append_lathe_shape(out, m, color, node, half); break;
         case Shape::Octahedron:
             if (rounded) { append_rounded_octahedron_edges(out, m, color, param); }
             else { append_octahedron_edges(out, m, color); }
@@ -725,7 +730,7 @@ void append_node_wireframe(std::vector<LineVertex>& out, const Node& node, simd_
             append_prism_edges(out, m, color,
                                static_cast<int>(std::lround(std::clamp(param, 3.0f, 12.0f))));
             break;
-        case Shape::Vesica:     append_lathe_shape(out, m, color, node); break;
+        case Shape::Vesica:     append_lathe_shape(out, m, color, node, half); break;
     }
 }
 

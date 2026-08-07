@@ -9,6 +9,7 @@
 #include "camera.h"
 #include "gizmo.h"
 #include "scene.h"
+#include "placement_helper.h"
 
 using namespace sq;
 

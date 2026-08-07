@@ -2,6 +2,7 @@
 #include <simd/simd.h>
 
 #include "camera.h" // Camera::kFar, Ray
+#include "frame.h"  // NodePlacement
 
 namespace sq {
 
@@ -43,9 +44,13 @@ FocusPoint resolve_focus(const SceneDocument& doc, const Ray& ray, simd_float3 f
 // World-space bounding-sphere radius of a node, for frame-selection. Local
 // geometry is the unit cube [-0.5,0.5]^3 or the radius-0.5 sphere (picking.h),
 // so both come to half the scale per axis: the cube's bound is its half-
-// diagonal, the ellipsoid's its longest semi-axis. Rotation is identity in the
-// MVP (scene.h), so no basis is involved.
-float node_bounding_radius(const Node& node);
+// diagonal, the ellipsoid's its longest semi-axis. A bounding SPHERE is
+// rotation-invariant, so no basis is involved at any depth of parenting.
+//
+// The half-extents come from `placement` rather than from the node's own scale,
+// because a node's world box is its own scale times whatever uniform scale it
+// inherits -- and only the document can answer that.
+float node_bounding_radius(const Node& node, const NodePlacement& placement);
 
 // Orbit radius that frames a bounding sphere of `bound`: the vertical fit
 // bound*kFrameMargin/sin(fov_y/2), floored at kMinFrameRadius.

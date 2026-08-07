@@ -219,9 +219,13 @@ void Editor::render() {
     // just gets an origin/normal/extent to draw a grid at.
     const Node* selectedNode = impl_->gizmo_visible ? impl_->scene.find(impl_->selected) : nullptr;
     if (selectedNode != nullptr) {
+        // Resolved ONCE and reused for both slots: the two gizmos describe the
+        // same node, so asking the document twice would only invite them to
+        // disagree if resolution ever stops being a pure function.
+        const NodePlacement resolved = impl_->scene.placement(selectedNode->id);
         const GizmoFrame placement =
-            gizmo_frame_for_node(*selectedNode, camera, GizmoSlot::Placement);
-        const GizmoFrame shape = gizmo_frame_for_node(*selectedNode, camera, GizmoSlot::Shape);
+            gizmo_frame_for_node(resolved, camera, GizmoSlot::Placement);
+        const GizmoFrame shape = gizmo_frame_for_node(resolved, camera, GizmoSlot::Shape);
         // Mid-drag the active handle owns the highlight (mouseMoved doesn't
         // fire while the button is down, so hover would be stale anyway).
         const GizmoHit highlighted =
@@ -376,8 +380,10 @@ void Editor::frameSelected() {
         return;
     }
     const Camera camera = impl_->controller.to_camera();
-    const float radius = frame_radius_for_bound(node_bounding_radius(*node), camera.fov_y_radians);
-    if (impl_->controller.frame_on(node->position, radius)) {
+    const NodePlacement resolved = impl_->scene.placement(node->id);
+    const float radius =
+        frame_radius_for_bound(node_bounding_radius(*node, resolved), camera.fov_y_radians);
+    if (impl_->controller.frame_on(resolved.frame.position, radius)) {
         impl_->last_camera_activity = std::chrono::steady_clock::now();
         impl_->markSceneLinesDirty();
     }
@@ -496,8 +502,9 @@ void Editor::updateGizmoHover(float x, float y) {
 
     const Camera camera = impl_->controller.to_camera();
     const Ray ray = camera.ray_through_view_point(x, y, impl_->viewportWidthPts, impl_->viewportHeightPts);
-    impl_->hover = pick_gizmos(gizmo_frame_for_node(*node, camera, GizmoSlot::Placement),
-                               gizmo_frame_for_node(*node, camera, GizmoSlot::Shape), ray,
+    const NodePlacement resolved = impl_->scene.placement(node->id);
+    impl_->hover = pick_gizmos(gizmo_frame_for_node(resolved, camera, GizmoSlot::Placement),
+                               gizmo_frame_for_node(resolved, camera, GizmoSlot::Shape), ray,
                                camera.fov_y_radians, impl_->viewportHeightPts);
 }
 
@@ -548,8 +555,9 @@ bool Editor::beginDrag(float x, float y) {
     // Captured NOW: the frame (basis AND half_extent) is fixed for the whole
     // drag, even though the node (and, for a snapped node, its snap fields)
     // moves as the drag proceeds.
-    const GizmoFrame placement = gizmo_frame_for_node(*node, camera, GizmoSlot::Placement);
-    const GizmoFrame shape = gizmo_frame_for_node(*node, camera, GizmoSlot::Shape);
+    const NodePlacement resolved = impl_->scene.placement(node->id);
+    const GizmoFrame placement = gizmo_frame_for_node(resolved, camera, GizmoSlot::Placement);
+    const GizmoFrame shape = gizmo_frame_for_node(resolved, camera, GizmoSlot::Shape);
 
     const Ray ray = camera.ray_through_view_point(x, y, impl_->viewportWidthPts, impl_->viewportHeightPts);
     const GizmoHit hit =

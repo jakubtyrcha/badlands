@@ -7,6 +7,7 @@
 #include "camera.h"
 #include "navigation.h"
 #include "scene.h"
+#include "placement_helper.h"
 
 using namespace sq;
 

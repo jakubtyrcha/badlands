@@ -9,6 +9,7 @@
 #include "gizmo.h"
 #include "lines.h" // append_move_gizmo_handles, for the drawn == hit case
 #include "scene.h"
+#include "placement_helper.h"
 
 using namespace sq;
 

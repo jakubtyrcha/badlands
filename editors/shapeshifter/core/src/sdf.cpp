@@ -33,13 +33,13 @@ float sd_ellipsoid(simd_float3 q, simd_float3 radii) {
     return sdf_sd_ellipsoid(q, radii);
 }
 
-SdfNode local_sdf_node(const Node& node) {
-    const simd_float3 half = node.scale * 0.5f;
+SdfNode local_sdf_node(const Node& node, simd_float3 half_extents) {
     SdfNode sn;
     sn.pos_shape = sdf_make4(0.0f, 0.0f, 0.0f,
                              static_cast<float>(static_cast<int32_t>(node.shape)));
-    sn.half_extents_op = sdf_make4(half.x, half.y, half.z, 0.0f); // op is not read by sdf_eval_node
-    sn.inv_rotation = sdf_make4(0.0f, 0.0f, 0.0f, 1.0f);          // identity
+    sn.half_extents_op =
+        sdf_make4(half_extents.x, half_extents.y, half_extents.z, 0.0f); // op is not read by sdf_eval_node
+    sn.inv_rotation = sdf_make4(0.0f, 0.0f, 0.0f, 1.0f);                 // identity
     sn.params = sdf_make4(node.shape_param, 0.0f, 0.0f, 0.0f);
     return sn;
 }
@@ -52,16 +52,22 @@ void pack_scene(const SceneDocument& doc, std::vector<SdfNode>& out) {
     out.reserve(count); // no-op once out's capacity already covers count
     for (size_t i = 0; i < count; ++i) {
         const Node& node = nodes[i];
-        const simd_float3 half = node.scale * 0.5f;
+        // WHERE the node is comes from the document, never from the node's own
+        // fields. Frame is position + rotation + one uniform scalar by
+        // construction, so what lands in an SdfNode below is representable no
+        // matter how deep the parent chain gets -- a matrix would have let
+        // shear through, and SdfNode has nowhere to put it.
+        const NodePlacement placement = doc.placement(node.id);
+        const simd_float3 half = placement.half_extents;
         // Conjugate, not a general inverse: that identity holds only for a
-        // UNIT quaternion, which Node::rotation is expected to be. The drag
-        // that writes it normalizes on every update (editor.cpp), so the
-        // precondition is maintained at the one place rotation is produced
-        // rather than re-established here per node per frame.
-        const simd_float4 inv = simd_conjugate(node.rotation).vector;
+        // UNIT quaternion. compose() renormalizes for exactly this reason, so
+        // the precondition is maintained where the frame is produced rather
+        // than re-established here per node per frame.
+        const simd_float4 inv = simd_conjugate(placement.frame.rotation).vector;
         SdfNode sn;
-        sn.pos_shape = sdf_make4(node.position.x, node.position.y, node.position.z,
-                                  static_cast<float>(static_cast<int32_t>(node.shape)));
+        sn.pos_shape = sdf_make4(placement.frame.position.x, placement.frame.position.y,
+                                 placement.frame.position.z,
+                                 static_cast<float>(static_cast<int32_t>(node.shape)));
         sn.half_extents_op =
             sdf_make4(half.x, half.y, half.z, (node.op == Op::Add) ? 0.0f : 1.0f);
         sn.inv_rotation = sdf_make4(inv.x, inv.y, inv.z, inv.w);
@@ -101,11 +107,13 @@ struct Aabb {
 // looseness, and the reason this is only used by the dormant DCSDD sampler.
 Aabb scene_aabb(const SceneDocument& doc) {
     const std::vector<Node>& nodes = doc.nodes();
-    Aabb box{nodes[0].position - nodes[0].scale * 0.5f, nodes[0].position + nodes[0].scale * 0.5f};
+    const NodePlacement first = doc.placement(nodes[0].id);
+    Aabb box{first.frame.position - first.half_extents,
+             first.frame.position + first.half_extents};
     for (size_t i = 1; i < nodes.size(); ++i) {
-        const simd_float3 half = nodes[i].scale * 0.5f;
-        box.min = simd_min(box.min, nodes[i].position - half);
-        box.max = simd_max(box.max, nodes[i].position + half);
+        const NodePlacement p = doc.placement(nodes[i].id);
+        box.min = simd_min(box.min, p.frame.position - p.half_extents);
+        box.max = simd_max(box.max, p.frame.position + p.half_extents);
     }
     return box;
 }

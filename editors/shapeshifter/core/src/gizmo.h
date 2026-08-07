@@ -4,6 +4,7 @@
 
 #include <shapeshifter/ShapeshifterCore.h>   // GizmoHandle (interop enum)
 #include "camera.h"                          // Camera, Ray
+#include "frame.h"                           // NodePlacement
 
 namespace sq {
 
@@ -218,7 +219,13 @@ void tangent_basis(simd_float3 n, simd_float3& u, simd_float3& v);
 void grid_basis(simd_float3 grid_normal, simd_float3 u, simd_float3 v, simd_float3 n,
                 simd_float3& grid_u, simd_float3& grid_v);
 
-GizmoFrame gizmo_frame_for_node(const Node& node, const Camera& camera, GizmoSlot slot);
+// Takes a resolved placement, NOT a Node -- and needs nothing else from one,
+// which is the point. Everything this used to read off a node (its position,
+// its rotation, whether it was snapped and where) is now the document's answer
+// to give, so the gizmo cannot disagree with what is rendered no matter how the
+// storage behind that answer changes.
+GizmoFrame gizmo_frame_for_node(const NodePlacement& placement, const Camera& camera,
+                                GizmoSlot slot);
 
 // Screen-constant axis grab tolerance, converted to world units at the
 // candidate point's depth inside pick_gizmo_handle (same points-to-world

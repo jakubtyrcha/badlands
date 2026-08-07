@@ -10,6 +10,7 @@
 #include "picking.h"
 #include "scene.h"
 #include "sdf.h" // evaluate_scene_sdf -- the zero-set cross-validation below
+#include "placement_helper.h"
 
 using namespace sq;
 

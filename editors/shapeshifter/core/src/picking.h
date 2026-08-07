@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <optional>
 #include "camera.h"     // sq::Ray
+#include "frame.h"      // sq::NodePlacement
 
 namespace sq {
 
@@ -44,7 +45,15 @@ struct RayHit {
 // report a miss -- the same artifact the raymarched viewport already accepts at
 // silhouettes. Nothing downstream needs exactness: a snapped spawn places the
 // new node's CENTRE on this point.
-std::optional<RayHit> raycast_node(const Node& node, const Ray& world);
+//
+// `placement` supplies WHERE the node is; `node` supplies only what it is
+// (shape and profile parameter). The pair is required rather than the node
+// alone because a Node no longer determines its own world placement -- that is
+// the document's answer to give (SceneDocument::placement). Callers holding a
+// document use raycast_scene below; this overload exists for the pieces it is
+// built from and for tests that place one node explicitly.
+std::optional<RayHit> raycast_node(const Node& node, const NodePlacement& placement,
+                                   const Ray& world);
 
 struct PickHit { int32_t node_id; RayHit hit; };           // hit is world-space, t in world units
 
