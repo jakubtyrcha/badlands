@@ -99,6 +99,15 @@ double SumH(const Grid& g) {
   return s;
 }
 
+// Mass parked in `sus` counts toward the ledger exactly like `height`: it is
+// real material the terminal exit injected, just not yet settled onto the
+// bed (see Params::settle_fraction).
+double SumSus(const Grid& g) {
+  double s = 0;
+  for (float x : g.sus) s += double(x);
+  return s;
+}
+
 // --- 1. mass conservation -------------------------------------------------
 // Everything the particles move must be accounted for: what stays on the grid
 // plus what left the map equals what was there to begin with.
@@ -110,7 +119,9 @@ void MassConservation() {
   const double before = SumH(g0);
   SimStats st;
   Grid g = Run(p, st);
-  const double after = SumH(g);
+  // `sus` is real, unsettled mass -- see SumSus -- so it joins `height` on
+  // the "still on the map" side of the ledger.
+  const double after = SumH(g) + SumSus(g);
   const double residual = (after - before) + g.lost_offmap;
   const double rel = std::fabs(residual) / std::max(std::fabs(before), 1e-9);
   Check("mass conservation", rel < 0.01,
@@ -161,6 +172,20 @@ void KnobLiveness() {
       {"repose_angle_deg", [](Params& p, int i) {
          p.repose_angle_deg = i ? 15.f : 60.f; }},
       {"runoff", [](Params& p, int i) { p.runoff_m_per_yr = i ? 0.1f : 4.f; }},
+      // Both sus knobs only have anything to bite on if particles actually
+      // reach the terminal exit that feeds `sus` (see Descend's post-loop
+      // comment) -- at the default max_travel_m (11.3 km) they mostly do not
+      // on a ~1 km fixture, so force a short travel budget to guarantee it
+      // fires every particle, same trick TerminalLoadInjection uses.
+      {"settle_fraction", [](Params& p, int i) {
+         p.max_travel_m = 10.0f * (p.world_m / float(p.res));
+         p.settle_fraction = i ? 0.02f : 0.6f;
+       }},
+      {"sus_diffusion", [](Params& p, int i) {
+         p.max_travel_m = 10.0f * (p.world_m / float(p.res));
+         p.settle_fraction = 0.1f;  // hold fixed: diffusion's spread is what varies
+         p.sus_diffusion = i ? 0.02f : 0.8f;
+       }},
   };
   for (const Knob& k : knobs) {
     Params a = Base(), b = Base();
@@ -529,21 +554,31 @@ void VolumeDiscretizationInvariance() {
   // Metrics must measure the EROSION, not the terrain. Relief is set almost
   // entirely by the starting fixture, so comparing it agrees to 4 digits
   // whatever the particles did -- it passes without testing anything.
-  auto stats = [](const Params& base, int drops, float vol) {
+  //
+  // Also closes the mass ledger (height + sus vs. lost_offmap) at each
+  // discretization, the same closure MassConservation checks -- refining the
+  // parcel size must not open a leak either.
+  struct Stat {
+    double mean_dh_m, injected_sus, lost_offmap, sus_sum, rel_residual;
+  };
+  auto stats = [](const Params& base, int drops, float vol) -> Stat {
     Params p = base;
     p.drops = drops;
     p.drop_volume = vol;
     Grid g0(p.res);
     InitTerrain(g0, p);
+    const double before = SumH(g0);
     SimStats st;
     Grid g = Run(p, st);
     double moved = 0.0;
     for (size_t i = 0; i < g.cells; ++i)
       moved += std::fabs(double(g.height[i]) - double(g0.height[i]));
-    return std::array<double, 3>{
-        moved / double(g.cells) * base.relief_m,  // mean |dh|, metres
-        double(g.deposited_death),
-        double(g.lost_offmap)};
+    const double sus_sum = SumSus(g);
+    const double residual = (SumH(g) + sus_sum - before) + g.lost_offmap;
+    const double rel_residual =
+        std::fabs(residual) / std::max(std::fabs(before), 1e-9);
+    return Stat{moved / double(g.cells) * base.relief_m,  // mean |dh|, metres
+                double(g.injected_sus), g.lost_offmap, sus_sum, rel_residual};
   };
   Params base = Base(48);
   base.terrain = Params::Terrain::Bowl;
@@ -561,12 +596,14 @@ void VolumeDiscretizationInvariance() {
   const auto coarse = stats(base, 32, 4.0f);
   const auto mid = stats(base, 64, 2.0f);
   const auto fine = stats(base, 128, 1.0f);
-  const double d_cm = rel(coarse[0], mid[0]), d_mf = rel(mid[0], fine[0]);
+  const double d_cm = rel(coarse.mean_dh_m, mid.mean_dh_m),
+               d_mf = rel(mid.mean_dh_m, fine.mean_dh_m);
   char buf[220];
   std::snprintf(buf, sizeof(buf),
                 "mean |dh| %.3f / %.3f / %.3f m at 32x4 / 64x2 / 128x1; "
                 "successive %.0f%% then %.0f%%",
-                coarse[0], mid[0], fine[0], 100 * d_cm, 100 * d_mf);
+                coarse.mean_dh_m, mid.mean_dh_m, fine.mean_dh_m, 100 * d_cm,
+                100 * d_mf);
   // ENFORCED once the update is resolved PER CELL along the swept segment.
   // Bound is 10%, widened from 5% when lrate moved to the reference's 0.1.
   // At the slower 0.01 this read 5% then 2%; at 0.1 the discharge EMA averages
@@ -597,14 +634,24 @@ void VolumeDiscretizationInvariance() {
   // increments 0.778 then 0.749, with no limit to converge to). Requiring the
   // increment to HALVE each refinement is a stronger statement than a fixed
   // tolerance, and that bug would still fail it.
-  const double inc_cm = std::fabs(coarse[0] - mid[0]);
-  const double inc_mf = std::fabs(mid[0] - fine[0]);
+  const double inc_cm = std::fabs(coarse.mean_dh_m - mid.mean_dh_m);
+  const double inc_mf = std::fabs(mid.mean_dh_m - fine.mean_dh_m);
   char buf2[280];
   std::snprintf(buf2, sizeof(buf2),
                 "%s; increments %.3f then %.3f (shrinking %.1fx)", buf,
                 inc_cm, inc_mf, inc_cm / std::max(inc_mf, 1e-9));
   Check("T2 volume refinement converges",
         inc_mf < 0.5 * inc_cm && d_mf < 0.15, buf2);
+
+  const double worst_rel = std::max(
+      {coarse.rel_residual, mid.rel_residual, fine.rel_residual});
+  char buf3[220];
+  std::snprintf(buf3, sizeof(buf3),
+                "worst residual %.3e (32x4 %.3e, 64x2 %.3e, 128x1 %.3e)",
+                worst_rel, coarse.rel_residual, mid.rel_residual,
+                fine.rel_residual);
+  Check("T2 mass ledger closes incl. sus, at every discretization",
+        worst_rel < 1e-4, buf3);
 }
 
 // --- T3. diffusion relaxes a ridge and conserves mass ---------------------
@@ -743,7 +790,7 @@ void MassConservationLongRun() {
   const double before = SumH(g0);
   SimStats st;
   Grid g = Run(p, st);
-  const double residual = (SumH(g) - before) + g.lost_offmap;
+  const double residual = (SumH(g) + SumSus(g) - before) + g.lost_offmap;
   const double rel = std::fabs(residual) / std::max(std::fabs(before), 1e-9);
   // ENFORCED. 0.410% -> 0.022% (concentration-as-mass) -> ~2e-9 (lake-branch
   // evaporation). The bound is 1e-5, not the 1e-3 this started at: conservation
@@ -752,6 +799,75 @@ void MassConservationLongRun() {
   Check("T6 mass conserves over a long run", rel < 1e-5,
         F("residual %.3e of %.3e (%.3f%%) over 1200 steps", residual, before,
           100 * rel));
+}
+
+// --- T6b. the terminal exit does not leave a one-cell mound/pit -----------
+// The particle walk's dominant exit -- reached max_travel_m still carrying a
+// load, Descend's post-loop comment -- used to dump everything straight onto
+// the ONE cell it died in. A deterministic single-source fixture with a short
+// travel budget makes that cell (near enough) the SAME cell every step, which
+// is exactly the repeated-dump pattern that manufactured production's ~13k
+// one-cell pits. Before the fix this cell stands out sharply from its own
+// 8-neighbourhood; after it, `sus` has redirected and smeared the load and
+// the cell should sit close to its neighbours' mean.
+void TerminalLoadInjection() {
+  Params p = Base(48);
+  p.terrain = Params::Terrain::Bowl;
+  p.source_jitter_cells = 0.f;  // deterministic: identical spawn every step
+  p.drops = 1;
+  p.steps = 80;  // long enough for settling/diffusion to matter, see SettleSus
+  // Short enough that the particle exhausts max_travel_m on the open ramp,
+  // well short of the bowl's central well -- "mid-slope", not a natural sink
+  // the old code's single dump could be excused by.
+  const float cell_m = p.world_m / float(p.res);
+  p.max_travel_m = 6.0f * cell_m;
+  ParticleProbe probe;
+  p.probe = &probe;  // records every step's trajectory; .back() is the final
+                      // particle's death cell
+  SimStats st;
+  Grid g = Run(p, st);
+
+  const int dc = probe.cell.empty() ? -1 : probe.cell.back();
+  bool interior = false;
+  float bump_m = 0.f;
+  if (dc >= 0) {
+    const int cx = dc % p.res, cy = dc / p.res;
+    interior = cx >= 1 && cy >= 1 && cx < p.res - 1 && cy < p.res - 1;
+    if (interior) {
+      static const int nx8[8] = {-1, 0, 1, -1, 1, -1, 0, 1};
+      static const int ny8[8] = {-1, -1, -1, 0, 0, 1, 1, 1};
+      float nb_sum = 0.f;
+      for (int k = 0; k < 8; ++k)
+        nb_sum += g.height[g.idx(cx + nx8[k], cy + ny8[k])];
+      const float nb_avg_m = (nb_sum / 8.0f) * p.relief_m;
+      bump_m = g.height[g.idx(cx, cy)] * p.relief_m - nb_avg_m;
+    }
+  }
+  // The old direct-Deposit code funnels EVERY step's carried mass into this
+  // one cell across all 80 steps: measured +24.8 m (8% of relief_m) -- an
+  // unmistakable spike. The redirect+settle fix measures -1.8 m here (0.6% of
+  // relief_m): the neighbourhood also received a diffusion share each step,
+  // so the death cell ends up close to, not standing out from, its own
+  // surroundings. 5 m keeps ~3x headroom above that while staying an order of
+  // magnitude below the bug, so a regression back toward a one-cell dump
+  // still trips it.
+  char bump_buf[192];
+  std::snprintf(bump_buf, sizeof(bump_buf),
+                "death cell (%d,%d) is %+.3f m vs its 8-neighbour mean%s",
+                dc % p.res, dc / p.res, double(bump_m),
+                interior ? "" : " -- death cell touched the border, fixture bug");
+  Check("terminal exit leaves no one-cell mound/pit",
+        interior && std::fabs(bump_m) < 5.0f, bump_buf);
+
+  // Same ledger closure as MassConservation: what the terminal exit injects
+  // into `sus` must still be there (or accounted in lost_offmap) at the end.
+  Grid g0(p.res);
+  InitTerrain(g0, p);
+  const double before = SumH(g0);
+  const double residual = (SumH(g) + SumSus(g) - before) + g.lost_offmap;
+  const double rel = std::fabs(residual) / std::max(std::fabs(before), 1e-9);
+  Check("terminal-load fixture mass conserves incl. sus", rel < 1e-4,
+        F("residual %.3e of %.3e (%.4f%%)", residual, before, 100 * rel));
 }
 
 // --- T7. the horseshoe drains to its outflow edge -------------------------
@@ -945,6 +1061,7 @@ int RunAll() {
   ParticleNeverSkipsACell();
   CascadeThresholdGate();
   MassConservationLongRun();
+  TerminalLoadInjection();
   HorseshoeDrainsToOutflow();
 
   SoilProductionOnBareRock();

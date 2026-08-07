@@ -178,6 +178,29 @@ struct Params {
   float lrate = 0.1f;  // the reference's value (World::lrate, world.h:42)
   float erf_scale = 0.4f;
 
+  // --- suspended sediment settling ---
+  //
+  // The particle walk's terminal exit (Descend's post-loop comment, "Reached
+  // max_age still carrying a load") used to dump its whole remaining load
+  // into the ONE cell it died in -- measured at ~40% of all deposited mass,
+  // and the likely source of thousands of one-cell pits. It now injects into
+  // `sus` (Grid::sus) instead, and this is how that field drains: each
+  // landscape step, `settle_fraction` of a cell's suspended load joins the
+  // bed as soil (SettleSus, mirroring Deposit), and `sus_diffusion` of what
+  // is left spreads equally to the four orthogonal neighbours before the next
+  // step's settling gets a turn at it.
+  //
+  // 0.1: a terminal load is ~96% settled by 30 steps ((1-0.1)^30 = 4.2%) and
+  // ~99.5% by 50 -- "tens of steps", not instant (which would just move the
+  // one-cell spike, not remove it) and not so slow it never resolves within a
+  // production run's step count.
+  float settle_fraction = 0.1f;
+  // 0.2: modest relative to settle_fraction, so most of a load still settles
+  // near where it landed (the fix concentrates the fill near the death cell,
+  // it does not erase it) while enough spreads each step to smear the old
+  // one-cell spike into a shallow halo a few cells wide instead.
+  float sus_diffusion = 0.2f;
+
   // --- two-layer substrate ---
   //
   // The surface is bedrock + soil. THE TRANSPORT LAW IS UNCHANGED: c_eq and the
@@ -256,10 +279,19 @@ struct Grid {
   // bedrock is implicitly height - soil, so `height` stays authoritative and
   // every existing read of it is untouched.
   std::vector<float> soil;
+  // Suspended sediment awaiting settlement, height units per cell -- what the
+  // particle walk's terminal exit injects instead of dumping straight onto
+  // the bed (see Params::settle_fraction). Ping-pong like the other grid
+  // fields SettleSus updates via a Jacobi pass.
+  std::vector<float> sus, sus_b;
   std::vector<float> vol_track, mx_track, my_track;
   std::vector<uint32_t> visits;
   // Mass balance, in height units x cells (see the residual print).
-  double deposited_death = 0.0, lost_offmap = 0.0;
+  // `injected_sus` counts what the terminal exit puts into `sus` (it used to
+  // be `deposited_death`, counting a direct bed deposit at the same site).
+  // `lost_offmap` also gains SettleSus's border-diffusion loss -- the same
+  // ledger a particle walking off the map pays into.
+  double injected_sus = 0.0, lost_offmap = 0.0;
 
   explicit Grid(int res)
       : n(res), cells(size_t(res) * res), height(cells, 0.f),
@@ -268,7 +300,7 @@ struct Grid {
         discharge(cells, 0.f), discharge_b(cells, 0.f),
         Qm3s(cells, 0.f), Qm3s_b(cells, 0.f),
         momx(cells, 0.f), momy(cells, 0.f), momx_b(cells, 0.f), momy_b(cells, 0.f),
-        soil(cells, 0.f),
+        soil(cells, 0.f), sus(cells, 0.f), sus_b(cells, 0.f),
         vol_track(cells, 0.f), mx_track(cells, 0.f), my_track(cells, 0.f),
         visits(cells, 0u) {}
 
@@ -281,7 +313,7 @@ struct Grid {
 // Extracted from main so the sanity tests exercise the REAL loop rather than
 // a copy that can drift from it.
 struct SimStats {
-  double t_drops = 0, t_grid = 0;
+  double t_drops = 0, t_grid = 0, t_settle = 0;
 };
 
 // Definitions in protogen.cpp -- phase-0 land init, the whole-sim driver, and

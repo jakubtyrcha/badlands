@@ -395,8 +395,11 @@ void Descend(Grid& g, const Params& p, float px, float py, float volume0) {
     ++g.visits[here];
 
     if (volume < p.min_vol) {
+      // Bed deposit, not a sus injection -- this branch is untouched by the
+      // redirect below (it stays unreachable in practice; see the comment
+      // above the true terminal exit at the bottom of this function), so it
+      // does not count toward injected_sus.
       Deposit(g, here, carried_mass());
-      g.deposited_death += double(carried_mass());
       return;
     }
 
@@ -453,8 +456,7 @@ void Descend(Grid& g, const Params& p, float px, float py, float volume0) {
                                : V2{gx / std::max(slope, 1e-9f),
                                     gy / std::max(slope, 1e-9f)};
     if (std::fabs(hdg.x) < 1e-6f && std::fabs(hdg.y) < 1e-6f) {
-      Deposit(g, here, carried_mass());
-      g.deposited_death += double(carried_mass());
+      Deposit(g, here, carried_mass());  // bed deposit, not a sus injection
       return;
     }
     const float cross_cells = 1.0f;
@@ -523,8 +525,13 @@ void Descend(Grid& g, const Params& p, float px, float py, float volume0) {
       // the one T2b caught not converting -- delivery was 0.1% of runoff and
       // parcel-count dependent, both of which vanish once every terrestrial
       // exit hands its rate over.
+      //
+      // Bed deposit, not a sus injection: this exit scatters over wherever a
+      // particle happens to stall (flats, momentum cancellation), not
+      // repeatedly onto the same cell the way the terminal exit below does,
+      // so it is not the one-cell-pit mechanism Task 3 targets and is left
+      // untouched.
       Deposit(g, here, carried_mass());
-      g.deposited_death += double(carried_mass());
       return;
     }
     // No sqrt(2) renormalisation. Speed is a real velocity in m/s now, bounded
@@ -654,12 +661,17 @@ void Descend(Grid& g, const Params& p, float px, float py, float volume0) {
     total_travel_m += travelled_m;
     if (total_travel_m >= p.max_travel_m) break;
   }
-  // Reached max_age still carrying a load. The reference deposits it here;
-  // dropping that made this a silent mass sink, and it is the DOMINANT exit --
-  // volume only decays to 0.61 over 500 steps, so the volume < min_vol branch
-  // above is unreachable in practice.
-  Deposit(g, last_cell, carried_mass());
-  g.deposited_death += double(carried_mass());
+  // Reached max_age/max_travel still carrying a load. This is the DOMINANT
+  // exit -- volume only decays to 0.61 over 500 steps, so the volume <
+  // min_vol branch above is unreachable in practice -- and it used to Deposit
+  // the whole load onto the ONE cell it died in, which is what manufactured
+  // production's thousands of one-cell pits (measured ~40% of all deposited
+  // mass through this single path). Route it into the suspended field
+  // instead: SettleSus drains `sus` onto the bed gradually over the following
+  // landscape steps (see Params::settle_fraction), turning the spike into a
+  // halo instead of leaving it a one-cell artifact.
+  g.sus[last_cell] += carried_mass();
+  g.injected_sus += double(carried_mass());
 }
 
 }  // namespace
@@ -856,6 +868,78 @@ void Diffuse(Grid& g, const Params& p, std::vector<float>& demand,
   });
 }
 
+// -------------------------------------------------------------- sus settling
+
+// Drains `sus`, the suspended-sediment field the particle walk's terminal
+// exit injects into instead of dumping its whole load onto the one cell it
+// died in (see Descend's post-loop comment). GATHER-ONLY Jacobi, like
+// Diffuse: every cell reads only the FRONT buffer (`sus`) and writes only its
+// own back-buffer slot (`sus_b`) plus its own soil/height through Deposit,
+// which touches cell-local state alone -- it reads nothing and writes
+// g.soil[c]/g.height[c] for the single c it is given -- so calling it once
+// per cell inside the parallel body is safe: distinct cells never share a
+// write target, and nothing here mutates `sus` (the buffer every cell is
+// reading) until the swap at the very end.
+//
+// Two things happen to a cell's suspended load each step, in this order:
+//   1. `settle_fraction` of it joins the bed as soil, via Deposit -- loose
+//      material by definition, exactly like a particle's own deposit.
+//   2. `sus_diffusion` of what is left spreads equally to the four
+//      orthogonal neighbours; the rest stays put for next step's settling.
+// Unlike Diffuse's flux-balance form (driven by height DIFFERENCES, so it
+// only smooths existing relief), this is an isotropic push: every cell sheds
+// the same FRACTION of its own load regardless of what its neighbours hold,
+// because `sus` has no slope of its own to follow -- an isotropic spread is
+// exactly the mechanism that turns a one-cell spike into a halo.
+//
+// Border cells lose part of their diffusion share off the edge of the grid.
+// That is real transport leaving the map, so it is booked to `lost_offmap`
+// exactly like a particle that walks off the border -- the SAME ledger, so
+// the mass print's closure does not need a separate term for it.
+void SettleSus(Grid& g, const Params& p) {
+  const int n = g.n;
+  static const int dx4[4] = {1, -1, 0, 0}, dy4[4] = {0, 0, 1, -1};
+
+  badlands::ParallelFor(size_t(n), [&](size_t yy) {
+    const int y = int(yy);
+    for (int x = 0; x < n; ++x) {
+      const size_t i = g.idx(x, y);
+      const float remainder_i = g.sus[i] * (1.0f - p.settle_fraction);
+      float next = remainder_i * (1.0f - p.sus_diffusion);
+      for (int m = 0; m < 4; ++m) {
+        const int ax = x + dx4[m], ay = y + dy4[m];
+        if (ax < 0 || ay < 0 || ax >= n || ay >= n) continue;  // exits below
+        const size_t j = g.idx(ax, ay);
+        const float remainder_j = g.sus[j] * (1.0f - p.settle_fraction);
+        next += remainder_j * p.sus_diffusion * 0.25f;
+      }
+      g.sus_b[i] = next;
+      // Cell-local: this thread owns (x, y) alone, and Deposit(g, i, ...)
+      // touches only g.soil[i]/g.height[i] -- see the function comment.
+      Deposit(g, i, g.sus[i] * p.settle_fraction);
+    }
+  });
+
+  // Border loss, from the FRONT buffer alone so it does not depend on the
+  // parallel pass above having reached any particular cell -- computed once,
+  // serially, over just the O(n) perimeter rather than the O(n^2) interior.
+  double lost = 0.0;
+  auto missing = [&](int x, int y) {
+    return (x == 0) + (x == n - 1) + (y == 0) + (y == n - 1);
+  };
+  auto accumulate = [&](int x, int y) {
+    const size_t i = g.idx(x, y);
+    const float remainder_i = g.sus[i] * (1.0f - p.settle_fraction);
+    lost += double(remainder_i) * double(p.sus_diffusion) * 0.25 *
+            double(missing(x, y));
+  };
+  for (int x = 0; x < n; ++x) { accumulate(x, 0); accumulate(x, n - 1); }
+  for (int y = 1; y < n - 1; ++y) { accumulate(0, y); accumulate(n - 1, y); }
+  g.lost_offmap += lost;
+
+  g.sus.swap(g.sus_b);
+}
+
 // -------------------------------------------------------------------- output
 
 void Dump(const Grid& g, const Params& p, const std::string& tag) {
@@ -907,7 +991,7 @@ void RunSim(const Params& p, Grid& g, SimStats& st, bool verbose) {
   std::vector<float> diff_demand(g.cells), diff_limit(g.cells),
       diff_delta(g.cells);
   using clk = std::chrono::steady_clock;
-  double t_drops = 0, t_grid = 0;
+  double t_drops = 0, t_grid = 0, t_settle = 0;
   auto secs = [](clk::time_point a, clk::time_point b) {
     return std::chrono::duration<double>(b - a).count();
   };
@@ -990,6 +1074,10 @@ void RunSim(const Params& p, Grid& g, SimStats& st, bool verbose) {
 
     auto tD = clk::now(); t_grid += secs(tC, tD);
 
+    SettleSus(g, p);
+
+    auto tE = clk::now(); t_settle += secs(tD, tE);
+
     if (verbose && (step % p.snapshot_every == 0 || step == p.steps)) {
       char tag[64];
       std::snprintf(tag, sizeof(tag), "%04d-step", step);
@@ -1003,11 +1091,13 @@ void RunSim(const Params& p, Grid& g, SimStats& st, bool verbose) {
       const double tot = double(std::accumulate(v.begin(), v.end(), 0ull));
       double hsum = 0.0;
       for (float h : g.height) hsum += double(h);
+      double sus_sum = 0.0;
+      for (float s : g.sus) sus_sum += double(s);
       std::printf("  step %4d/%d  relief %8.1f m\n"
-                  "      mass: sum(h) %.4e  death-dep %.4e  offmap %.4e\n"
+                  "      mass: sum(h) %.4e  sus %.4e  injected_sus %.4e  offmap %.4e\n"
                   "      visits/cell: touched %zu  mean %.2f  p50 %u  p99 %u  max %u\n",
-                  step, p.steps, (hi - lo) * p.relief_m, hsum,
-                  g.deposited_death, g.lost_offmap, v.size(),
+                  step, p.steps, (hi - lo) * p.relief_m, hsum, sus_sum,
+                  g.injected_sus, g.lost_offmap, v.size(),
                   v.empty() ? 0.0 : tot / double(v.size()),
                   v.empty() ? 0u : v[v.size() / 2],
                   v.empty() ? 0u : v[size_t(v.size() * 0.99)],
@@ -1016,7 +1106,7 @@ void RunSim(const Params& p, Grid& g, SimStats& st, bool verbose) {
     }
   }
 
-  st.t_drops = t_drops; st.t_grid = t_grid;
+  st.t_drops = t_drops; st.t_grid = t_grid; st.t_settle = t_settle;
 }
 
 }  // namespace pg
@@ -1276,6 +1366,8 @@ int main(int argc, char** argv) {
     else if (a == "--bedrock-erodibility") p.bedrock_erodibility = std::stof(nxt());
     else if (a == "--initial-soil") p.initial_soil_m = std::stof(nxt());
     else if (a == "--cascade-settling") p.settling = std::stof(nxt());
+    else if (a == "--settle-fraction") p.settle_fraction = std::stof(nxt());
+    else if (a == "--sus-diffusion") p.sus_diffusion = std::stof(nxt());
     else if (a == "--snapshot-every") p.snapshot_every = std::stoi(nxt());
     else if (a == "--bowl") p.bowl = true;
     // The pre-horseshoe substrate, for A/B against the audit baseline.
@@ -1313,9 +1405,11 @@ int main(int argc, char** argv) {
 
   std::printf("protogen: %dx%d cells, %.0f m world, %.1f m cells, %d workers\n"
               "  relief %.0f m, %d steps x %d drops\n"
-              "  runoff %.2f m/yr, evaporation %.2f m/yr\n",
+              "  runoff %.2f m/yr, evaporation %.2f m/yr\n"
+              "  settle %.3f/step, sus-diffusion %.3f\n",
               p.res, p.res, p.world_m, cell_m, workers, p.relief_m, p.steps,
-              p.drops, p.runoff_m_per_yr, p.evaporation_m_per_yr);
+              p.drops, p.runoff_m_per_yr, p.evaporation_m_per_yr,
+              p.settle_fraction, p.sus_diffusion);
 
   {
     std::error_code ec;
@@ -1330,8 +1424,8 @@ int main(int argc, char** argv) {
 
   SimStats st;
   RunSim(p, g, st, true);
-  std::printf("protogen: done\n  timings (s): drops %.1f grid %.1f\n",
-              st.t_drops, st.t_grid);
+  std::printf("protogen: done\n  timings (s): drops %.1f grid %.1f settle %.1f\n",
+              st.t_drops, st.t_grid, st.t_settle);
 
   // Output boundary: world.txt + rivers.bin, off the FINISHED grid. Same
   // function --extract-rivers calls, so the two paths cannot diverge.
