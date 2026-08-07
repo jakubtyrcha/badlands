@@ -969,3 +969,23 @@ TEST_CASE("raycast_node: no interior ray misses a flattened shape") {
         CHECK(missed == 0);
     }
 }
+
+TEST_CASE("raycast_node: the surface normal holds up at picking distance") {
+    // The hit epsilon is distance-scaled (5e-5*t) while kNormalEps is a fixed
+    // 1e-3, so past t = 20 an accepted hit sits FURTHER from the surface than
+    // the taps that measure the gradient there. The camera clamps its orbit at
+    // 90 units, which makes those distances ordinary rather than exotic.
+    //
+    // A sphere is the shape to ask: its normal has a closed form the trace does
+    // not share, so agreement is evidence rather than tautology.
+    for (const float distance : {2.0f, 20.0f, 60.0f, 90.0f}) {
+        CAPTURE(distance);
+        // Off-axis, so an axis-aligned answer cannot pass by accident.
+        const simd_float3 dir = simd_normalize(simd_float3{-0.3f, -0.2f, -1.0f});
+        const auto hit = raycast_node(unit_node(Shape::Sphere),
+                                      Ray{-dir * distance, dir});
+        REQUIRE(hit.has_value());
+        const simd_float3 analytic = simd_normalize(hit->point);
+        CHECK(simd_dot(hit->normal, analytic) > 0.999f);
+    }
+}

@@ -37,10 +37,17 @@ constexpr int kTraceMaxSteps = 384;
 // Floor on a step, so a ray running exactly along a surface cannot stall and
 // burn the whole budget without advancing.
 constexpr float kTraceMinStep = 1e-6f;
-// Central-difference offset for the normal. Comfortably above the hit epsilon
-// at the distances this runs at, so the four taps straddle the surface rather
-// than all landing inside its tolerance band, which would leave the gradient
-// dominated by float noise.
+// Central-difference offset for the normal. ABSOLUTE while the hit epsilon
+// above is distance-scaled, so past t = 20 the accepted hit sits further from
+// the surface than the taps that measure the gradient there -- and the camera's
+// 90-unit radius clamp makes that the ordinary case, not an exotic one.
+//
+// It survives that anyway, which is why this is a fixed constant and not a
+// function of t: the SDF is smooth, so the tap-to-tap difference stays near
+// 1.15e-3 while float error at t = 90 is a few parts in 1e6. Measured normals
+// agree with the analytic sphere to within a dot product of 1.0 at 2, 20, 60
+// and 90 units out ("the surface normal holds up at picking distance",
+// picking_tests.cpp) -- change either epsilon and that test is the arbiter.
 constexpr float kNormalEps = 1e-3f;
 
 // Tetrahedron-offset gradient (iq's): 4 evaluations rather than the 6 a naive

@@ -63,5 +63,10 @@ the standalone repo, but the split is now load-bearing rather than accidental.
   offsets move — which is why both usages ride one ring.
 - **Offsets go to `SetBindingTable` in increasing slot order.** Reversed, each
   lands on the wrong binding and the trace reads uniform bytes as nodes.
-- **`CAMetalDisplayLink` is only a tick.** The swapchain calls `nextDrawable`
-  itself, so `Update.drawable` is unused.
+- **The frame is paced by a plain `CADisplayLink`, and NOT `CAMetalDisplayLink`.**
+  The swapchain calls `nextDrawable` itself, so a display link that also vends
+  one puts two consumers on a pool of two or three — it empties, and the link
+  silently stops calling back.
+- **`CADisplayLink` retains its target strongly**, where `CAMetalDisplayLink`'s
+  delegate was weak. `MetalViewport.dismantleNSView` invalidating the driver is
+  what keeps that from leaking the editor and ticking into a dead layer.

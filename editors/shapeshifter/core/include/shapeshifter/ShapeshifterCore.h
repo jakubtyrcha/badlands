@@ -131,9 +131,10 @@ public:
     // borrowed — core never releases them.
     void attachLayer(void* caMetalLayer);
     void setViewportSize(float widthPts, float heightPts, float backingScale);
-    // No drawable: the RHI's swapchain acquires one itself. CAMetalDisplayLink
-    // is now purely a tick -- it still paces the frame, but its Update.drawable
-    // is unused.
+    // No drawable: the RHI's swapchain acquires one itself. The app drives this
+    // from a plain CADisplayLink for that reason -- CAMetalDisplayLink vends a
+    // drawable on every callback, and two consumers of one drawable pool empty
+    // it and stop the frame.
     void render();
 
     // --- camera gestures ---------------------------------------------------

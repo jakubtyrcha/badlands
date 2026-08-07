@@ -34,9 +34,9 @@ constexpr BlendState kPremultiplied{
               .dst = BlendFactor::OneMinusSrcAlpha,
               .op = BlendOp::Add}};
 
-// Greater, not the RHI's GreaterEqual default: the exact mirror of the Less
-// this replaced, so the port changes depth precision and leaves equal-depth
-// behaviour a rejection.
+// Greater, not the RHI's GreaterEqual default: the metal-cpp path set
+// MTL::CompareFunctionGreater against a 0.0 clear, so the port carries
+// reversed-Z across unchanged and leaves equal-depth behaviour a rejection.
 DepthState DepthWrite(Format depth) {
     return {.test_enabled = true,
             .write_enabled = true,
