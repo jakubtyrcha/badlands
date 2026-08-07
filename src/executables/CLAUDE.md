@@ -52,9 +52,26 @@ The headless run **verifies its own pixels and exits non-zero on mismatch** — 
 is the assertion, since there is no test framework around it. Writing a PNG and exiting 0
 would pass just as well against a graph that recorded no pass at all.
 
-- **`--scene clear|lines|grid`, and each scene carries its OWN assertion.** "Every texel is
-  the clear colour" and "a segment covers these texels" are different claims; a run that
-  could not say which it checked would be checking neither.
+- **`--scene clear|lines|grid|plane`, and each scene carries its OWN assertion.** "Every
+  texel is the clear colour" and "a segment covers these texels" are different claims; a run
+  that could not say which it checked would be checking neither.
+- **Every pass draws into an offscreen SCENE target in encoded sRGB; ONE output pass
+  converts to the surface.** Alpha blending happens in the target's space, so ImGui drawn
+  straight into an extended-linear EDR surface blends in linear and washes out every
+  translucent panel. The engine reached the same conclusion in `common/ui_composite.wesl`.
+- **`--present srgb|p3|edr`** picks the surface's colour space (`edr` also makes the sink
+  `RGBA16Float`, which is how the extended-range path is reachable with no HDR display).
+  Windowed asks for P3 and upgrades to EDR when the display reports HDR.
+- **`--debug-view <name>` covers all ten views the `Graphics debug` window offers**, from one
+  table — a test iterates the enum, so a UI-only mode with no headless assertion cannot exist.
+- **The headless view oracles use a SYNTHETIC constant pack, not a shipped one.** Constant
+  textures make the mip level irrelevant, which confines mip prediction to
+  `--self-test-gradients` (two-sided against a checkerboard). An explicit `--pack` is
+  honoured and the exact comparisons are skipped, with the reason logged.
+- **`--self-test-visbuffer` asserts the R32Uint target directly, with no resolve**;
+  `--self-test-output` renders the same frame into an 8-bit and a float sink and requires
+  them to agree; `--near-plane-camera` REFUSES unless straddling triangles actually cover
+  pixels, so it cannot pass vacuously.
 - **The debug UI is Dear ImGui through `imgui_impl_rhi`, not `imgui_impl_metal`.** One
   backend serves Metal, DX12 and Null, and it keeps the RHI seam sealed — a native encoder
   handed out of the RHI is a compile error on purpose. ImGui is added to the graph LAST, so

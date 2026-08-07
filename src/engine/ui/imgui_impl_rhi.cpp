@@ -176,7 +176,7 @@ bool CreateDeviceObjects(const ImGui_ImplRHI_InitInfo& info) {
        .color_formats = {info.target_format},
        // ImGui is entirely alpha-composited -- glyph coverage, window
        // backgrounds, every fade. Without this it draws opaque rectangles.
-       .blend_states = {AlphaBlend()},
+       .blend_states = {PremultipliedAlphaBlend()},
        .cull_mode = CullMode::None,
        .label = "imgui"});
   if (!g->pipeline) return false;

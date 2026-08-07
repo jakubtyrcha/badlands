@@ -18,6 +18,8 @@
 
 #include "engine/rhi/metal/metal_rhi.hpp"
 
+#include "engine/rhi/metal/metal_color_space.hpp"
+
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <objc/objc.h>
@@ -547,10 +549,13 @@ class MetalSwapchain final : public ISwapchain {
     if (desc_.native_window) {
       layer_ = (__bridge CAMetalLayer*)desc_.native_window;
       layer_.device = device_;
-      layer_.pixelFormat = ToMtl(desc_.format);
       layer_.framebufferOnly = NO;  // the lab copies the backbuffer for tests
       layer_.maximumDrawableCount = depth_;
       layer_.displaySyncEnabled = desc_.vsync;
+      // BEFORE the pixel format is set, because a failed tag can change it --
+      // which is only permitted here, at creation, before anyone has seen it.
+      ApplyColorSpace(/*allow_format_change=*/true);
+      layer_.pixelFormat = ToMtl(desc_.format);
     }
     Recreate();
   }
@@ -636,15 +641,87 @@ class MetalSwapchain final : public ISwapchain {
     if (width == desc_.width && height == desc_.height) return;
     desc_.width = width;
     desc_.height = height;
-    if (layer_) layer_.drawableSize = CGSizeMake(width, height);
+    if (layer_) {
+      layer_.drawableSize = CGSizeMake(width, height);
+      // Re-tagged defensively. Nothing here recreates the layer, so this should
+      // be redundant -- but the Dawn path learned to do it on every reconfigure
+      // and a dropped colour space is invisible until someone looks at a
+      // screenshot on an HDR display.
+      // allow_format_change = FALSE. A caller built its pipelines against the
+      // format this swapchain reported at CREATION; changing it now would
+      // silently mismatch every one of them, with no path that rebuilds them.
+      // Tagging already succeeded once, so a failure here is a display change
+      // to report, not a format to abandon.
+      ApplyColorSpace(/*allow_format_change=*/false);
+      layer_.pixelFormat = ToMtl(desc_.format);
+    }
     Recreate();
   }
 
   uint32_t GetWidth() const override { return desc_.width; }
   uint32_t GetHeight() const override { return desc_.height; }
   Format GetFormat() const override { return desc_.format; }
+  ColorSpace GetColorSpace() const override { return desc_.color_space; }
 
  private:
+  // Tags the layer, and RECOVERS BY ABANDONING THE FORMAT if it cannot.
+  //
+  // An extended-range surface that failed to tag is the one case where carrying
+  // on is worse than any alternative: linear values in a nil-colorspace layer
+  // have no defined transfer, so the compositor applies whatever it assumes and
+  // the result is wrong in a way that reads as a grading choice. Dropping to
+  // 8-bit loses headroom and keeps the image correct.
+  //
+  // Mutates desc_, so both callers re-read the format afterwards -- and
+  // GetFormat()/GetColorSpace() report what actually happened, not what was
+  // asked for.
+  void ApplyColorSpace(bool allow_format_change) {
+    if (!layer_) return;
+    // Srgb means "leave it untagged", which is what every call site written
+    // before colour spaces existed already got. Not a failure, and not a no-op
+    // by accident.
+    if (desc_.color_space == ColorSpace::Srgb) return;
+
+    const bool extended =
+        desc_.color_space == ColorSpace::ExtendedLinearDisplayP3;
+    if (ConfigureLayerColorSpace((__bridge void*)layer_, extended)) return;
+
+    if (!allow_format_change) {
+      // Past creation the format is fixed, so an untaggable extended-range
+      // surface is reported and kept rather than swapped underneath the caller.
+      // It cannot normally happen: tagging succeeded at creation or the format
+      // was already dropped then.
+      spdlog::error(
+          "rhi/metal: swapchain '{}' could not re-tag {} after a resize -- "
+          "keeping {} , because pipelines are already built against it",
+          desc_.label, ToString(desc_.color_space), ToString(desc_.format));
+      return;
+    }
+    if (!IsExtendedRangeFormat(desc_.format)) {
+      // 8-bit: a gamut miss is cosmetic, and sRGB is a defined interpretation.
+      spdlog::warn(
+          "rhi/metal: swapchain '{}' could not tag {} -- presenting untagged "
+          "sRGB, so wide-gamut colours will read desaturated",
+          desc_.label, ToString(desc_.color_space));
+      desc_.color_space = ColorSpace::Srgb;
+      return;
+    }
+
+    spdlog::error(
+        "rhi/metal: swapchain '{}' could not tag {} on extended-range format "
+        "{} -- dropping to BGRA8Unorm rather than presenting untagged linear",
+        desc_.label, ToString(desc_.color_space), ToString(desc_.format));
+    desc_.format = Format::BGRA8Unorm;
+    // Retried once at 8 bits: whatever refused the extended-linear colour space
+    // may still supply the plain one, and P3 at 8 bits is strictly better than
+    // untagged.
+    if (ConfigureLayerColorSpace((__bridge void*)layer_, false)) {
+      desc_.color_space = ColorSpace::DisplayP3;
+    } else {
+      desc_.color_space = ColorSpace::Srgb;
+    }
+  }
+
   // See the Null swapchain: the texture OBJECTS must outlive Destroy(),
   // because callers hold views into them as raw borrowed pointers.
   void CollectRetired() {
@@ -1459,6 +1536,10 @@ class MetalDevice final : public IRhiDevice {
   }
 
   SwapchainPtr CreateSwapchain(const SwapchainDesc& d) override {
+    // Shared, and FIRST, so the two backends refuse the same descs for the same
+    // reasons (rule 13). Ahead of the drawable-count check only because a desc
+    // that cannot be presented at all is the more fundamental complaint.
+    if (!ValidateSwapchainDesc(d)) return nullptr;
     // maximumDrawableCount accepts only 2 or 3. Refused rather than clamped:
     // a caller who asked for 4 and silently got 3 has a frame model that
     // disagrees with its own presentation depth.

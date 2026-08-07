@@ -45,6 +45,52 @@ const char* ToString(AcquireStatus s) {
   return "?";
 }
 
+// No default case, deliberately: a new Format is then a compile error here
+// rather than a "?" in the one log line that was supposed to explain a refusal.
+const char* ToString(Format f) {
+  switch (f) {
+    case Format::Undefined: return "Undefined";
+    case Format::R8Unorm: return "R8Unorm";
+    case Format::RGBA8Unorm: return "RGBA8Unorm";
+    case Format::RGBA8UnormSrgb: return "RGBA8UnormSrgb";
+    case Format::BGRA8Unorm: return "BGRA8Unorm";
+    case Format::BGRA8UnormSrgb: return "BGRA8UnormSrgb";
+    case Format::RG16Float: return "RG16Float";
+    case Format::RGBA16Float: return "RGBA16Float";
+    case Format::R32Float: return "R32Float";
+    case Format::R32Uint: return "R32Uint";
+    case Format::RG32Uint: return "RG32Uint";
+    case Format::RGBA32Float: return "RGBA32Float";
+    case Format::Depth32Float: return "Depth32Float";
+  }
+  return "?";
+}
+
+const char* ToString(ColorSpace s) {
+  switch (s) {
+    case ColorSpace::Srgb: return "Srgb";
+    case ColorSpace::DisplayP3: return "DisplayP3";
+    case ColorSpace::ExtendedLinearDisplayP3: return "ExtendedLinearDisplayP3";
+  }
+  return "?";
+}
+
+bool ValidateSwapchainDesc(const SwapchainDesc& d) {
+  // Headless is exempt: with no layer nothing is presented, so there is no
+  // transfer for the compositor to apply and an extended-range texture is just
+  // a texture. That is also what lets a test render the EDR path with no display.
+  if (!d.native_window) return true;
+  if (IsExtendedRangeFormat(d.format) && d.color_space == ColorSpace::Srgb) {
+    spdlog::error(
+        "rhi: swapchain '{}' asks for extended-range format {} with colour "
+        "space {} -- linear values in an untagged surface have no defined "
+        "transfer. Use ExtendedLinearDisplayP3, or an 8-bit format.",
+        d.label, ToString(d.format), ToString(d.color_space));
+    return false;
+  }
+  return true;
+}
+
 const char* ToString(DeviceFeature f) {
   switch (f) {
     case DeviceFeature::Atomic64MinMax: return "Atomic64MinMax";

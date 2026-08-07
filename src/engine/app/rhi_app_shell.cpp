@@ -47,15 +47,55 @@ std::unique_ptr<AppShell> AppShell::Create(IRhiDevice& device,
   shell->applied_width_ = uint32_t(std::max(0, pw));
   shell->applied_height_ = uint32_t(std::max(0, ph));
 
+  // HDR is a property of the DISPLAY, not of the app, so it can only be
+  // decided after the window exists. SDL reports it per-window; the headroom is
+  // read only to log it, because the decision is binary.
+  Format format = desc.present_format;
+  ColorSpace color_space = desc.color_space;
+  if (desc.prefer_hdr) {
+    const SDL_PropertiesID props = SDL_GetWindowProperties(shell->window_);
+    if (SDL_GetBooleanProperty(props, SDL_PROP_WINDOW_HDR_ENABLED_BOOLEAN,
+                               false)) {
+      format = Format::RGBA16Float;
+      color_space = ColorSpace::ExtendedLinearDisplayP3;
+      spdlog::info("rhi_app: HDR display (headroom {:.2f}), presenting {} / {}",
+                   SDL_GetFloatProperty(props,
+                                        SDL_PROP_WINDOW_HDR_HEADROOM_FLOAT,
+                                        1.0f),
+                   ToString(format), ToString(color_space));
+    }
+  }
+
   shell->swapchain_ = device.CreateSwapchain(
       {.native_window = SDL_Metal_GetLayer(view),
        .width = shell->applied_width_,
        .height = shell->applied_height_,
-       .format = desc.present_format,
+       .format = format,
+       .color_space = color_space,
        .vsync = desc.vsync,
        .label = desc.title});
   if (!shell->swapchain_) return nullptr;  // CreateSwapchain logged why
+
+  // Read BACK rather than assumed. Tagging can fail, in which case the
+  // swapchain has already abandoned the float format -- and a caller that
+  // built pipelines against what it asked for would be one silent mismatch
+  // from a validation failure.
+  if (shell->swapchain_->GetFormat() != format ||
+      shell->swapchain_->GetColorSpace() != color_space) {
+    spdlog::warn("rhi_app: asked for {} / {}, presenting {} / {}",
+                 ToString(format), ToString(color_space),
+                 ToString(shell->swapchain_->GetFormat()),
+                 ToString(shell->swapchain_->GetColorSpace()));
+  }
   return shell;
+}
+
+Format AppShell::SurfaceFormat() const {
+  return swapchain_ ? swapchain_->GetFormat() : Format::Undefined;
+}
+
+ColorSpace AppShell::SurfaceColorSpace() const {
+  return swapchain_ ? swapchain_->GetColorSpace() : ColorSpace::Srgb;
 }
 
 AppShell::~AppShell() {

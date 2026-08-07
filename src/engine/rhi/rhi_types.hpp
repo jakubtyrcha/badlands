@@ -73,6 +73,13 @@ constexpr uint32_t FormatByteSize(Format f) {
 
 constexpr bool IsDepthFormat(Format f) { return f == Format::Depth32Float; }
 
+// True for a colour format whose values are not confined to [0, 1]. A window
+// presenting one must declare a colour space, because "what does 2.0 mean" has
+// no answer without a transfer -- see SwapchainDesc::color_space.
+constexpr bool IsExtendedRangeFormat(Format f) {
+  return f == Format::RGBA16Float || f == Format::RGBA32Float;
+}
+
 // ============================================================================
 // Usage flags
 // ============================================================================
@@ -160,6 +167,7 @@ enum class ResourceState : uint8_t {
 };
 
 const char* ToString(ResourceState s);
+const char* ToString(Format f);
 
 // ============================================================================
 // Pipeline state
@@ -232,10 +240,33 @@ struct BlendState {
   BlendComponent alpha;
 };
 
-// Standard source-over blending, premultiplied by the shader's own alpha.
+// Standard source-over blending for a NON-premultiplied source: the hardware
+// multiplies the colour by the source alpha.
+//
+// (The comment here used to say "premultiplied", which described the alpha
+// channel's factor and misread as describing the colour's. They differ, and
+// that is the whole distinction between this and the next one.)
 inline constexpr BlendState AlphaBlend() {
   return {.enabled = true,
           .color = {.src = BlendFactor::SrcAlpha,
+                    .dst = BlendFactor::OneMinusSrcAlpha,
+                    .op = BlendOp::Add},
+          .alpha = {.src = BlendFactor::One,
+                    .dst = BlendFactor::OneMinusSrcAlpha,
+                    .op = BlendOp::Add}};
+}
+
+// Source-over for a source that has ALREADY multiplied its colour by its alpha.
+//
+// Required when drawing into an overlay LAYER rather than onto a final surface:
+// the layer accumulates several translucent draws and is composited later, and
+// only the premultiplied form composes associatively. With AlphaBlend() two
+// overlapping half-alpha draws double-count their colour against the layer's
+// own accumulated alpha. Over an opaque background the two are identical, which
+// is exactly why the difference stays invisible until a layer exists.
+inline constexpr BlendState PremultipliedAlphaBlend() {
+  return {.enabled = true,
+          .color = {.src = BlendFactor::One,
                     .dst = BlendFactor::OneMinusSrcAlpha,
                     .op = BlendOp::Add},
           .alpha = {.src = BlendFactor::One,
