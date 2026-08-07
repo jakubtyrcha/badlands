@@ -442,6 +442,89 @@ TEST_CASE("metal: CreateView after Destroy is refused", "[rhi][metal]") {
   auto d = MakeMetal();
   rhitest::CheckCreateViewAfterDestroyIsRefused(*d);
 }
+TEST_CASE("metal: cube textures and their views", "[rhi][metal]") {
+  auto d = MakeMetal();
+  rhitest::CheckCubeTexturesAndTheirViews(*d);
+}
+TEST_CASE("metal: cube dimension mismatches are refused", "[rhi][metal]") {
+  auto d = MakeMetal();
+  rhitest::CheckCubeDimensionMismatchesAreRefused(*d);
+}
+TEST_CASE("metal: cube views on bad targets are refused", "[rhi][metal]") {
+  auto d = MakeMetal();
+  rhitest::CheckCubeViewsOnBadTargetsAreRefused(*d);
+}
+TEST_CASE("metal: texture write bounds are refused", "[rhi][metal]") {
+  auto d = MakeMetal();
+  rhitest::CheckTextureWriteBoundsAreRefused(*d);
+}
+
+// The half of cube support Null CANNOT observe: that a face index actually
+// addresses that face, and a mip that mip.
+//
+// Metal expresses a cube's six faces implicitly -- MTLTextureTypeCube demands
+// arrayLength == 1 and hands out six slices anyway -- so the RHI's
+// `array_layers == 6` and Metal's `slice` are two different spellings that have
+// to line up. Nothing on the Null backend can tell whether they do: it records
+// the write and never places a texel anywhere. Without this, the whole
+// translation could be off by a face and both suites would stay green.
+TEST_CASE("metal: cube faces and mips are addressed independently",
+          "[rhi][metal][gpu]") {
+  auto device = MakeMetal(/*validation=*/false);
+  REQUIRE(device);
+
+  constexpr uint32_t kSize = 4;
+  auto cube = device->CreateTexture({.width = kSize, .height = kSize,
+                                     .array_layers = 6,
+                                     .mip_levels = 2,
+                                     .format = Format::RGBA8Unorm,
+                                     .usage = TextureUsage::Sampled |
+                                              TextureUsage::CopyDst |
+                                              TextureUsage::CopySrc,
+                                     .dimension = TextureDimension::Cube,
+                                     .label = "readback_cube"});
+  REQUIRE(cube);
+
+  // Every (face, mip) gets a distinct value, so a swap between any two of them
+  // is a failure rather than a coincidence.
+  auto ValueFor = [](uint32_t face, uint32_t mip) -> uint8_t {
+    return uint8_t(16 + face * 16 + mip * 8);
+  };
+  for (uint32_t face = 0; face < 6; ++face) {
+    for (uint32_t mip = 0; mip < 2; ++mip) {
+      const uint32_t dim = kSize >> mip;
+      std::vector<uint8_t> texels(size_t(dim) * dim * 4, ValueFor(face, mip));
+      cube->Write(mip, face, {texels.data(), texels.size()});
+    }
+  }
+
+  auto readback = device->CreateBuffer(
+      {.size = size_t(kSize) * kSize * 4,
+       .usage = BufferUsage::CopyDst | BufferUsage::MapRead,
+       .label = "cube_readback"});
+  REQUIRE(readback);
+
+  for (uint32_t face = 0; face < 6; ++face) {
+    for (uint32_t mip = 0; mip < 2; ++mip) {
+      const uint32_t dim = kSize >> mip;
+      auto encoder = device->CreateCommandEncoder("cube_read");
+      REQUIRE(encoder);
+      encoder->Transition(cube.get(), ResourceState::CopySrc);
+      encoder->Transition(readback.get(), ResourceState::CopyDst);
+      encoder->CopyTextureToBuffer(cube.get(), mip, face, readback.get(), 0);
+      encoder->Finish();
+      device->Submit(*encoder);
+      device->WaitIdle();
+
+      std::vector<uint8_t> texels(size_t(dim) * dim * 4, 0);
+      REQUIRE(readback->Read(0, texels));
+      INFO("face " << face << " mip " << mip << " read " << int(texels[0])
+                   << ", expected " << int(ValueFor(face, mip)));
+      CHECK(texels[0] == ValueFor(face, mip));
+      CHECK(texels.back() == ValueFor(face, mip));
+    }
+  }
+}
 
 TEST_CASE("metal: frames advance and pace", "[rhi][metal][gpu]") {
   auto d = MakeMetal();

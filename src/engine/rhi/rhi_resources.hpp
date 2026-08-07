@@ -219,6 +219,27 @@ std::optional<TextureViewDesc> ResolveViewDesc(const TextureViewDesc& requested,
                                                const TextureDesc& texture,
                                                std::string_view texture_label);
 
+// Whether `desc` describes a texture that can exist at all, logging and
+// returning false when it cannot. A CREATION-TIME precondition (rule 13), so it
+// must not compile out: a cube with five faces has no encodable form, and the
+// validation decorator is not there in release to notice.
+//
+// Shared for the reason ResolveViewDesc is: Null refused nothing here and Metal
+// refused nothing either, so the two agreed only by both being wrong. Written
+// once, they cannot drift apart as backends are added.
+bool ValidateTextureDesc(const TextureDesc& desc);
+
+// Whether a Write() of `data` into (`mip`, `layer`) of `desc` is in bounds,
+// logging and returning false when it is not. `label` names the texture.
+//
+// ALSO a backend precondition rather than validation: Metal's replaceRegion
+// writes into a slice the caller named, so an out-of-range layer is a write
+// through a bad index rather than a diagnosable mistake. Metal checked the data
+// size and neither index; Null checked nothing at all -- rule 6, hidden because
+// no test asked until a cube gave textures more than one layer.
+bool ValidateTextureWrite(const TextureDesc& desc, std::string_view label,
+                          uint32_t mip, uint32_t layer, size_t byte_count);
+
 using BufferPtr = std::shared_ptr<IBuffer>;
 using TexturePtr = std::shared_ptr<ITexture>;
 using SamplerPtr = std::shared_ptr<ISampler>;

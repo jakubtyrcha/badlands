@@ -22,7 +22,7 @@
 #include "engine/rhi/rhi_device.hpp"
 #include "engine/rhi/rhi_frame_allocator.hpp"
 #include "engine/slang/slang_compiler.hpp"
-#include "executables/object_viewer/plane_mesh.hpp"
+#include "executables/object_viewer/mesh_types.hpp"
 
 namespace badlands::object_viewer {
 
@@ -41,7 +41,7 @@ class VisbufferPass {
   // or the targets cannot be built.
   static std::unique_ptr<VisbufferPass> Create(rhi::IRhiDevice& device,
                                                slang::SlangCompiler& compiler,
-                                               const PlaneMesh& mesh,
+                                               const SceneMesh& mesh,
                                                uint32_t width, uint32_t height);
 
   // Rebuilds the targets for a new size. Returns false after logging; a caller
@@ -119,6 +119,7 @@ class VisbufferPass {
   rhi::IBuffer* frame_buffer_ = nullptr;
   uint32_t frame_offset_ = 0;
   uint32_t index_count_ = 0;
+  uint32_t instance_count_ = 1;
 
   rhi::TexturePtr visbuffer_, depth_;
   uint32_t width_ = 0, height_ = 0;

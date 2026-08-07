@@ -231,6 +231,45 @@ target_compile_definitions(badlands_rhi PUBLIC GLM_FORCE_DEPTH_ZERO_TO_ONE)
 add_library(badlands_render_graph STATIC src/engine/graph/render_graph.cpp)
 target_link_libraries(badlands_render_graph PUBLIC badlands_rhi)
 
+# badlands_camera: Camera plus the controllers that drive it. glm ONLY — no
+# Dawn, no SDL, no RHI.
+#
+# Split out of badlands_engine because that target links Dawn, so an RHI-era app
+# could not reach the orbit controller without dragging a second graphics API
+# into its link line. The code was already Dawn-free (camera.hpp is header-only
+# glm and the controllers include nothing else); only the target boundary was
+# wrong.
+add_library(badlands_camera STATIC
+    src/engine/app/orbit_camera_controller.cpp
+    src/engine/app/game_camera_controller.cpp)
+target_include_directories(badlands_camera PUBLIC
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/spdlog/include)
+# The reversed-Z convention travels with the header: Camera::GetProj maps
+# near->1, and a consumer built without this silently disagrees about depth.
+target_compile_definitions(badlands_camera PUBLIC GLM_FORCE_DEPTH_ZERO_TO_ONE)
+
+# badlands_ibl: image-based lighting — the environment cube, its SH irradiance,
+# the GGX-prefiltered specular chain and the split-sum BRDF LUT.
+#
+# Game-agnostic engine infrastructure, NOT an object_viewer detail: this is the
+# RHI-era replacement for the Dawn-side rendering/{brdf_lut,prefiltered_cubemap,
+# cubemap_builder}, and badlands_game adopts it when it moves off Dawn. That is
+# why it does not follow material_pack.hpp's "keep it local until the second
+# consumer" precedent.
+add_library(badlands_ibl STATIC
+    src/engine/ibl/environment.cpp
+    src/engine/ibl/prefiltered_cube.cpp
+    src/core/parallel.cpp)
+target_link_libraries(badlands_ibl PUBLIC badlands_rhi badlands_slang assets)
+target_include_directories(badlands_ibl PUBLIC
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
+    ${CMAKE_SOURCE_DIR}/src/crates/assets/include
+    ${taskflow_SOURCE_DIR})
+
 # badlands_rhi_app: the windowed render loop on the RHI, shared by every app
 # that opens a window. Separate from badlands_rhi so the RHI itself never links
 # SDL — the RHI runs headless, and a swapchain is only one of its consumers.
@@ -427,8 +466,6 @@ add_library(badlands_engine STATIC
     src/engine/app/imgui_mouse_input.cpp
     src/engine/app/screenshot.cpp
     src/engine/app/screenshot_recorder.cpp
-    src/engine/app/orbit_camera_controller.cpp
-    src/engine/app/game_camera_controller.cpp
     src/engine/app/sdl_input_util.cpp
     src/engine/core/ray.cpp
     # Skeletal animation runtime (ozz): loading, sampling, blending and the
@@ -451,7 +488,7 @@ add_library(badlands_engine STATIC
     ${imgui_SOURCE_DIR}/imgui_demo.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp
 )
-target_link_libraries(badlands_engine PUBLIC SDL3::SDL3 webgpu wesl_ffi assets ui nlohmann_json::nlohmann_json
+target_link_libraries(badlands_engine PUBLIC badlands_camera SDL3::SDL3 webgpu wesl_ffi assets ui nlohmann_json::nlohmann_json
     # USD import (src/engine/assets). PUBLIC because usd_mesh_adapter.hpp is an
     # engine header that exposes UsdSceneData/UsdMaterialBinding by value, so
     # every consumer needs those declarations. The dependency points this way
@@ -1504,6 +1541,8 @@ add_test(NAME badlands_render_graph_tests COMMAND badlands_render_graph_tests
 add_executable(badlands_plane_mesh_tests
     src/engine/tests/plane_mesh_tests.cpp
     src/executables/object_viewer/plane_mesh.cpp
+    src/executables/object_viewer/mesh_types.cpp
+    src/executables/object_viewer/sphere_grid.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_plane_mesh_tests PRIVATE
@@ -1671,6 +1710,8 @@ if(APPLE)
         src/executables/object_viewer/line_pass.cpp
         src/executables/object_viewer/output_pass.cpp
         src/executables/object_viewer/plane_mesh.cpp
+        src/executables/object_viewer/mesh_types.cpp
+        src/executables/object_viewer/sphere_grid.cpp
         src/executables/object_viewer/material_pack.cpp
         src/executables/object_viewer/resolve_pass.cpp
         src/executables/object_viewer/visbuffer_pass.cpp
@@ -1678,7 +1719,8 @@ if(APPLE)
         src/engine/rendering/debug_line_expand.cpp)
     target_link_libraries(badlands_object_viewer PRIVATE
         badlands_render_graph badlands_rhi_app badlands_slang
-        badlands_imgui_rhi assets nlohmann_json::nlohmann_json)
+        badlands_imgui_rhi badlands_ibl badlands_camera assets
+        nlohmann_json::nlohmann_json)
     target_sources(badlands_object_viewer PRIVATE
         ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp)
     target_include_directories(badlands_object_viewer PRIVATE
@@ -1703,6 +1745,28 @@ if(APPLE)
                      --width 256 --height 192
                      --out ${CMAKE_BINARY_DIR}/object_viewer_grid.png
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    # THE WHITE FURNACE: a constant environment of radiance 1, sun off, albedo 1,
+    # AO 1. Three claims, only one of which carries a tuned number -- never
+    # above what it receives; a MIRROR comes back whole (roughness 0 is the one
+    # point where the split sum has no deficit to hide behind); and energy falls
+    # monotonically as roughness rises. A loose floor underneath catches a black
+    # cube or an unbound LUT without pretending to know what the single-scatter
+    # deficit should be.
+    add_test(NAME object_viewer_ibl_furnace
+             COMMAND badlands_object_viewer --self-test-ibl
+                     --width 512 --height 256
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+    # The sphere chart, asserted through the ROUGHNESS view: fourteen spheres
+    # are ONE instanced draw, so a fragment shader still writing slot 0 would
+    # report the same material for all of them, and the constant pack means a
+    # varying roughness can only have come from the per-instance override.
+    add_test(NAME object_viewer_spheres
+             COMMAND badlands_object_viewer --headless --scene spheres
+                     --width 512 --height 256
+                     --out ${CMAKE_BINARY_DIR}/object_viewer_spheres.png
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
     add_test(NAME object_viewer_lines
              COMMAND badlands_object_viewer --headless --scene lines
                      --width 64 --height 64
@@ -1753,14 +1817,21 @@ if(APPLE)
 
     # ONE PER DEBUG VIEW, each against a CPU evaluation of the same rule. The
     # pack is SYNTHETIC (constant textures), so no assertion depends on a
-    # shipped data file and the mip level cannot affect nine of the ten — which
-    # confines mip prediction to the gradient test below, where it belongs.
-    foreach(view lit triangle-id barycentric depth albedo normal
+    # shipped data file and the mip level cannot affect ten of the eleven —
+    # which confines mip prediction to the gradient test below, where it
+    # belongs.
+    foreach(view lit triangle-id barycentric uv depth albedo normal
                  roughness metallic displacement ao)
         string(REPLACE "-" "_" view_name "${view}")
+        # --env none, and it matters for exactly one of the eleven. The lit view's
+        # oracle is a CPU port of ShadeStandard that passes ambientSpecular = 0,
+        # so it asserts the DIRECT lighting exactly; matching an environment
+        # would mean porting the split sum to the CPU, which is a second
+        # implementation of the thing under test. IBL gets its own assertion
+        # (the white furnace), where the answer is a closed form.
         add_test(NAME object_viewer_view_${view_name}
                  COMMAND badlands_object_viewer --headless --debug-view ${view}
-                         --width 256 --height 192
+                         --env none --width 256 --height 192
                          --out ${CMAKE_BINARY_DIR}/ov_view_${view_name}.png
                  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     endforeach()
@@ -1904,6 +1975,22 @@ if(APPLE)
     set_tests_properties(badlands_imgui_rhi_tests PROPERTIES
         ENVIRONMENT "MTL_DEBUG_LAYER=1;MTL_SHADER_VALIDATION=1")
 endif()
+
+# badlands_ibl_tests: the CPU half of IBL — face convention, sky gradient, SH
+# projection, cube fill, equirect mapping and the mip parameterization. No GPU:
+# every one of these is a CONVENTION agreeing with another convention, and each
+# failure produces a smooth, plausible, wrong image rather than an error.
+add_executable(badlands_ibl_tests
+    src/engine/tests/ibl_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp)
+target_link_libraries(badlands_ibl_tests PRIVATE badlands_ibl)
+target_include_directories(badlands_ibl_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras)
+if(APPLE)
+    target_link_options(badlands_ibl_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_ibl_tests COMMAND badlands_ibl_tests
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_slang_tests: compile, cache, hot-reload and reflection, against
 # test-local fixtures.
@@ -2359,10 +2446,9 @@ add_executable(badlands_ray_tests
     src/engine/tests/ray_tests.cpp
     src/engine/tests/game_camera_controller_tests.cpp
     src/engine/core/ray.cpp
-    src/engine/app/game_camera_controller.cpp
-    src/engine/app/orbit_camera_controller.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
+target_link_libraries(badlands_ray_tests PRIVATE badlands_camera)
 target_include_directories(badlands_ray_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/third_party/glm

@@ -13,11 +13,13 @@
 // rot; it is the real one, with a different sink.
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <spdlog/spdlog.h>
@@ -37,6 +39,11 @@
 #include "executables/object_viewer/output_pass.hpp"
 #include "executables/object_viewer/material_pack.hpp"
 #include "executables/object_viewer/plane_mesh.hpp"
+#include "executables/object_viewer/sphere_grid.hpp"
+#include "core/color/output_transform.hpp"
+#include "engine/ibl/environment.hpp"
+#include "engine/ibl/prefiltered_cube.hpp"
+#include "engine/app/orbit_camera_controller.hpp"
 #include "executables/object_viewer/resolve_pass.hpp"
 #include "executables/object_viewer/shading_cpu.hpp"
 #include "executables/object_viewer/visbuffer_pass.hpp"
@@ -50,8 +57,9 @@ using badlands::graph::RasterContext;
 using badlands::graph::RenderGraph;
 using badlands::object_viewer::LinePass;
 using badlands::object_viewer::OutputPass;
-using badlands::object_viewer::PlaneMesh;
+using badlands::object_viewer::SceneMesh;
 using badlands::object_viewer::BuildPlaneMesh;
+using badlands::object_viewer::BuildSphereGrid;
 using badlands::object_viewer::VisbufferPass;
 using badlands::object_viewer::ResolvePass;
 using badlands::object_viewer::DebugView;
@@ -64,6 +72,7 @@ using badlands::object_viewer::MakeConstantPack;
 using badlands::object_viewer::MakeCheckerPack;
 using badlands::color::OutputMode;
 namespace cpu = badlands::object_viewer::cpu;
+namespace ibl = badlands::ibl;
 
 namespace {
 
@@ -72,7 +81,73 @@ namespace {
 // segment covers these texels and not those" are different claims, and a
 // headless run that could not say which it was checking would be checking
 // neither.
-enum class Scene { Clear, Lines, Grid, Plane };
+// EVERY SCENE IS REACHABLE FROM --scene, and one table says so.
+//
+// The names used to live twice -- once in the parser's if-chain and once in the
+// error message listing the options -- and adding `spheres` updated only the
+// first. The message then advertised four scenes when five existed, which is
+// how you get told a real scene does not exist. Same failure the DebugViews()
+// table already prevents for the debug views, and a test iterates this enum for
+// the same reason.
+enum class Scene { Clear, Lines, Grid, Plane, Spheres, kCount };
+
+struct SceneInfo {
+  std::string_view name;
+  Scene scene;
+};
+
+inline constexpr std::array<SceneInfo, size_t(Scene::kCount)> kScenes = {{
+    {"clear", Scene::Clear},
+    {"lines", Scene::Lines},
+    {"grid", Scene::Grid},
+    {"plane", Scene::Plane},
+    {"spheres", Scene::Spheres},
+}};
+
+// COMPILE-TIME, not a test case. The table lives in this file's anonymous
+// namespace, and a static_assert catches the same defect earlier than a test
+// could: adding a Scene without a name stops the BUILD rather than producing a
+// binary whose error message lies about what exists.
+//
+// The array's size alone does not catch it -- a sixth enum value just
+// default-constructs a sixth entry with an empty name, which compiles happily.
+constexpr bool EverySceneIsNamedExactlyOnce() {
+  for (size_t i = 0; i < size_t(Scene::kCount); ++i) {
+    int found = 0;
+    for (const auto& s : kScenes) {
+      if (size_t(s.scene) == i) ++found;
+    }
+    if (found != 1) return false;
+  }
+  for (const auto& s : kScenes) {
+    if (s.name.empty()) return false;
+  }
+  return true;
+}
+static_assert(EverySceneIsNamedExactlyOnce(),
+              "every Scene needs exactly one entry in kScenes: --scene parses "
+              "from that table and its error message lists it, so a missing "
+              "name makes a real scene unreachable AND unadvertised");
+
+// Returns Scene::kCount if `name` matches nothing. REFUSES rather than guessing:
+// no prefix matching and no plural forgiveness, because a run that silently
+// picks a scene you did not ask for produces a picture that looks fine.
+Scene SceneFromName(std::string_view name) {
+  for (const auto& s : kScenes) {
+    if (s.name == name) return s.scene;
+  }
+  return Scene::kCount;
+}
+
+// The options, joined -- built FROM the table so it cannot go stale.
+std::string SceneNameList() {
+  std::string out;
+  for (const auto& s : kScenes) {
+    if (!out.empty()) out += '|';
+    out += s.name;
+  }
+  return out;
+}
 
 struct Options {
   bool headless = false;
@@ -80,7 +155,14 @@ struct Options {
   // fails unless the loop stopped anyway. The only way to test that Escape
   // survives an ImGui panel holding keyboard focus, which is what broke it.
   bool self_test_escape = false;
+  bool self_test_ibl = false;
   Scene scene = Scene::Clear;
+  // Empty means the procedural sky. A PATH is a Radiance .hdr, and a file that
+  // cannot be decoded is a refusal rather than a silent fall back to the sky.
+  std::string env_path;
+  bool env_none = false;
+  bool env_furnace = false;
+  float env_intensity = 1.0f;
   uint32_t width = 1280;
   uint32_t height = 720;
   std::string out = "object_viewer.png";
@@ -180,6 +262,10 @@ bool ParseU32(const char* text, uint32_t min, uint32_t max, uint32_t& out) {
   return true;
 }
 
+// Declared here because ParseArgs reconciles --debug-view against it, and its
+// definition sits with the other scene predicates further down.
+bool SceneUsesVisbuffer(Scene scene);
+
 bool ParseArgs(int argc, char** argv, Options& opt) {
   // RECORDED, NOT APPLIED, and reconciled after the loop.
   //
@@ -204,6 +290,9 @@ bool ParseArgs(int argc, char** argv, Options& opt) {
       opt.headless = true;
     } else if (a == "--self-test-escape") {
       opt.self_test_escape = true;
+    } else if (a == "--self-test-ibl") {
+      opt.self_test_ibl = true;
+      opt.headless = true;
     } else if (a == "--self-test-output") {
       opt.self_test_output = true;
       opt.headless = true;
@@ -222,13 +311,12 @@ bool ParseArgs(int argc, char** argv, Options& opt) {
     } else if (a == "--scene") {
       if (!value(v)) return false;
       scene_given = true;
-      if (std::strcmp(v, "clear") == 0) opt.scene = Scene::Clear;
-      else if (std::strcmp(v, "lines") == 0) opt.scene = Scene::Lines;
-      else if (std::strcmp(v, "grid") == 0) opt.scene = Scene::Grid;
-      else if (std::strcmp(v, "plane") == 0) opt.scene = Scene::Plane;
-      else {
-        spdlog::error(
-            "object_viewer: unknown scene '{}' (clear|lines|grid|plane)", v);
+      const Scene parsed = SceneFromName(v);
+      if (parsed != Scene::kCount) {
+        opt.scene = parsed;
+      } else {
+        spdlog::error("object_viewer: unknown scene '{}' ({})", v,
+                      SceneNameList());
         return false;
       }
     } else if (a == "--debug-view") {
@@ -248,6 +336,22 @@ bool ParseArgs(int argc, char** argv, Options& opt) {
       if (!value(v)) return false;
       opt.pack = v;
       opt.pack_explicit = true;
+    } else if (a == "--env") {
+      if (!value(v)) return false;
+      // "none" is a MODE, not a filename. The direct-lighting oracle needs a
+      // frame with no ambient specular at all -- its CPU port of ShadeStandard
+      // passes ambientSpecular = 0, and porting the split sum to the CPU to
+      // match would be a second implementation of the thing under test.
+      // Spelling it out beats an intensity of 0, which would reach the same
+      // number by coincidence and leave the background sampling an environment
+      // the run says it does not have.
+      opt.env_path = v;
+      opt.env_none = std::strcmp(v, "none") == 0;
+      // "furnace" is the white-furnace environment: radiance 1 in every
+      // direction. A MODE rather than a shipped .hdr, because the assertion it
+      // serves is a closed form and a data file would make it depend on a
+      // texture someone could re-export.
+      opt.env_furnace = std::strcmp(v, "furnace") == 0;
     } else if (a == "--near-plane-camera") {
       opt.near_plane_camera = true;
     } else if (a == "--self-test-frame-ring") {
@@ -284,19 +388,31 @@ bool ParseArgs(int argc, char** argv, Options& opt) {
     }
   }
 
-  // The reconciliation. A debug view or a plane self-test only means anything
-  // against the plane scene, so either it is implied or the caller asked for
-  // something that contradicts it -- and a contradiction is refused rather than
-  // resolved by argument order.
-  const bool wants_plane = view_given || implies_plane;
-  if (wants_plane && scene_given && opt.scene != Scene::Plane) {
+  // The reconciliation. A debug view needs a scene with a MATERIAL, and the
+  // plane self-tests need the plane specifically -- so a contradiction is
+  // refused rather than resolved by argument order.
+  //
+  // --debug-view now accepts `spheres` as well: every view it offers is
+  // computed by the same resolve for both scenes, and refusing the chart the
+  // roughness view would have made the chart's own headless oracle impossible
+  // to express. The plane SELF-TESTS still require the plane, because their
+  // oracles are closed forms over a flat surface.
+  const bool wants_visbuffer = view_given || implies_plane;
+  if (implies_plane && scene_given && opt.scene != Scene::Plane) {
     spdlog::error(
-        "object_viewer: --debug-view and the plane self-tests require "
-        "--scene plane, but --scene was given as something else -- refusing "
-        "rather than silently picking one");
+        "object_viewer: the plane self-tests require --scene plane, but "
+        "--scene was given as something else -- refusing rather than silently "
+        "picking one");
     return false;
   }
-  if (wants_plane) opt.scene = Scene::Plane;
+  if (view_given && scene_given && !SceneUsesVisbuffer(opt.scene)) {
+    spdlog::error(
+        "object_viewer: --debug-view needs a scene with a material (plane or "
+        "spheres), but --scene was given as something else -- refusing rather "
+        "than silently picking one");
+    return false;
+  }
+  if (wants_visbuffer && !scene_given) opt.scene = Scene::Plane;
   return true;
 }
 
@@ -350,6 +466,45 @@ struct Camera {
   }
 };
 
+// The sphere chart, framed to FIT rather than to a fixed distance.
+//
+// ASPECT-AWARE because the chart is much wider than it is tall: at 640x256 a
+// distance chosen for a square frame leaves it a smudge in the middle, and one
+// chosen for the width overflows a square one. Both the render and the oracle
+// call this, so the projection the oracle inverts is the projection the frame
+// was drawn with -- a second copy here would put every predicted pixel slightly
+// off and the failures would read as a broken resolve.
+Camera SphereCamera(float aspect) {
+  const auto bounds = badlands::object_viewer::SphereGridExtent();
+  Camera cam;
+  cam.perspective = true;
+  cam.far_m = 200.0f;
+
+  const float half_fov = glm::radians(cam.fov_deg) * 0.5f;
+  const float fit_vertical = bounds.radius / std::tan(half_fov);
+  const float fit_horizontal =
+      bounds.radius / (std::tan(half_fov) * std::max(aspect, 1e-3f));
+  // The BINDING constraint, plus a margin so nothing touches the frame edge.
+  const float distance = std::max(fit_vertical, fit_horizontal) * 1.12f;
+  cam.position = {bounds.center.x, bounds.center.y,
+                  bounds.center.z + distance};
+  return cam;
+}
+
+// The frustum basis the resolve's background ray is built from.
+//
+// Derived from the camera rather than stored on it, so a camera the app moves
+// cannot get out of step with the rays -- and both the headless and the
+// windowed path call this rather than each deriving its own.
+void ApplyViewRays(ResolvePass& resolve, const Camera& cam, float aspect) {
+  const glm::vec3 forward = cam.Forward();
+  const glm::vec3 right =
+      glm::normalize(glm::cross(forward, glm::vec3(0, 1, 0)));
+  const glm::vec3 up = glm::cross(right, forward);
+  const float half = std::tan(glm::radians(cam.fov_deg) * 0.5f);
+  resolve.SetViewRays(forward, right * half * aspect, up * half);
+}
+
 // The camera each scene is asserted under. The line scene MUST stay unrotated:
 // its assertion is a closed form ("half the width, middle row"), and that only
 // holds looking straight down -Z.
@@ -360,6 +515,8 @@ Camera CameraFor(Scene scene) {
     cam.pitch = -0.45f;
     cam.yaw = 0.35f;
     cam.extent = 12.0f;
+  } else if (scene == Scene::Spheres) {
+    cam = SphereCamera(1.0f);
   } else if (scene == Scene::Plane) {
     // Looking down at the plane from in front of it, so the near edge is
     // genuinely nearer than the far one -- which is what makes the depth
@@ -445,8 +602,88 @@ bool SceneHasLines(Scene scene) {
 // Only a SCENE-REFERRED image gets a tone curve. A debug view has already
 // written a display-referred value, and tone-mapping it would turn "roughness
 // is 0.35" into a preview that shows 0.26.
+// The scenes that drive the visibility-buffer chain. A predicate rather than
+// `== Scene::Plane` repeated at six call sites, because that is exactly the
+// shape that got the windowed path drawing a different scene from the one the
+// assertions covered once before (see SceneHasLines).
+// The IBL chain, and the one place that knows how to rebuild it.
+//
+// REBUILT ONLY ON DEMAND. Baking the cube is 128^2 x 6 CPU evaluations plus a
+// thirty-draw prefilter; the sun sliders feed the sky, so dragging one has to
+// re-bake -- but an UNCONDITIONAL per-frame rebuild is what the Dawn-side
+// light_environment.hpp note warns about.
+struct IblChain {
+  rhi::TexturePtr source;              // the sun-free environment cube
+  std::unique_ptr<ibl::PrefilteredCube> prefiltered;
+  std::unique_ptr<ibl::BrdfLut> lut;
+  rhi::SamplerPtr sampler;
+  glm::vec4 ambient_sh[9]{};
+  bool Ready() const { return source && prefiltered && lut; }
+};
+
+// Builds the whole chain from a radiance function. The LUT survives a rebuild
+// -- its integral depends on neither the environment nor the sun, so
+// regenerating it on every slider drag would be pure waste.
+bool RebuildIbl(IRhiDevice& device, slang::SlangCompiler& compiler,
+                const ibl::RadianceFn& radiance, IblChain& chain) {
+  chain.source = ibl::BuildEnvironmentCube(device, radiance);
+  if (!chain.source) return false;
+  if (!chain.sampler) {
+    chain.sampler = device.CreateSampler(
+        {.address_u = AddressMode::ClampToEdge,
+         .address_v = AddressMode::ClampToEdge,
+         .label = "ibl_source"});
+    if (!chain.sampler) return false;
+  }
+  if (!chain.prefiltered) {
+    chain.prefiltered = ibl::PrefilteredCube::Create(device, compiler);
+    if (!chain.prefiltered) return false;
+  }
+  if (!chain.prefiltered->Generate(chain.source.get(), chain.sampler.get())) {
+    return false;
+  }
+  if (!chain.lut) {
+    chain.lut = ibl::BrdfLut::Create(device, compiler);
+    if (!chain.lut) return false;
+  }
+  // The SAME radiance function the cube was filled from, so the diffuse and
+  // specular halves describe one environment.
+  ibl::ProjectIrradiance(radiance, chain.ambient_sh);
+  return true;
+}
+
+// The environment the viewer is showing: procedural unless --env named a file.
+// Returned by value so it stays valid for the whole run -- the equirect image
+// is captured by reference inside the radiance function, so it has to outlive
+// every rebuild.
+struct Environment {
+  std::unique_ptr<ibl::EquirectImage> image;  // null for the procedural sky
+  ibl::SkySettings sky;
+  bool furnace = false;
+  ibl::RadianceFn Radiance() const {
+    // Radiance 1 EVERYWHERE. The one environment whose answer is a closed form:
+    // a surface under it can reflect at most what it receives, so anything
+    // above 1 is energy the split sum invented.
+    if (furnace) return [](glm::vec3) { return glm::vec3(1.0f); };
+    return image ? ibl::EquirectRadiance(*image) : ibl::ProceduralSky(sky);
+  }
+  const char* SourceName(const std::string& path) const {
+    if (furnace) return "furnace";
+    return image ? path.c_str() : "procedural";
+  }
+};
+
+bool SceneUsesVisbuffer(Scene scene) {
+  return scene == Scene::Plane || scene == Scene::Spheres;
+}
+
+// The geometry each of those scenes draws.
+SceneMesh MeshFor(Scene scene) {
+  return scene == Scene::Spheres ? BuildSphereGrid() : BuildPlaneMesh();
+}
+
 bool SceneNeedsTonemap(const Options& opt) {
-  return opt.scene == Scene::Plane && opt.view == DebugView::Lit;
+  return SceneUsesVisbuffer(opt.scene) && opt.view == DebugView::Lit;
 }
 
 // THE GRAPH, built identically for both modes. THREE targets, and the split is
@@ -484,7 +721,7 @@ bool BuildGraph(RenderGraph& graph, ITexture* scene, ITexture* ui,
     if (!plane.vis->AddToGraph(graph)) return false;
     if (!plane.resolve->AddToGraph(
             graph, plane.vis->VisbufferHandle(), plane.vis->Visbuffer(),
-            plane.vis->VerticesHandle(), plane.vis->IndicesHandle(),
+            plane.vis->DepthHandle(), plane.vis->VerticesHandle(), plane.vis->IndicesHandle(),
             plane.vis->DrawsHandle(), scene_h, plane.vis->Vertices(),
             plane.vis->Indices(), plane.vis->Draws())) {
       return false;
@@ -531,6 +768,7 @@ std::unique_ptr<slang::SlangCompiler> MakeCompiler() {
   // ImGui one, each resolving its own imports.
   const std::vector<std::string> paths = {"shaders/slang/common",
                                           "shaders/slang/object_viewer",
+                                          "shaders/slang/ibl",
                                           "shaders/slang/ui"};
   return slang::CreateSlangCompiler(paths);
 }
@@ -585,7 +823,7 @@ rhi::TexturePtr MakeUiTarget(IRhiDevice& device, uint32_t w, uint32_t h) {
 // derivation divides by a non-positive w. A "--near-plane-camera" run that
 // produced none of them would pass while testing nothing, which is a worse
 // outcome than failing.
-std::vector<bool> NearPlaneStraddlers(const Camera& cam, const PlaneMesh& mesh,
+std::vector<bool> NearPlaneStraddlers(const Camera& cam, const SceneMesh& mesh,
                                       float aspect) {
   const glm::mat4 vp = cam.Proj(aspect) * cam.View();
   std::vector<bool> straddling(mesh.TriangleCount(), false);
@@ -701,20 +939,39 @@ bool RenderOnce(IRhiDevice& device, const Options& opt, rhi::ColorSpace mode,
   std::unique_ptr<MaterialPack> pack;
   std::unique_ptr<VisbufferPass> vis;
   std::unique_ptr<ResolvePass> resolve;
+  // FUNCTION SCOPE, not the branch below. The resolve holds BORROWED views into
+  // the chain, and the equirect image is captured by reference by the radiance
+  // function -- either one going out of scope early leaves the table pointing
+  // at freed memory, which is a segfault rather than a wrong image.
+  Environment env;
+  IblChain ibl_chain;
   PlaneChain chain;
+  const float scene_aspect = float(opt.width) / float(std::max(1u, opt.height));
   const Camera plane_cam =
-      opt.near_plane_camera ? NearPlaneCamera() : CameraFor(Scene::Plane);
-  if (opt.scene == Scene::Plane) {
+      opt.near_plane_camera
+          ? NearPlaneCamera()
+          : (opt.scene == Scene::Spheres ? SphereCamera(scene_aspect)
+                                         : CameraFor(opt.scene));
+  if (SceneUsesVisbuffer(opt.scene)) {
     // "test" and "checker" are SYNTHETIC packs, not directories. The headless
     // oracles use them so no assertion depends on a shipped data file, and
     // because constant textures make the mip level irrelevant to nine of the
     // ten views.
     pack = opt.pack == "test"
                ? MakeConstantPack(device, badlands::object_viewer::TestPackValues{})
-               : (opt.pack == "checker" ? MakeCheckerPack(device)
-                                        : LoadMaterialPack(device, opt.pack));
+               : (opt.pack == "checker"
+                      ? MakeCheckerPack(device)
+                      // "white" is albedo 1 and AO 1, which is what the furnace
+                      // argument assumes -- any darker albedo would satisfy the
+                      // ceiling for the wrong reason.
+                      : (opt.pack == "white"
+                             ? MakeConstantPack(
+                                   device,
+                                   badlands::object_viewer::TestPackValues{
+                                       .albedo = {255, 255, 255}, .ao = 255})
+                             : LoadMaterialPack(device, opt.pack)));
     if (!pack) return false;
-    const PlaneMesh mesh = BuildPlaneMesh();
+    const SceneMesh mesh = MeshFor(opt.scene);
     vis = VisbufferPass::Create(device, compiler, mesh, opt.width, opt.height);
     resolve = ResolvePass::Create(device, compiler, *pack, kSceneFormat);
     if (!vis || !resolve) return false;
@@ -727,6 +984,23 @@ bool RenderOnce(IRhiDevice& device, const Options& opt, rhi::ColorSpace mode,
     sun.intensity = opt.sun_intensity;
     resolve->SetSun(sun);
     resolve->SetView(opt.view);
+    ApplyViewRays(*resolve, plane_cam, aspect);
+
+    // THE IBL CHAIN. Built here rather than passed in, so the headless path is
+    // the same path the window runs -- which is the whole reason the headless
+    // assertions mean anything.
+    if (!opt.env_none) {
+      env.furnace = opt.env_furnace;
+      if (!opt.env_path.empty() && !opt.env_furnace) {
+        env.image = ibl::EquirectImage::Load(opt.env_path);
+        if (!env.image) return false;  // a bad --env is a refusal, not a sky
+      }
+      if (!RebuildIbl(device, compiler, env.Radiance(), ibl_chain)) return false;
+      resolve->SetEnvironment(ibl_chain.prefiltered->CubeView(),
+                              ibl::PrefilteredCube::kMipCount,
+                              ibl_chain.lut->View(), opt.env_intensity);
+      resolve->SetAmbient(ibl_chain.ambient_sh);
+    }
     chain = {.vis = vis.get(), .resolve = resolve.get()};
   }
 
@@ -973,7 +1247,7 @@ int RunPlaneVisbufferCheck(IRhiDevice& device, const Options& opt) {
   if (!compiler) return 1;
 
   constexpr float kHalfExtent = 5.0f;
-  const PlaneMesh mesh = BuildPlaneMesh(kHalfExtent);
+  const SceneMesh mesh = BuildPlaneMesh(kHalfExtent);
   auto vis = VisbufferPass::Create(device, *compiler, mesh, opt.width,
                                    opt.height);
   if (!vis) return 1;
@@ -1204,6 +1478,7 @@ int RunDebugViewCheck(IRhiDevice& device, const Options& opt) {
   // indistinguishable from a run that passed.
   const bool geometry_view = opt.view == DebugView::TriangleId ||
                              opt.view == DebugView::Barycentric ||
+                             opt.view == DebugView::Uv ||
                              opt.view == DebugView::Depth;
   int assertions_run = 0;
   // THE BARYCENTRIC PARTITION IS MEASURED THROUGH AN IDENTITY TRANSFORM.
@@ -1227,7 +1502,7 @@ int RunDebugViewCheck(IRhiDevice& device, const Options& opt) {
   // a vacuous check is what retires a risk that is still there.
   if (opt.near_plane_camera) {
     const Camera np = NearPlaneCamera();
-    const PlaneMesh mesh = BuildPlaneMesh();
+    const SceneMesh mesh = BuildPlaneMesh();
     const float aspect = float(opt.width) / float(opt.height);
     const std::vector<bool> straddling = NearPlaneStraddlers(np, mesh, aspect);
     const size_t n =
@@ -1364,6 +1639,69 @@ int RunDebugViewCheck(IRhiDevice& device, const Options& opt) {
       // flipped green channel, or a normal read from the wrong float4 lane.
       if (!agrees({0.5f, 1.0f, 0.5f}, "a flat normal over a +y plane")) return 1;
       break;
+    case DebugView::Uv: {
+      // CLOSED FORM, from the plane's own parameterization: it spans
+      // [-half, +half] and its UVs tile kPlaneUvTiles times across that span,
+      // so the uv at the world point under a pixel is exact. The view shows
+      // frac(), which is what the shader emits.
+      //
+      // NOT THE CENTRE PIXEL. The plane's centre lands on a tile boundary,
+      // where frac() is 0 or 1 depending on which side of an ulp the
+      // interpolation falls -- an assertion there is a coin toss. The scan
+      // below picks the first pixel whose PREDICTED uv sits comfortably inside
+      // a tile, so the measurement is real at any resolution.
+      const Camera uv_cam =
+          opt.near_plane_camera ? NearPlaneCamera() : CameraFor(Scene::Plane);
+      auto uv_at = [&](uint32_t x, uint32_t y) {
+        const glm::vec3 hit = PlaneHitPoint(uv_cam, x, y, opt.width, opt.height);
+        const float u = (hit.x / badlands::object_viewer::kPlaneHalfExtent *
+                             0.5f + 0.5f) *
+                        badlands::object_viewer::kPlaneUvTiles;
+        const float v = (hit.z / badlands::object_viewer::kPlaneHalfExtent *
+                             0.5f + 0.5f) *
+                        badlands::object_viewer::kPlaneUvTiles;
+        return glm::vec2(u - std::floor(u), v - std::floor(v));
+      };
+      auto inside_tile = [](glm::vec2 f) {
+        return std::min(std::min(f.x, 1.0f - f.x),
+                        std::min(f.y, 1.0f - f.y)) > 0.15f;
+      };
+
+      bool checked = false;
+      for (uint32_t dy = 0; dy < opt.height / 4 && !checked; ++dy) {
+        for (uint32_t dx = 0; dx < opt.width / 4 && !checked; ++dx) {
+          const uint32_t x = cx + dx, y = cy + dy;
+          if (x >= opt.width || y >= opt.height) continue;
+          const glm::vec2 f = uv_at(x, y);
+          if (!inside_tile(f)) continue;
+
+          const badlands::color::Rgb got{texel(x, y, 0), texel(x, y, 1),
+                                         texel(x, y, 2)};
+          const badlands::color::Rgb want = expect({f.x, f.y, 0.0f});
+          constexpr float kTol = 2.5f / 255.0f;
+          if (std::abs(got.r - want.r) > kTol ||
+              std::abs(got.g - want.g) > kTol ||
+              std::abs(got.b - want.b) > kTol) {
+            spdlog::error(
+                "object_viewer: the uv view at ({},{}) is "
+                "({:.4f},{:.4f},{:.4f}) but the plane's parameterization "
+                "predicts ({:.4f},{:.4f},{:.4f})",
+                x, y, got.r, got.g, got.b, want.r, want.g, want.b);
+            return 1;
+          }
+          ++assertions_run;
+          checked = true;
+        }
+      }
+      if (!checked) {
+        spdlog::error(
+            "object_viewer: found no pixel whose predicted uv sits inside a "
+            "tile -- the oracle asserted nothing, which a passing exit code "
+            "would hide");
+        return 1;
+      }
+      break;
+    }
     case DebugView::Barycentric: {
       // The three weights must sum to 1 wherever the surface is covered. That
       // holds for every pixel, so it is checked across the image rather than at
@@ -1852,6 +2190,7 @@ int RunFrameRingSelfTest(IRhiDevice& device, const Options& opt) {
                                        "scene");
     if (!scene_h.IsValid() ||
         !resolve->AddToGraph(graph, vis->VisbufferHandle(), vis->Visbuffer(),
+                            vis->DepthHandle(),
                              vis->VerticesHandle(), vis->IndicesHandle(),
                              vis->DrawsHandle(), scene_h, vis->Vertices(),
                              vis->Indices(), vis->Draws())) {
@@ -1917,13 +2256,283 @@ int RunFrameRingSelfTest(IRhiDevice& device, const Options& opt) {
   return 0;
 }
 
+
+// The sphere chart, asserted through the ROUGHNESS debug view.
+//
+// One render proves two mechanisms at once, which is why this is the check
+// rather than "some texels changed":
+//
+//   * the INSTANCE ID reached the packing -- fourteen spheres are one instanced
+//     draw, so if the fragment shader still wrote slot 0 every sphere would
+//     report the same material;
+//   * the OVERRIDE MASK is honoured -- the pack is constant, so any roughness
+//     other than the pack's own can only have come from DrawInfo.
+//
+// A sweep that is present but flat, or shifted by one column, fails here. A
+// blank frame fails harder.
+int RunSphereGridCheck(IRhiDevice& device, const Options& opt) {
+  namespace ov = badlands::object_viewer;
+  auto compiler = MakeCompiler();
+  if (!compiler) return 1;
+
+  Options local = opt;
+  local.scene = Scene::Spheres;
+  local.view = DebugView::Roughness;
+  // The constant pack, so the ONLY source of a varying roughness is the
+  // per-instance override. With a real pack the ARM map would vary too and the
+  // assertion could not tell the two apart.
+  local.pack = "test";
+  Frame frame;
+  if (!RenderOnce(device, local, local.present, *compiler, frame)) return 1;
+
+  const float aspect = float(local.width) / float(std::max(1u, local.height));
+  // THE SAME camera RenderOnce just used. Recomputed from the same function
+  // rather than a fixed one, because the framing depends on the aspect.
+  const Camera cam = SphereCamera(aspect);
+  const glm::mat4 vp = cam.Proj(aspect) * cam.View();
+
+  int failures = 0;
+  for (uint32_t row = 0; row < ov::kMetallicSteps; ++row) {
+    float previous = -1.0f;
+    for (uint32_t col = 0; col < ov::kRoughnessSteps; ++col) {
+      // Camera-OFFSET, the same convention the passes use.
+      const glm::vec3 centre =
+          ov::SphereGridCenter(col, row) - cam.position;
+      const glm::vec4 clip = vp * glm::vec4(centre, 1.0f);
+      if (clip.w <= 0.0f) {
+        spdlog::error("object_viewer: sphere ({},{}) is behind the camera", col,
+                      row);
+        return 1;
+      }
+      const float ndc_x = clip.x / clip.w;
+      const float ndc_y = clip.y / clip.w;
+      const int px = int((ndc_x * 0.5f + 0.5f) * float(local.width));
+      const int py = int((1.0f - (ndc_y * 0.5f + 0.5f)) * float(local.height));
+      if (px < 0 || py < 0 || px >= int(local.width) ||
+          py >= int(local.height)) {
+        spdlog::error("object_viewer: sphere ({},{}) projects off screen to "
+                      "({},{}) -- the chart does not fit the framing",
+                      col, row, px, py);
+        return 1;
+      }
+
+      // The roughness view emits the channel as a CODE VALUE, so the byte is
+      // the roughness. Sampled at the sphere's centre, which faces the camera.
+      const float got = frame.rgba[(size_t(py) * local.width + px) * 4];
+      const float want = ov::SphereRoughness(col);
+      if (std::abs(got - want) > 0.04f) {
+        spdlog::error(
+            "object_viewer: sphere ({},{}) shows roughness {:.3f} at ({},{}), "
+            "expected {:.3f} -- the instance id or the override mask is not "
+            "reaching the resolve",
+            col, row, got, px, py, want);
+        ++failures;
+      }
+      if (got <= previous) {
+        spdlog::error(
+            "object_viewer: roughness did not increase across row {} at column "
+            "{} ({:.3f} after {:.3f}) -- the sweep is flat or mis-ordered",
+            row, col, got, previous);
+        ++failures;
+      }
+      previous = got;
+    }
+  }
+  if (failures > 0) return 1;
+  spdlog::info(
+      "object_viewer: the sphere chart sweeps roughness across {} columns and "
+      "{} rows, {} instances in one draw",
+      ov::kRoughnessSteps, ov::kMetallicSteps, ov::kSphereCount);
+
+  if (opt.out.empty()) return 0;
+
+  // The ASSERTION above is always the roughness sweep; the IMAGE is whatever
+  // was asked for. Writing the roughness frame under --debug-view lit would be
+  // a flag accepted and ignored -- and the one that silently hands back a
+  // different picture than the one requested is the worst kind, because the
+  // picture looks fine.
+  if (opt.view != DebugView::Roughness || opt.pack != local.pack) {
+    Options render = opt;
+    render.scene = Scene::Spheres;
+    if (!RenderOnce(device, render, render.present, *compiler, frame)) return 1;
+  }
+  std::vector<uint8_t> pixels(frame.rgba.size(), 0);
+  for (size_t i = 0; i < frame.rgba.size(); ++i) {
+    pixels[i] = badlands::color::ToByte(frame.rgba[i]);
+  }
+  badlands_write_png(opt.out.c_str(), pixels.data(), opt.width, opt.height);
+  return 0;
+}
+
+
+// THE WHITE FURNACE, and it is the decisive IBL assertion.
+//
+// A constant environment of radiance 1, the sun off, albedo 1 and AO 1. Under
+// those inputs a surface cannot emit more than it receives, whatever its
+// roughness or metalness -- so the check is ONE-SIDED and that asymmetry is the
+// whole point:
+//
+//   * NEVER above 1 + eps, anywhere. A wrong split-sum normalization, a wrong
+//     SH scale and a wrong F0 lerp all break this, and none of them looks wrong
+//     on its own.
+//   * ~1 only at LOW roughness. A correct SINGLE-SCATTER split sum genuinely
+//     loses energy at metallic 1 and high roughness -- the multi-scatter
+//     deficit, 10-20% in the literature. Asserting ~1 there would fail against
+//     CORRECT code, so the rough end gets a documented floor instead. The floor
+//     is a claim about the approximation, not a fudge to make a test pass.
+int RunIblSelfTest(IRhiDevice& device, const Options& opt) {
+  namespace ov = badlands::object_viewer;
+  auto compiler = MakeCompiler();
+  if (!compiler) return 1;
+
+  Options local = opt;
+  local.scene = Scene::Spheres;
+  local.view = DebugView::Lit;
+  local.env_path = "furnace";
+  local.env_furnace = true;
+  local.env_none = false;
+  local.env_intensity = 1.0f;
+  // SUN OFF. With it on, the direct term adds energy the furnace argument does
+  // not cover and the ceiling stops meaning anything.
+  local.sun_intensity = 0.0f;
+  // A WHITE pack: albedo 1 and AO 1, so the only thing shaping the result is
+  // the IBL. roughness and metallic come from the per-instance overrides.
+  local.pack = "white";
+
+  Frame frame;
+  if (!RenderOnce(device, local, local.present, *compiler, frame)) return 1;
+
+  const float aspect = float(local.width) / float(std::max(1u, local.height));
+  const Camera cam = SphereCamera(aspect);
+  const glm::mat4 vp = cam.Proj(aspect) * cam.View();
+
+  // THE FRAME IS DISPLAY-REFERRED, and the claim is about SCENE radiance.
+  //
+  // Under Lit the output pass tone-curves and encodes, so a furnace of 1.0
+  // arrives as Reinhard(1)=0.5 encoded to ~0.737. Comparing the raw byte
+  // against 1.0 accuses the IBL of losing 26% of its energy, which is the
+  // transform doing its job. So the BOUNDS are predicted forward through the
+  // same transform the shader applies -- the pattern the other oracles use,
+  // via the shared helpers so a second Reinhard cannot creep in here.
+  const auto mode = ToCpuMode(local.present);
+  const bool tonemaps = badlands::color::AppliesTonemap(true, mode);
+  auto to_sink = [&](float scene_linear) {
+    badlands::color::Rgb c{scene_linear, scene_linear, scene_linear};
+    if (tonemaps) c = badlands::color::Tonemap(c);
+    return badlands::color::EncodeOutput(c, mode).r;
+  };
+
+  // THREE CLAIMS, and only the last one carries a tuned number.
+  //
+  //   1. NEVER above what it receives. Closed form, holds everywhere.
+  //   2. A MIRROR returns everything. At roughness 0 the convolution is the
+  //      identity and the BRDF integral is ~1, so a furnace must come back
+  //      whole -- this is the one point where the split sum has no deficit to
+  //      hide behind, which makes it the sharpest check in the set.
+  //   3. Energy falls MONOTONICALLY as roughness rises. The single-scatter
+  //      deficit grows with roughness by construction; a chain that lost energy
+  //      somewhere else would not lose it in that order.
+  //
+  // A loose absolute floor sits under all three to catch catastrophic loss
+  // (a black cube, an unbound LUT) without pretending to know what the deficit
+  // "should" be. Raising the retained energy at the rough end needs a
+  // multi-scatter compensation term, which is a separate decision.
+  const float kCeiling = to_sink(1.02f);
+  const float kMirrorFloor = to_sink(0.90f);
+  const float kCatastrophicFloor = to_sink(0.15f);
+
+  int failures = 0;
+  for (uint32_t row = 0; row < ov::kMetallicSteps; ++row) {
+    float previous = 2.0f;
+    for (uint32_t col = 0; col < ov::kRoughnessSteps; ++col) {
+      const glm::vec3 centre = ov::SphereGridCenter(col, row) - cam.position;
+      const glm::vec4 clip = vp * glm::vec4(centre, 1.0f);
+      if (clip.w <= 0.0f) {
+        spdlog::error("object_viewer: sphere ({},{}) is behind the camera", col, row);
+        return 1;
+      }
+      const int px = int((clip.x / clip.w * 0.5f + 0.5f) * float(local.width));
+      const int py =
+          int((1.0f - (clip.y / clip.w * 0.5f + 0.5f)) * float(local.height));
+      if (px < 0 || py < 0 || px >= int(local.width) || py >= int(local.height)) {
+        spdlog::error("object_viewer: sphere ({},{}) is off screen", col, row);
+        return 1;
+      }
+      const size_t at = (size_t(py) * local.width + px) * 4;
+      const float got = std::max({frame.rgba[at + 0], frame.rgba[at + 1],
+                                  frame.rgba[at + 2]});
+      const float roughness = ov::SphereRoughness(col);
+      const int metal = ov::SphereMetallic(row) > 0.5f ? 1 : 0;
+
+      if (got > kCeiling) {
+        spdlog::error(
+            "object_viewer: white furnace: sphere ({},{}) roughness {:.2f} "
+            "metallic {} emits {:.3f} against a ceiling of {:.3f} -- above "
+            "what it receives, so the split sum is creating energy",
+            col, row, roughness, metal, got, kCeiling);
+        ++failures;
+      }
+      if (col == 0 && got < kMirrorFloor) {
+        spdlog::error(
+            "object_viewer: white furnace: the MIRROR sphere (0,{}) emits only "
+            "{:.3f} against {:.3f} -- at roughness 0 the convolution is the "
+            "identity and the BRDF integral is ~1, so a furnace must come back "
+            "whole",
+            row, got, kMirrorFloor);
+        ++failures;
+      }
+      if (got > previous + 0.01f) {
+        spdlog::error(
+            "object_viewer: white furnace: sphere ({},{}) emits {:.3f}, MORE "
+            "than the smoother sphere beside it ({:.3f}) -- the single-scatter "
+            "deficit grows with roughness, so energy cannot rise along the row",
+            col, row, got, previous);
+        ++failures;
+      }
+      if (got < kCatastrophicFloor) {
+        spdlog::error(
+            "object_viewer: white furnace: sphere ({},{}) emits {:.3f}, below "
+            "the {:.3f} that separates an honest approximation from a black "
+            "cube or an unbound LUT",
+            col, row, got, kCatastrophicFloor);
+        ++failures;
+      }
+      previous = got;
+    }
+  }
+
+  // AND THE ENVIRONMENT ITSELF. The background under Lit samples the same cube,
+  // so a furnace must read back as the white it is -- which is what separates
+  // "the spheres are plausible" from "the chain carries the right values".
+  const size_t corner = 0;
+  const float bg = frame.rgba[corner];
+  const float want_bg = to_sink(1.0f);
+  if (std::abs(bg - want_bg) > 0.02f) {
+    spdlog::error(
+        "object_viewer: white furnace: the background reads {:.3f} where an "
+        "environment of 1.0 predicts {:.3f} -- the cube or the background ray "
+        "is wrong",
+        bg, want_bg);
+    ++failures;
+  }
+
+  if (failures > 0) return 1;
+  spdlog::info(
+      "object_viewer: white furnace OK -- {} spheres, none above {:.2f}, none "
+      "below their floor, background {:.3f}",
+      ov::kSphereCount, kCeiling, bg);
+  return 0;
+}
+
 int RunHeadless(IRhiDevice& device, const Options& opt) {
   if (opt.self_test_output) return RunOutputSelfTest(device, opt);
   if (opt.self_test_frame_ring) return RunFrameRingSelfTest(device, opt);
   if (opt.self_test_hdr) return RunHdrSelfTest(device, opt);
   if (opt.self_test_gradients) return RunGradientSelfTest(device, opt);
   if (opt.self_test_visbuffer) return RunPlaneVisbufferCheck(device, opt);
+  if (opt.self_test_ibl) return RunIblSelfTest(device, opt);
   if (opt.scene == Scene::Plane) return RunDebugViewCheck(device, opt);
+  if (opt.scene == Scene::Spheres) return RunSphereGridCheck(device, opt);
 
   auto compiler = MakeCompiler();
   if (!compiler) return 1;
@@ -2198,12 +2807,16 @@ int RunWindowed(IRhiDevice& device, const Options& opt) {
     return 1;
   }
 
-  // The visibility-buffer chain, for --scene plane only.
+  // The visibility-buffer chain, for the scenes that have a material.
   std::unique_ptr<MaterialPack> pack;
   std::unique_ptr<VisbufferPass> vis;
   std::unique_ptr<ResolvePass> resolve;
+  // FUNCTION SCOPE: the resolve borrows views into the chain and the radiance
+  // function captures the equirect image by reference.
+  Environment env;
+  IblChain ibl_chain;
   PlaneChain chain;
-  if (opt.scene == Scene::Plane) {
+  if (SceneUsesVisbuffer(opt.scene)) {
     pack = opt.pack == "test"
                ? MakeConstantPack(device,
                                   badlands::object_viewer::TestPackValues{})
@@ -2211,11 +2824,24 @@ int RunWindowed(IRhiDevice& device, const Options& opt) {
                       ? MakeCheckerPack(device)
                       : LoadMaterialPack(device, opt.pack));
     if (!pack) return 1;
-    vis = VisbufferPass::Create(device, *compiler, BuildPlaneMesh(),
+    vis = VisbufferPass::Create(device, *compiler, MeshFor(opt.scene),
                                 shell->Width(), shell->Height());
     // The SCENE target's format: linear float, so the lit view keeps headroom.
     resolve = ResolvePass::Create(device, *compiler, *pack, kSceneFormat);
     if (!vis || !resolve) return 1;
+
+    if (!opt.env_none) {
+      env.furnace = opt.env_furnace;
+      if (!opt.env_path.empty() && !opt.env_furnace) {
+        env.image = ibl::EquirectImage::Load(opt.env_path);
+        if (!env.image) return 1;  // a bad --env is a refusal, not a sky
+      }
+      if (!RebuildIbl(device, *compiler, env.Radiance(), ibl_chain)) return 1;
+      resolve->SetEnvironment(ibl_chain.prefiltered->CubeView(),
+                              ibl::PrefilteredCube::kMipCount,
+                              ibl_chain.lut->View(), opt.env_intensity);
+      resolve->SetAmbient(ibl_chain.ambient_sh);
+    }
   }
 
   Camera cam = CameraFor(opt.scene);
@@ -2225,7 +2851,56 @@ int RunWindowed(IRhiDevice& device, const Options& opt) {
   DebugView view = opt.view;
   SunSettings sun;
   sun.intensity = opt.sun_intensity;
-  spdlog::info("object_viewer: WASD/QE to move, wheel to zoom, Esc to quit");
+
+  // THE ORBIT CAMERA, for the scenes that have an object to orbit. Ported from
+  // badlands_viewer's model viewer via badlands_camera, which was split out of
+  // badlands_engine precisely so an RHI app could reach it without Dawn.
+  //
+  // It DRIVES the viewer's own Camera rather than replacing it: Camera::View()
+  // uses the camera-OFFSET convention (camera at the origin, world rebased) and
+  // badlands::Camera does not, so wiring the two together directly would put
+  // every pass in a different space than the one the assertions assume.
+  OrbitCameraController orbit;
+  const bool orbiting = SceneUsesVisbuffer(opt.scene);
+  if (orbiting) {
+    const auto bounds = badlands::object_viewer::SphereGridExtent();
+    if (opt.scene == Scene::Spheres) {
+      orbit.FrameBounds(bounds.center, bounds.radius);
+      // Clamped to the sphere radius so the orbit cannot end up INSIDE one.
+      // Not a correctness fix -- back-face culling makes the interior render
+      // the background, which is correct -- but it is not a view anyone wants.
+      orbit.min_distance = bounds.sphere_radius * 1.5f;
+    } else {
+      orbit.FrameBounds(glm::vec3(0.0f), 6.0f);
+    }
+  }
+  // Drag orbits, wheel zooms, WASD/QE pans the target. Applied here so the
+  // starting frame matches what the orbit state says.
+  auto apply_orbit = [&] {
+    cam.position = orbit.target + orbit.distance * glm::vec3(
+        std::cos(orbit.pitch) * std::sin(orbit.yaw), std::sin(orbit.pitch),
+        std::cos(orbit.pitch) * std::cos(orbit.yaw));
+    const glm::vec3 to_target = orbit.target - cam.position;
+    cam.pitch = std::asin(glm::normalize(to_target).y);
+    cam.yaw = std::atan2(to_target.x, -to_target.z);
+  };
+  if (orbiting) apply_orbit();
+  bool dragging = false;
+  float env_intensity = opt.env_intensity;
+  // What the chain was last baked FROM. Re-baking is 128^2 x 6 CPU evaluations
+  // plus a thirty-draw prefilter, so it runs when one of these moves and not
+  // otherwise -- an unconditional per-frame rebuild is what the Dawn-side
+  // light_environment.hpp note warns about.
+  //
+  // The INTENSITY is deliberately not here: it is a multiply in the shader, so
+  // changing it needs no bake at all.
+  SunSettings baked_sun = sun;
+
+  spdlog::info(
+      orbiting
+          ? "object_viewer: drag to orbit, wheel to zoom, WASD/QE to pan, Esc "
+            "to quit"
+          : "object_viewer: WASD/QE to move, wheel to zoom, Esc to quit");
 
   rhi_app::AppShellCallbacks cb;
   cb.OnEvent = [&](const SDL_Event& e) {
@@ -2249,8 +2924,30 @@ int RunWindowed(IRhiDevice& device, const Options& opt) {
       return true;
     }
     if (e.type == SDL_EVENT_MOUSE_WHEEL) {
-      cam.extent =
-          std::clamp(cam.extent * (e.wheel.y > 0 ? 0.9f : 1.1f), 1.0f, 200.0f);
+      if (orbiting) {
+        // NormalizedWheelY's flip, inline: without it macOS natural scrolling
+        // inverts the zoom and the control feels broken rather than reversed.
+        orbit.HandleMouseWheel(e.wheel.y);
+        apply_orbit();
+      } else {
+        cam.extent =
+            std::clamp(cam.extent * (e.wheel.y > 0 ? 0.9f : 1.1f), 1.0f, 200.0f);
+      }
+      return true;
+    }
+    if (orbiting && e.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
+        e.button.button == SDL_BUTTON_LEFT) {
+      dragging = true;
+      return true;
+    }
+    if (e.type == SDL_EVENT_MOUSE_BUTTON_UP &&
+        e.button.button == SDL_BUTTON_LEFT) {
+      dragging = false;
+      return true;
+    }
+    if (orbiting && dragging && e.type == SDL_EVENT_MOUSE_MOTION) {
+      orbit.HandleMouseDrag(e.motion.xrel, e.motion.yrel);
+      apply_orbit();
       return true;
     }
     return false;
@@ -2263,6 +2960,24 @@ int RunWindowed(IRhiDevice& device, const Options& opt) {
       SDL_PushEvent(&esc);
     }
     if (ImGui::GetIO().WantCaptureKeyboard) return;
+    if (orbiting) {
+      // WASD/QE PANS THE TARGET, so nothing that worked before stops working --
+      // the keys still move the view, they just move what it is looking at.
+      // Scaled by distance so panning stays usable when zoomed out.
+      const float step = orbit.distance * std::min(f.dt, 0.1f);
+      glm::vec3 pan(0.0f);
+      if (f.keys[SDL_SCANCODE_W]) pan.z -= step;
+      if (f.keys[SDL_SCANCODE_S]) pan.z += step;
+      if (f.keys[SDL_SCANCODE_A]) pan.x -= step;
+      if (f.keys[SDL_SCANCODE_D]) pan.x += step;
+      if (f.keys[SDL_SCANCODE_E]) pan.y += step;
+      if (f.keys[SDL_SCANCODE_Q]) pan.y -= step;
+      if (pan != glm::vec3(0.0f)) {
+        orbit.target += pan;
+        apply_orbit();
+      }
+      return;
+    }
     const float step = cam.extent * std::min(f.dt, 0.1f);
     if (f.keys[SDL_SCANCODE_W]) cam.position.z -= step;
     if (f.keys[SDL_SCANCODE_S]) cam.position.z += step;
@@ -2325,6 +3040,22 @@ int RunWindowed(IRhiDevice& device, const Options& opt) {
                 f.dt > 0.0f ? 1.0f / f.dt : 0.0f);
     ImGui::End();
 
+    // The sun feeds the sky, so moving it re-bakes -- but only then. Compared
+    // against what was BAKED rather than against last frame's value, so a drag
+    // that returns to where it started does not leave a stale cube behind.
+    if (resolve && ibl_chain.Ready() &&
+        (baked_sun.azimuth_deg != sun.azimuth_deg ||
+         baked_sun.elevation_deg != sun.elevation_deg ||
+         baked_sun.intensity != sun.intensity)) {
+      baked_sun = sun;
+      if (RebuildIbl(device, *compiler, env.Radiance(), ibl_chain)) {
+        resolve->SetEnvironment(ibl_chain.prefiltered->CubeView(),
+                                ibl::PrefilteredCube::kMipCount,
+                                ibl_chain.lut->View(), env_intensity);
+        resolve->SetAmbient(ibl_chain.ambient_sh);
+      }
+    }
+
     if (resolve) {
       ImGui::Begin("Graphics debug");
       // ONE radio group over the whole enum, driven by the same table the CLI
@@ -2350,6 +3081,14 @@ int RunWindowed(IRhiDevice& device, const Options& opt) {
       ImGui::SliderFloat("elevation", &sun.elevation_deg, -90.0f, 90.0f);
       ImGui::ColorEdit3("color", &sun.color.x);
       ImGui::SliderFloat("intensity", &sun.intensity, 0.0f, 10.0f);
+      // THE ONE APPROVED ADDITION: a separator, an intensity slider and a
+      // source readout. Nothing else -- no colour pickers, no resolution knob,
+      // no reload button. CLAUDE.md: the feature is approved, its UI is not.
+      if (ibl_chain.Ready()) {
+        ImGui::SeparatorText("Environment");
+        ImGui::SliderFloat("env intensity", &env_intensity, 0.0f, 4.0f);
+        ImGui::Text("source: %s", env.SourceName(opt.env_path));
+      }
       ImGui::End();
     }
     ImGui::Render();
@@ -2368,6 +3107,8 @@ int RunWindowed(IRhiDevice& device, const Options& opt) {
                          cam.far_m);
       resolve->SetSun(sun);
       resolve->SetView(view);
+      resolve->SetEnvironmentIntensity(env_intensity);
+      ApplyViewRays(*resolve, cam, aspect);
       chain = {.vis = vis.get(), .resolve = resolve.get()};
     }
 

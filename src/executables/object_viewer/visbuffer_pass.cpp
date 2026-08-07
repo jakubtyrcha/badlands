@@ -16,6 +16,7 @@ namespace {
 // visbuffer.slang is a one-line fix rather than a hunt.
 constexpr uint32_t kFrameSlot = 0;
 constexpr uint32_t kVerticesSlot = 1;
+constexpr uint32_t kDrawsSlot = 2;
 
 std::span<const uint8_t> Bytes(const void* p, size_t n) {
   return {static_cast<const uint8_t*>(p), n};
@@ -24,16 +25,12 @@ std::span<const uint8_t> Bytes(const void* p, size_t n) {
 }  // namespace
 
 std::unique_ptr<VisbufferPass> VisbufferPass::Create(
-    IRhiDevice& device, slang::SlangCompiler& compiler, const PlaneMesh& mesh,
+    IRhiDevice& device, slang::SlangCompiler& compiler, const SceneMesh& mesh,
     uint32_t width, uint32_t height) {
   // BEFORE anything is allocated: a mesh the packing cannot address is not a
   // mesh this pass can draw, and finding that out after uploading it would put
   // the refusal after the cost.
-  if (!ValidatePrimitiveCount(mesh)) return nullptr;
-  if (mesh.vertices.empty() || mesh.indices.empty()) {
-    spdlog::error("object_viewer: the visibility buffer was given an empty mesh");
-    return nullptr;
-  }
+  if (!ValidateSceneMesh(mesh)) return nullptr;
 
   auto pass = std::unique_ptr<VisbufferPass>(new VisbufferPass());
   pass->device_ = &device;
@@ -62,29 +59,33 @@ std::unique_ptr<VisbufferPass> VisbufferPass::Create(
                  .write_enabled = true,
                  .compare = CompareFunction::GreaterEqual,
                  .format = kDepthFormat},
-       // The plane is single-sided and wound counter-clockwise from above, so
-       // backface culling is what proves the winding rather than hiding it.
+       // Both meshes are wound counter-clockwise seen from outside, so backface
+       // culling is what PROVES the winding rather than hiding it -- reversed,
+       // the geometry vanishes and reads as a missing draw.
        .cull_mode = CullMode::Back,
        .front_face = FrontFace::Ccw,
        .label = "visbuffer"});
   if (!pass->pipeline_) return nullptr;
 
-  const uint64_t vtx_bytes = mesh.vertices.size() * sizeof(PlaneVertex);
+  const uint64_t vtx_bytes = mesh.vertices.size() * sizeof(MeshVertex);
   const uint64_t idx_bytes = mesh.indices.size() * sizeof(uint32_t);
+  const uint64_t draw_bytes = mesh.draws.size() * sizeof(DrawInfo);
   pass->vertex_buffer_ = device.CreateBuffer(
       {.size = vtx_bytes,
        .usage = BufferUsage::Storage | BufferUsage::CopyDst,
-       .label = "plane_vertices"});
+       .label = "mesh_vertices"});
   pass->index_buffer_ = device.CreateBuffer(
       {.size = idx_bytes,
        // Storage AND Index: the raster pass draws with it, and stage 4d's
        // resolve READS it to find a triangle's three vertices.
        .usage = BufferUsage::Index | BufferUsage::Storage |
                 BufferUsage::CopyDst,
-       .label = "plane_indices"});
-  const DrawInfo draw{};  // one entry, all zeroes: one draw at offset 0
+       .label = "mesh_indices"});
+  // ONE ENTRY PER INSTANCE, indexed by the draw slot the visibility buffer
+  // packs. The raster pass reads it for the instance offset and the resolve for
+  // the material overrides, so both see one array.
   pass->draw_buffer_ = device.CreateBuffer(
-      {.size = sizeof(DrawInfo),
+      {.size = draw_bytes,
        .usage = BufferUsage::Storage | BufferUsage::CopyDst,
        .label = "draw_info"});
   // A RING, not one buffer: see the comment on alloc_ in the header. Sized far
@@ -100,8 +101,9 @@ std::unique_ptr<VisbufferPass> VisbufferPass::Create(
 
   pass->vertex_buffer_->Write(0, Bytes(mesh.vertices.data(), vtx_bytes));
   pass->index_buffer_->Write(0, Bytes(mesh.indices.data(), idx_bytes));
-  pass->draw_buffer_->Write(0, Bytes(&draw, sizeof(draw)));
+  pass->draw_buffer_->Write(0, Bytes(mesh.draws.data(), draw_bytes));
   pass->index_count_ = uint32_t(mesh.indices.size());
+  pass->instance_count_ = mesh.InstanceCount();
 
   if (!pass->BuildTable(pass->alloc_->PrimaryBuffer())) return nullptr;
   if (!pass->BuildTargets(width, height)) return nullptr;
@@ -119,7 +121,13 @@ bool VisbufferPass::BuildTable(IBuffer* frame_buffer) {
                     .dynamic_offset = true},
                    {.slot = kVerticesSlot,
                     .kind = BindingKind::ReadOnlyStorageBuffer,
-                    .buffer = vertex_buffer_.get()}},
+                    .buffer = vertex_buffer_.get()},
+                   // The RASTER pass reads DrawInfo now too, for the instance
+                   // offset -- and it must read the same offset the resolve
+                   // does, or the barycentrics land on a different triangle.
+                   {.slot = kDrawsSlot,
+                    .kind = BindingKind::ReadOnlyStorageBuffer,
+                    .buffer = draw_buffer_.get()}},
        .label = "visbuffer"});
   if (!table) return false;  // CreateBindingTable logged why
   table_ = std::move(table);
@@ -188,13 +196,12 @@ bool VisbufferPass::AddToGraph(graph::RenderGraph& graph) {
   depth_handle_ = graph.ImportTexture(depth_.get(), ResourceState::Undefined,
                                       "vis_depth");
   vtx_handle_ = graph.ImportBuffer(vertex_buffer_.get(),
-                                   ResourceState::Undefined, "plane_vertices");
-  // Imported here although THIS pass reads neither as storage: it draws with
-  // the index buffer and never touches DrawInfo. The resolve needs both, and
-  // importing one buffer twice would give the graph two independent state
-  // trackers for it.
+                                   ResourceState::Undefined, "mesh_vertices");
+  // The INDEX buffer is imported although this pass reads it as an index buffer
+  // rather than as storage: the resolve reads it as storage, and importing one
+  // buffer twice would give the graph two independent state trackers for it.
   idx_handle_ = graph.ImportBuffer(index_buffer_.get(), ResourceState::Undefined,
-                                   "plane_indices");
+                                   "mesh_indices");
   draw_handle_ = graph.ImportBuffer(draw_buffer_.get(), ResourceState::Undefined,
                                     "draw_info");
   auto uni = graph.ImportBuffer(frame_buffer_, ResourceState::Undefined,
@@ -213,13 +220,15 @@ bool VisbufferPass::AddToGraph(graph::RenderGraph& graph) {
       .ColorTarget(vis_handle_, LoadOp::Clear, StoreOp::Store, vis_clear)
       .DepthTarget(depth_handle_, LoadOp::Clear, StoreOp::Store, 0.0f)
       .Reads(vtx_handle_)
+      .Reads(draw_handle_)
       .Reads(uni)
       .Execute([this](const graph::RasterContext& ctx) {
         const uint32_t offsets[1] = {frame_offset_};
         ctx.pass->SetPipeline(pipeline_.get());
         ctx.pass->SetBindingTable(0, table_.get(), offsets);
         ctx.pass->SetIndexBuffer(index_buffer_.get(), IndexFormat::Uint32);
-        ctx.pass->DrawIndexed(index_count_);
+        // ONE draw, N instances: the instance id is the draw slot.
+        ctx.pass->DrawIndexed(index_count_, instance_count_);
       });
   return true;
 }

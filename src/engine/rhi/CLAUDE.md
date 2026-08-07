@@ -123,6 +123,7 @@ builds. If it cannot be compiled out, it is not validation — it is overhead.
   every module global regardless of entry point, so `ReflectedBinding::visibility` is
   always `All` and the Metal backend binds to every stage. Correct, slightly wasteful;
   narrowing needs a different derivation, not a different struct.
+- **A texture's dimension is STATED, and a cube's six faces are spelled differently on each side.** `TextureDesc::dimension` replaced the old "`array_layers > 1` means array" rule, because a cube and a six-layer array are not the same texture. The RHI keeps `array_layers == 6` for a cube — view ranges and `Write`'s `layer` all address faces 0..5 — but **Metal's `MTLTextureTypeCube` requires `arrayLength == 1`** and gives it six slices implicitly (`arrayLength` on a cube counts *cubes*, which is `MTLTextureTypeCubeArray`). Passing 6 trips a descriptor assertion rather than returning nil, so no downstream null check can catch it. `TextureViewDimension::Auto` resolves to the texture's own dimension in `ResolveViewDesc`, exactly as a `mip_count` of 0 resolves to a real count — a view descriptor handed back by `GetDesc()` never carries a sentinel.
 - **Resource-state transitions are checked, not executed, on Metal.** Metal auto-tracks
   hazards, so it can never reveal a missing declaration — the validation decorator
   checks the declared intent as bookkeeping over the command stream, with no GPU. This

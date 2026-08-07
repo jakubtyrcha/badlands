@@ -164,7 +164,12 @@ class NullTexture final : public ITexture, public NullResource {
     }
     const auto r = ResolveViewDesc(vd, desc_, GetLabel());
     if (!r) return nullptr;  // ResolveViewDesc logged why
-    const ViewKey key{r->base_mip, r->mip_count, r->base_layer, r->layer_count};
+    // The DIMENSION is part of the key, like the counts already are: two views
+    // over one range that read it differently -- a cube and a flat array -- are
+    // two views, and a key that omitted this handed the second caller the
+    // first's.
+    const ViewKey key{r->base_mip, r->mip_count, r->base_layer, r->layer_count,
+                      r->dimension};
     auto it = views_.find(key);
     if (it != views_.end()) return it->second.get();
     auto view = std::make_unique<NullTextureView>(
@@ -176,17 +181,23 @@ class NullTexture final : public ITexture, public NullResource {
 
   ITextureView* GetDefaultView() override { return CreateView({}); }
 
+  // The SAME bounds check Metal makes, from the same shared helper. Null used
+  // to accept anything at all, so it counted bytes for writes Metal refused --
+  // two backends disagreeing about a documented contract, invisible until a
+  // cube gave a texture more than one layer (rule 6).
   void Write(uint32_t mip, uint32_t layer,
              std::span<const uint8_t> data) override {
+    if (!ValidateTextureWrite(desc_, GetLabel(), mip, layer, data.size())) {
+      return;
+    }
     written_bytes_ += data.size();
-    (void)mip;
-    (void)layer;
   }
 
   uint64_t WrittenBytes() const { return written_bytes_; }
 
  private:
-  using ViewKey = std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>;
+  using ViewKey = std::tuple<uint32_t, uint32_t, uint32_t, uint32_t,
+                             TextureViewDimension>;
 
   TextureDesc desc_;
   RetireQueuePtr retire_;
@@ -727,6 +738,10 @@ class NullDevice final : public IRhiDevice {
     return std::make_shared<NullBuffer>(d, retire_);
   }
   TexturePtr CreateTexture(const TextureDesc& d) override {
+    // Creation-time refusal, shared with Metal so the two cannot disagree about
+    // what can exist (rule 13, and rule 6's "one implementation over two that
+    // agree").
+    if (!ValidateTextureDesc(d)) return nullptr;
     return std::make_shared<NullTexture>(d, retire_);
   }
   SamplerPtr CreateSampler(const SamplerDesc& d) override {
