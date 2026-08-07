@@ -1586,26 +1586,34 @@ double FractionDrainsOffMap(const Grid& g) {
   size_t drains = 0;
 
   for (size_t start = 0; start < g.cells; ++start) {
-    if (status[start] != 0) {
-      if (status[start] == 1) ++drains;
-      continue;
+    if (status[start] == 0) {
+      // Not yet resolved by any earlier walk (neither as a `start` of its
+      // own nor as a waypoint on someone else's path) -- walk it.
+      path.clear();
+      int32_t cur = int32_t(start);
+      ++walk_id;
+      uint8_t result = 0;
+      while (true) {
+        if (status[size_t(cur)] != 0) { result = status[size_t(cur)]; break; }
+        if (stamp[size_t(cur)] == walk_id) { result = 2; break; }  // cycle
+        stamp[size_t(cur)] = walk_id;
+        path.push_back(cur);
+        const int32_t r = receiver[size_t(cur)];
+        if (r == -1) { result = 1; break; }   // reached the border
+        if (r == cur) { result = 2; break; }  // local minimum
+        cur = r;
+      }
+      for (int32_t c : path) status[size_t(c)] = result;
     }
-    path.clear();
-    int32_t cur = int32_t(start);
-    ++walk_id;
-    uint8_t result = 0;
-    while (true) {
-      if (status[size_t(cur)] != 0) { result = status[size_t(cur)]; break; }
-      if (stamp[size_t(cur)] == walk_id) { result = 2; break; }  // cycle
-      stamp[size_t(cur)] = walk_id;
-      path.push_back(cur);
-      const int32_t r = receiver[size_t(cur)];
-      if (r == -1) { result = 1; break; }   // reached the border
-      if (r == cur) { result = 2; break; }  // local minimum
-      cur = r;
-    }
-    for (int32_t c : path) status[size_t(c)] = result;
-    if (result == 1) drains += path.size();
+    // Counted EXACTLY HERE, once per cell, regardless of whether `start`'s
+    // status was just set by its own walk above or was already set by an
+    // EARLIER walk that happened to pass through it on the way to its own
+    // border/sink. The previous version also incremented `drains` by
+    // `path.size()` inside the walk itself, which double-counted every
+    // waypoint cell the very first time the outer loop's monotonic scan
+    // later reached it as a `start` in its own right -- measured to inflate
+    // the reported fraction past 100% on a 128x128 fixture.
+    if (status[start] == 1) ++drains;
   }
   return g.cells ? double(drains) / double(g.cells) : 0.0;
 }
@@ -1873,31 +1881,44 @@ int main(int argc, char** argv) {
     // phase-1 snapshot after each -- so the LAST batch always lands exactly
     // on `p.cycles`, the same "always land on the final one" guarantee
     // RunSim's own step loop gives phase 0, however `cycles % snapshot_every`
-    // comes out. Each call audits its own segment (SweRunResult's own
-    // comment), so chunking does not change what the mass audit checks.
-    // Clamped at 1: a non-positive --snapshot-every (malformed input; 250 is
-    // the default) would otherwise make `batch` 0 forever and hang the loop
-    // below rather than fail loudly -- this trades that hang for "runs one
-    // cycle per snapshot", which is slow but finite and correct.
+    // comes out.
+    //
+    // ONE `SweAuditBaseline`, threaded through EVERY batch call by pointer,
+    // and `cycle_offset` set to how many cycles already ran -- NOT one fresh
+    // baseline per call (fix round 1: that would audit each batch against
+    // its OWN start rather than phase 1's true start, silently re-baselining
+    // away any leak that stays under tolerance within a single
+    // `--snapshot-every` window; see SweAuditBaseline's own comment). This
+    // is what makes the sediment-mass audit a whole-phase-1 statement again
+    // regardless of how the run happens to be chunked for snapshotting.
     const int cadence = std::max(1, p.snapshot_every);
+    SweAuditBaseline audit;
     bool aborted = false;
     while (cycles_run < p.cycles) {
       const int batch = std::min(cadence, p.cycles - cycles_run);
-      const SweRunResult r = RunSweCycles(g, p, batch, &st);
-      cycles_run += batch;
+      const SweRunResult r =
+          RunSweCycles(g, p, batch, &st, &audit, cycles_run);
       if (!r.ok) {
-        // RunSweCycles has already written its own abort-<cycle>-*.f32
-        // snapshot (protogen_swe.cpp's WriteAbortSnapshot) before returning;
-        // that cycle number is relative to THIS batch, so report the GLOBAL
-        // one here for the operator.
+        // `r.aborted_cycle` is already GLOBAL (RunSweCycles adds
+        // `cycle_offset` itself -- see its own comment), so no batch-local
+        // arithmetic is needed here. It also names exactly how many cycles
+        // are trustworthy: everything before it completed and passed its
+        // own post-cycle check, the aborting cycle itself did not (or, for
+        // the mass-audit/non-finite checks, completed but is the one whose
+        // result is in question) -- so `cycles_run` becomes that number
+        // rather than the full (possibly larger) batch size. RunSweCycles
+        // has already written its own abort-<cycle>-*.f32 snapshot
+        // (protogen_swe.cpp's WriteAbortSnapshot), named with the SAME
+        // global cycle number this message reports.
+        cycles_run = r.aborted_cycle;
         std::fprintf(stderr,
                      "protogen: phase 1 ABORTED at cycle %d of %d requested: "
                      "%s\n",
-                     cycles_run - batch + r.aborted_cycle, p.cycles,
-                     r.reason.c_str());
+                     r.aborted_cycle, p.cycles, r.reason.c_str());
         aborted = true;
         break;
       }
+      cycles_run += batch;
       char tag[64];
       std::snprintf(tag, sizeof(tag), "%04d-cycle", cycles_run);
       DumpPhase1(g, p, tag);

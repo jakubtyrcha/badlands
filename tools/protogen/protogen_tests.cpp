@@ -3500,6 +3500,92 @@ void BoundaryClassification() {
         ok, buf);
 }
 
+// --- M21. batched mass audit still catches a leak across a batch boundary --
+// Task 7 fix round 1. main()'s --snapshot-every batching calls RunSweCycles
+// several times on the same Grid; the bug was that each call, left to its
+// own devices, captures its OWN sediment-mass-audit baseline at ITS OWN
+// entry (RunSweCycles' pre-fix behaviour, still exactly what happens below
+// when `audit` is left null) -- so a leak injected BETWEEN two calls is
+// invisible to either window: the first window never sees it (it happens
+// after that window ends) and the second window's fresh baseline captures
+// the state AFTER the leak, making it part of "how things always were".
+//
+// A perfectly flat, zero-velocity, zero-climate MorphoBase fixture (same
+// reasoning as StillLakeInert: flat surface -> zero capacity everywhere,
+// zero rain/evap -> h never changes, zero initial flux -> SedAdvect's
+// zero-displacement backtrace reproduces `sus` bit-for-bit) is INERT for
+// as many cycles as it runs, so any residual the audit finds is entirely
+// the injected leak and nothing else -- no real transport noise to
+// separate from the signal.
+void BatchedMassAuditCatchesLeak() {
+  auto build = [](Grid& g) {
+    for (size_t i = 0; i < g.cells; ++i) {
+      g.height[i] = 5.0f;
+      g.h[i] = 3.0f;
+      g.soil[i] = 1.0f;
+    }
+  };
+  // 5 m3, injected as pure `sus` with no accounted source -- about 6.8e-6 of
+  // the ~7.37e5 m3 baseline (576 cells * 5 m height-unit * 256 m2 at
+  // relief_m = 1), and the audit's relative term is 1e-3 of MOVED mass, not
+  // of the baseline, so this is nowhere near a hand-tuned edge: the
+  // "without a persistent baseline" half below has to show it EXACTLY as
+  // invisible (resid ~ 0, not merely under tolerance) for the contrast to be
+  // meaningful, and it does (see the assertion below).
+  const float leak_m3 = 5.0f;
+  const float cell_area = 16.0f * 16.0f;
+  const float leak_depth = leak_m3 / cell_area;  // height units == metres
+
+  bool r1_without_ok = false, r2_without_ok = false;
+  {
+    // WITHOUT a persistent baseline -- two independent, self-contained
+    // calls, the PRE-FIX shape main()'s batching had (and what any call
+    // leaving `audit` at its default null still gets, by design: this is
+    // not a removed code path, it is RunSweCycles' correct behaviour for a
+    // caller that only ever makes one call).
+    Params p = MorphoBase(24, 16.f);
+    Grid g(p.res);
+    build(g);
+    r1_without_ok = RunSweCycles(g, p, 10).ok;
+    g.sus[g.idx(p.res / 2, p.res / 2)] += leak_depth;
+    r2_without_ok = RunSweCycles(g, p, 10).ok;
+  }
+
+  bool r1_with_ok = false, r2_with_ok = false;
+  std::string r2_with_reason;
+  {
+    // WITH a persistent SweAuditBaseline threaded through both calls, and
+    // `cycle_offset` set to how many cycles already ran -- exactly what
+    // main()'s --snapshot-every batching does (Task 7 fix round 1). Same
+    // fixture, same leak, injected at the same point.
+    Params p = MorphoBase(24, 16.f);
+    Grid g(p.res);
+    build(g);
+    SweAuditBaseline audit;
+    r1_with_ok = RunSweCycles(g, p, 10, nullptr, &audit, 0).ok;
+    g.sus[g.idx(p.res / 2, p.res / 2)] += leak_depth;
+    const SweRunResult r2 = RunSweCycles(g, p, 10, nullptr, &audit, 10);
+    r2_with_ok = r2.ok;
+    r2_with_reason = r2.reason;
+  }
+
+  const bool mentions_mass_audit =
+      r2_with_reason.find("mass audit") != std::string::npos;
+  const bool ok = r1_without_ok && r2_without_ok &&  // pre-fix shape: blind
+                  r1_with_ok && !r2_with_ok && mentions_mass_audit;
+  char buf[300];
+  std::snprintf(buf, sizeof(buf),
+                "without a shared baseline: batch1 ok=%d batch2 ok=%d "
+                "(leak invisible, as expected of two independent calls); "
+                "with one threaded across both: batch1 ok=%d batch2 ok=%d, "
+                "reason names the mass audit=%d",
+                r1_without_ok, r2_without_ok, r1_with_ok, r2_with_ok,
+                mentions_mass_audit);
+  Check("BatchedMassAuditCatchesLeak: a leak spanning a batch boundary "
+        "trips with a threaded audit baseline",
+        ok, buf);
+}
+
 int RunAll() {
   std::printf("protogen sanity tests (small grids, production 16 m cells)\n");
   MassConservation();
@@ -3573,6 +3659,7 @@ int RunAll() {
   std::printf("\n  driver, output boundary (Task 7)\n");
   CyclesKnobLiveness();
   BoundaryClassification();
+  BatchedMassAuditCatchesLeak();
 
   std::printf("\n  %d passed, %d failed, %d pending", g_pass, g_fail, g_pending);
   if (g_pending_ready)

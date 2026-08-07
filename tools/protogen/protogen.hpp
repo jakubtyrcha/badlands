@@ -735,12 +735,46 @@ void SweWarmStart(Grid& g, const Params& p);
 // state, a CFL-derived dt collapsed below `dt_floor_s`, or (Task 6) the
 // periodic sediment-mass audit drifting past its tolerance. `aborted_cycle`/
 // `reason` name where and why, so a caller (test or, from Task 7, the
-// driver) can report it rather than merely detect it.
+// driver) can report it rather than merely detect it. `aborted_cycle` is
+// always in the caller's GLOBAL cycle numbering -- see `cycle_offset` on
+// RunSweCycles below -- not merely relative to whichever call found it.
 struct SweRunResult {
   bool ok = true;
   int aborted_cycle = -1;
   std::string reason;
 };
+
+// The sediment-mass audit's starting point (Task 7 fix round 1). Captured
+// ONCE -- either internally, self-contained, when a RunSweCycles caller
+// passes no `audit` (every existing call site, including every test in
+// protogen_tests.cpp), or externally when a caller threads the SAME
+// `SweAuditBaseline` object through SEVERAL RunSweCycles calls on the same
+// Grid.
+//
+// THE SECOND SHAPE IS WHAT MAIN()'S `--snapshot-every` BATCHING NEEDS, AND
+// GETTING IT WRONG IS A REAL BUG THIS STRUCT FIXES. RunSweCycles's audit
+// (see its own comment) checks "does the ledger explain the CHANGE in solid
+// volume since the baseline". If every batch call captured its OWN baseline
+// (the pre-fix shape), a leak that stays under `kMassAuditRelTol` WITHIN one
+// `--snapshot-every` window is invisible BY CONSTRUCTION: the next batch's
+// fresh baseline captures the state AFTER the leak, so the leak becomes part
+// of "how things always were" for that window and is never compared against
+// the true start of phase 1. A small, steady leak that would trip a single
+// un-batched call over the same total cycle count could then survive an
+// entire batched run undetected, purely because of how the run happened to
+// be chunked for snapshotting -- which defeats the audit's whole purpose.
+// BatchedMassAuditCatchesLeak (protogen_tests.cpp) demonstrates the
+// difference directly: the identical leak, at the identical point, trips
+// when threaded through one `SweAuditBaseline` across two batches and does
+// not when each batch gets its own (the pre-fix shape).
+struct SweAuditBaseline {
+  bool captured = false;
+  double solid_m3 = 0.0;
+  double base_export_m3 = 0.0;
+  double base_created_m3 = 0.0;
+  double base_fix_residual_m3 = 0.0;
+};
+
 // Runs `cycles` SWE cycles (CFL dt -> swe_substeps x Flux/Depth/Velocity ->
 // morpho hook) starting from Grid `g`'s current `h`/`flux` state --
 // callable standalone, independent of RunSim/phase-0 (Task 5 supplies the
@@ -754,8 +788,21 @@ struct SweRunResult {
 // literally means "no bed change per fluid cycle", so skipping the passes
 // and running them to produce exactly zero are the same landscape, only one
 // of them costs nothing.
+//
+// `audit` and `cycle_offset` (Task 7 fix round 1) exist for a caller that
+// runs this in SEVERAL calls on the same Grid -- main()'s `--snapshot-every`
+// batching, and nothing else today. Both default to "this call is the whole
+// story": `audit = nullptr` self-contained-baselines exactly as before (see
+// SweAuditBaseline's own comment), and `cycle_offset = 0` numbers this
+// call's own cycles from 0. A caller chunking `N` total cycles into batches
+// must pass the SAME `SweAuditBaseline*` to every call and set
+// `cycle_offset` to how many cycles already ran in EARLIER batches, so
+// `aborted_cycle`/the abort snapshot/the audit's tolerance window are all in
+// the same global numbering regardless of how the run was chunked.
 SweRunResult RunSweCycles(Grid& g, const Params& p, int cycles,
-                          SimStats* stats = nullptr);
+                          SimStats* stats = nullptr,
+                          SweAuditBaseline* audit = nullptr,
+                          int cycle_offset = 0);
 
 // ONE OF THE TWO PLACES `p.morfac` IS EVER APPLIED (the other is the talus
 // pair's bed-clock interval in RunSweCycles -- see

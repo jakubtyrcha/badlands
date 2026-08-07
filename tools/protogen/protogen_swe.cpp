@@ -1565,7 +1565,8 @@ ReduceResult TimedReduce(const Grid& g, const Params& p, SimStats* stats) {
 }
 
 SweRunResult RunSweCycles(Grid& g, const Params& p, int cycles,
-                          SimStats* stats) {
+                          SimStats* stats, SweAuditBaseline* audit,
+                          int cycle_offset) {
   const float cell_m = p.world_m / float(p.res);
   SweRunResult result;
 
@@ -1587,20 +1588,17 @@ SweRunResult RunSweCycles(Grid& g, const Params& p, int cycles,
   ReduceResult red = TimedReduce(g, p, stats);
   if (red.nonfinite) {
     result.ok = false;
-    result.aborted_cycle = 0;
-    result.reason =
-        "cycle 0: non-finite h or height detected in the starting state, "
-        "before any substep ran";
-    WriteAbortSnapshot(g, p, 0);
+    result.aborted_cycle = cycle_offset;
+    char buf0[160];
+    std::snprintf(buf0, sizeof(buf0),
+                  "cycle %d: non-finite h or height detected in the starting "
+                  "state, before any substep ran",
+                  cycle_offset);
+    result.reason = buf0;
+    WriteAbortSnapshot(g, p, cycle_offset);
     return result;
   }
 
-  // Sediment mass audit baseline, captured HERE -- at phase-1 entry, i.e. on
-  // whatever bed and suspended load the caller hands over (in production,
-  // phase-0's finished landscape after SweWarmStart). The three ledger
-  // counters are snapshotted alongside it rather than assumed zero, so a
-  // caller that runs RunSweCycles more than once on the same Grid audits its
-  // own segment instead of re-auditing history.
   const bool morpho = p.morfac > 0.f;
 
   // SOIL-PRODUCTION TRIPWIRE. This guards a mistake nobody has made yet, and
@@ -1628,20 +1626,40 @@ SweRunResult RunSweCycles(Grid& g, const Params& p, int cycles,
   // than to widen the guard.
   if (morpho && p.enable_soil_production && p.morfac > 1.0f) {
     result.ok = false;
-    result.aborted_cycle = 0;
-    result.reason =
-        "cycle 0: soil production is enabled with morfac > 1 -- the "
-        "MORFAC-before-substrate-split aggregation in SedExchange is exact "
-        "only over a monotonically DEPLETING soil column, and weathering "
-        "adds cover back between fluid intervals. Sub-step the exchange "
-        "across the mantle, or run this combination at morfac <= 1";
+    result.aborted_cycle = cycle_offset;
+    char buf1[352];
+    std::snprintf(buf1, sizeof(buf1),
+                  "cycle %d: soil production is enabled with morfac > 1 -- "
+                  "the MORFAC-before-substrate-split aggregation in "
+                  "SedExchange is exact only over a monotonically DEPLETING "
+                  "soil column, and weathering adds cover back between fluid "
+                  "intervals. Sub-step the exchange across the mantle, or "
+                  "run this combination at morfac <= 1",
+                  cycle_offset);
+    result.reason = buf1;
     return result;
   }
 
-  const double audit_baseline_m3 = morpho ? SolidVolumeM3(g, p) : 0.0;
-  const double audit_base_export = g.swe_sed_border_export_m3;
-  const double audit_base_created = g.swe_sed_morfac_created_m3;
-  const double audit_base_fix_residual = g.swe_sed_advect_fix_residual_m3;
+  // Sediment mass audit baseline. Self-contained by default -- captured
+  // HERE, at THIS call's entry, exactly as before -- unless `audit` is
+  // non-null and a caller threads the SAME object across several calls
+  // (main()'s --snapshot-every batching), in which case it is captured ONCE
+  // on the first call and every later call reads the stored values instead
+  // of re-capturing. See SweAuditBaseline's own comment (protogen.hpp) for
+  // why the distinction matters -- it is a real fix, not a refactor.
+  SweAuditBaseline local_audit;
+  SweAuditBaseline& ab = audit ? *audit : local_audit;
+  if (morpho && !ab.captured) {
+    ab.solid_m3 = SolidVolumeM3(g, p);
+    ab.base_export_m3 = g.swe_sed_border_export_m3;
+    ab.base_created_m3 = g.swe_sed_morfac_created_m3;
+    ab.base_fix_residual_m3 = g.swe_sed_advect_fix_residual_m3;
+    ab.captured = true;
+  }
+  const double audit_baseline_m3 = ab.solid_m3;
+  const double audit_base_export = ab.base_export_m3;
+  const double audit_base_created = ab.base_created_m3;
+  const double audit_base_fix_residual = ab.base_fix_residual_m3;
 
   for (int cycle = 0; cycle < cycles; ++cycle) {
     // h_max floored at eps_wet: a bone-dry grid has zero wave speed, which
@@ -1655,13 +1673,13 @@ SweRunResult RunSweCycles(Grid& g, const Params& p, int cycles,
 
     if (dt < p.dt_floor_s) {
       result.ok = false;
-      result.aborted_cycle = cycle;
+      result.aborted_cycle = cycle_offset + cycle;
       char buf[192];
       std::snprintf(buf, sizeof(buf),
                     "cycle %d: dt-floor -- CFL dt %.3e s below dt_floor_s %.3e s",
-                    cycle, double(dt), double(p.dt_floor_s));
+                    cycle_offset + cycle, double(dt), double(p.dt_floor_s));
       result.reason = buf;
-      WriteAbortSnapshot(g, p, cycle);
+      WriteAbortSnapshot(g, p, cycle_offset + cycle);
       return result;
     }
 
@@ -1741,17 +1759,17 @@ SweRunResult RunSweCycles(Grid& g, const Params& p, int cycles,
                            kMassAuditAbsFrac * std::fabs(audit_baseline_m3);
         if (!(std::fabs(resid) <= tol)) {
           result.ok = false;
-          result.aborted_cycle = cycle;
+          result.aborted_cycle = cycle_offset + cycle;
           char buf[352];
           std::snprintf(buf, sizeof(buf),
                         "cycle %d: sediment-mass audit -- residual %.6e m3 "
                         "exceeds tolerance %.6e m3 (solid %.6e, baseline "
                         "%.6e, morfac-created %.6e, border-export %.6e, "
                         "advect-unplaced %.6e)",
-                        cycle, resid, tol, solid_now, audit_baseline_m3,
-                        created, exported, unplaced);
+                        cycle_offset + cycle, resid, tol, solid_now,
+                        audit_baseline_m3, created, exported, unplaced);
           result.reason = buf;
-          WriteAbortSnapshot(g, p, cycle);
+          WriteAbortSnapshot(g, p, cycle_offset + cycle);
           return result;
         }
       }
@@ -1765,11 +1783,11 @@ SweRunResult RunSweCycles(Grid& g, const Params& p, int cycles,
     red = TimedReduce(g, p, stats);
     if (red.nonfinite) {
       result.ok = false;
-      result.aborted_cycle = cycle;
-      result.reason = "cycle " + std::to_string(cycle) +
+      result.aborted_cycle = cycle_offset + cycle;
+      result.reason = "cycle " + std::to_string(cycle_offset + cycle) +
                       ": non-finite h or height detected after this cycle's "
                       "substeps";
-      WriteAbortSnapshot(g, p, cycle);
+      WriteAbortSnapshot(g, p, cycle_offset + cycle);
       return result;
     }
   }
