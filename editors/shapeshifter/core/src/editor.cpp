@@ -5,12 +5,14 @@
 #include <cmath>
 #include <cstring>
 
+#include <spdlog/spdlog.h>
+
 #include "camera.h"
 #include "camera_controller.h"
 #include "gizmo.h"
 #include "navigation.h"
 #include "picking.h"
-#include "renderer.h"
+#include "rhi_renderer.h"
 #include "scene.h"
 
 namespace sq {
@@ -35,7 +37,27 @@ inline constexpr float kOriginMarkerHalfWidthPts = 1.0f; // ~2pt shaft
 inline constexpr float kOriginPipHalfSizePts = 2.5f;
 
 struct Editor::Impl {
-    Renderer renderer;
+    // The device, the shader compiler and the renderer are all created at
+    // attachLayer, because a Metal device is only worth creating once there is
+    // a surface to render to. Editor owns the first two rather than the
+    // renderer so the test path and the app path construct a renderer the same
+    // way -- see RhiRenderer::Create.
+    std::unique_ptr<badlands::rhi::IRhiDevice> device;
+    std::unique_ptr<badlands::slang::SlangCompiler> compiler;
+    std::unique_ptr<RhiRenderer> renderer;
+    // Pixels, tracked here because the swapchain is sized in pixels while
+    // setViewportSize is handed points and a backing scale.
+    uint32_t drawableWidthPx = 0;
+    uint32_t drawableHeightPx = 0;
+
+    // The renderer does not exist until attachLayer, and the editor is fully
+    // usable without one -- every headless test drives spawn/select/drag with
+    // no device at all. Scene-line invalidation is the one renderer-facing
+    // notification the editing paths emit, from nine call sites, so it is
+    // funnelled through here rather than null-checked nine times.
+    void markSceneLinesDirty() {
+        if (renderer) renderer->set_scene_lines_dirty();
+    }
     SceneDocument scene;
     CameraController controller;
     float viewportWidthPts = 0.0f;  // for pick()'s ray_through_view_point
@@ -120,11 +142,71 @@ Editor* Editor::create() {
 }
 
 void Editor::attachLayer(void* caMetalLayer) {
-    impl_->renderer.attach_layer(static_cast<CA::MetalLayer*>(caMetalLayer));
+    // TEARDOWN FIRST, in reverse dependency order. Assigning over impl_->device
+    // destroys the old device, and the renderer built from it -- pipelines,
+    // binding tables, the frame allocator's buffers, a swapchain -- outlives
+    // that assignment by five lines and is then destroyed against freed memory.
+    // The early return below makes it worse: a second CreateDevice that fails
+    // leaves a live renderer pointing at a device that no longer exists, and
+    // the next render() walks it.
+    //
+    // Reached whenever SwiftUI calls makeNSView a second time on the same
+    // Editor -- a re-created representable identity, the viewport moving
+    // between panes. The Editor is app-lifetime (SWIFT_IMMORTAL_REFERENCE), so
+    // it is the same instance every time.
+    impl_->renderer.reset();
+    impl_->compiler.reset();
+    impl_->device.reset();
+
+    impl_->device = badlands::rhi::CreateDevice(
+        {.backend = badlands::rhi::BackendKind::Metal,
+         // Debug builds get the validation decorator; it is compiled out of
+         // release, so this is not a runtime cost anyone ships.
+         .enable_validation = true,
+         .label = "shapeshifter"});
+    if (!impl_->device) return; // CreateDevice logged why
+
+
+    // ABSOLUTE, baked in by CMake. The rest of this repo resolves shader paths
+    // relative to cwd and is run from the repo root; a launched .app bundle has
+    // no such cwd, and getting this wrong fails silently and totally -- no
+    // compiler, no pipelines, no renderer, a window that clears and draws
+    // nothing with no error anywhere.
+    const std::string shaders = SHAPESHIFTER_SHADER_DIR;
+    // The engine's common modules ride along: every fragment here presents
+    // through output_transform, which is shared rather than transcribed so the
+    // editor and the engine cannot disagree about what an EDR surface wants.
+    const std::string search[] = {shaders + "/slang/shapeshifter", shaders,
+                                  BADLANDS_ENGINE_SLANG_DIR};
+    impl_->compiler = badlands::slang::CreateSlangCompiler(search);
+    if (!impl_->compiler) {
+        spdlog::error("shapeshifter: no Slang compiler; the viewport will be blank");
+        return;
+    }
+
+    impl_->renderer = RhiRenderer::Create(*impl_->device, *impl_->compiler,
+                                          badlands::rhi::Format::RGBA16Float);
+    if (!impl_->renderer) {
+        spdlog::error("shapeshifter: the renderer failed to build (shaders at {}); "
+                      "the viewport will be blank", shaders);
+        return;
+    }
+    impl_->renderer->AttachLayer(caMetalLayer);
+    // A size may already have arrived if the view laid out before attaching.
+    if (impl_->drawableWidthPx > 0 && impl_->drawableHeightPx > 0) {
+        impl_->renderer->SetViewportSize(impl_->drawableWidthPx, impl_->drawableHeightPx);
+    }
 }
 
 void Editor::setViewportSize(float widthPts, float heightPts, float backingScale) {
-    impl_->renderer.set_viewport_size(widthPts, heightPts, backingScale);
+    // Pixels, not points: a swapchain is sized in pixels, and using points on a
+    // HiDPI display yields a plausible-looking half-resolution image rather than
+    // an error.
+    impl_->drawableWidthPx = uint32_t(widthPts * backingScale);
+    impl_->drawableHeightPx = uint32_t(heightPts * backingScale);
+    if (impl_->renderer) {
+        impl_->renderer->SetViewportSize(impl_->drawableWidthPx, impl_->drawableHeightPx);
+    }
     if (widthPts > 0.0f && heightPts > 0.0f) {
         impl_->controller.set_aspect(widthPts / heightPts);
         impl_->viewportWidthPts = widthPts;
@@ -132,7 +214,8 @@ void Editor::setViewportSize(float widthPts, float heightPts, float backingScale
     }
 }
 
-void Editor::render(void* caMetalDrawable) {
+void Editor::render() {
+    if (!impl_->renderer) return;
     const Camera camera = impl_->controller.to_camera();
 
     // Per-frame gizmo push: core owns all the plane math, so the renderer
@@ -149,9 +232,9 @@ void Editor::render(void* caMetalDrawable) {
         // The grid is the Placement gizmo's reference plane, and a reference is
         // only worth its screen area while you are moving something against it.
         const bool show_grid = impl_->drag.active && impl_->drag.slot == GizmoSlot::Placement;
-        impl_->renderer.set_gizmos(placement, shape, highlighted, camera.eye, show_grid);
+        impl_->renderer->set_gizmos(placement, shape, highlighted, camera.eye, show_grid);
     } else {
-        impl_->renderer.hide_gizmo();
+        impl_->renderer->hide_gizmo();
     }
 
     // Screen-constant chrome. All of it needs the same conversion -- view
@@ -174,7 +257,7 @@ void Editor::render(void* caMetalDrawable) {
         // whole job is to show what a rotation will swing around.
         const simd_float3 pivot = impl_->controller.pivot();
         const float pivot_scale = pts_to_world_at(pivot);
-        impl_->renderer.set_pivot_marker(pivot,
+        impl_->renderer->set_pivot_marker(pivot,
                                          kPivotRadiusPts * pivot_scale,
                                          kPivotLineHalfWidthPts * pivot_scale,
                                          camera.eye,
@@ -182,12 +265,12 @@ void Editor::render(void* caMetalDrawable) {
 
         // Predictive pivot dot, screen-constant like the pivot ring.
         if (impl_->focus_preview_valid) {
-            impl_->renderer.set_focus_preview(impl_->focus_preview,
+            impl_->renderer->set_focus_preview(impl_->focus_preview,
                                               kFocusPreviewRadiusPts *
                                                   pts_to_world_at(impl_->focus_preview),
                                               camera.eye);
         } else {
-            impl_->renderer.hide_focus_preview();
+            impl_->renderer->hide_focus_preview();
         }
 
         // World-origin +Y axis and pip. Height is world-constant (it is a
@@ -195,13 +278,13 @@ void Editor::render(void* caMetalDrawable) {
         // width and pip stay screen-constant, so the marker keeps a steady
         // visual weight without lying about how tall 3 units is.
         const float origin_scale = pts_to_world_at((simd_float3){0.0f, 0.0f, 0.0f});
-        impl_->renderer.set_origin_marker(kOriginMarkerHeight,
+        impl_->renderer->set_origin_marker(kOriginMarkerHeight,
                                           kOriginMarkerHalfWidthPts * origin_scale,
                                           kOriginPipHalfSizePts * origin_scale,
                                           camera.eye);
     }
 
-    impl_->renderer.render(static_cast<CA::MetalDrawable*>(caMetalDrawable), impl_->scene, impl_->selected, camera);
+    impl_->renderer->RenderFrame(impl_->scene, impl_->selected, camera);
 }
 
 void Editor::beginCameraGesture(CameraGesture kind, float anchorX, float anchorY) {
@@ -279,7 +362,7 @@ void Editor::updateCameraGesture(float dxTotal, float dyTotal) {
     }
 
     impl_->last_camera_activity = std::chrono::steady_clock::now();
-    impl_->renderer.set_scene_lines_dirty();
+    impl_->markSceneLinesDirty();
 }
 
 void Editor::endCameraGesture() {
@@ -299,7 +382,7 @@ void Editor::frameSelected() {
     const float radius = frame_radius_for_bound(node_bounding_radius(*node), camera.fov_y_radians);
     if (impl_->controller.frame_on(node->position, radius)) {
         impl_->last_camera_activity = std::chrono::steady_clock::now();
-        impl_->renderer.set_scene_lines_dirty();
+        impl_->markSceneLinesDirty();
     }
 }
 
@@ -325,7 +408,7 @@ PickResult Editor::pick(float x, float y) const {
 void Editor::select(int32_t nodeId) {
     impl_->selected = nodeId;
     impl_->hover = GizmoHit{GizmoSlot::Placement, GizmoHandle::None}; // the hovered handle belonged to the old selection's gizmo
-    impl_->renderer.set_scene_lines_dirty(); // selection change alters which node's wireframe (if any) is drawn
+    impl_->markSceneLinesDirty(); // selection change alters which node's wireframe (if any) is drawn
 }
 
 int32_t Editor::selectedNode() const {
@@ -376,7 +459,7 @@ void Editor::deleteSelectedNode() {
     // Gizmo hides on its own next render(): selectedNode is looked up via
     // impl_->scene.find(impl_->selected), which is null once selected is
     // kInvalidNode, regardless of gizmo_visible — no separate flag to clear.
-    impl_->renderer.set_scene_lines_dirty();
+    impl_->markSceneLinesDirty();
 }
 
 void Editor::nodeName(int32_t nodeId, char* buf, int32_t bufLen) const {
@@ -575,7 +658,7 @@ void Editor::updateDrag(float x, float y) {
             std::clamp(scale.y, kNodeScaleMin, kNodeScaleMax),
             std::clamp(scale.z, kNodeScaleMin, kNodeScaleMax),
         };
-        impl_->renderer.set_scene_lines_dirty();
+        impl_->markSceneLinesDirty();
         return;
     }
 
@@ -607,7 +690,7 @@ void Editor::updateDrag(float x, float y) {
                          simd_act(q, impl_->drag.start_pos - impl_->drag.frame.origin);
         // snap_point and snap_normal are deliberately untouched: the surface
         // did not move, and the contact point is what we just rotated about.
-        impl_->renderer.set_scene_lines_dirty();
+        impl_->markSceneLinesDirty();
         return;
     }
 
@@ -647,7 +730,7 @@ void Editor::updateDrag(float x, float y) {
     // with the node spawning centred ON its snap point, a snap frame that rode
     // along would keep the two anchors equal forever and the Placement/Shape
     // split could never be observed at all.
-    impl_->renderer.set_scene_lines_dirty();
+    impl_->markSceneLinesDirty();
 }
 
 void Editor::endDrag() {
@@ -700,7 +783,7 @@ void Editor::setNodeOp(int32_t nodeId, Op op) {
     // because it's cheap, op changes are rare, and it keeps the invalidation
     // rule simple ("any node edit dirties the lines") rather than requiring
     // every call site to reason about which fields the wireframe reads.
-    impl_->renderer.set_scene_lines_dirty();
+    impl_->markSceneLinesDirty();
 }
 
 Vec3f Editor::nodeScale(int32_t nodeId) const {
@@ -751,7 +834,7 @@ void Editor::setNodeShapeParam(int32_t nodeId, float value) {
     // Unlike setNodeOp's, this one is load-bearing: the wireframe builders read
     // shape_param (a cone's slant lines and a prism's side count both move with
     // it), so a stale line buffer would show the previous value.
-    impl_->renderer.set_scene_lines_dirty();
+    impl_->markSceneLinesDirty();
 }
 
 } // namespace sq

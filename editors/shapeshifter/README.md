@@ -1,7 +1,8 @@
 # Shapeshifter
 
 Shapeshifter is a native macOS 3D SDF editor MVP: a SwiftUI + AppKit shell
-over a C++20 metal-cpp core, joined by direct Swift↔C++ interop (no bridge
+over a C++ core that renders through badlands' RHI and render graph, joined by
+direct Swift↔C++ interop (no bridge
 files). The viewport is a per-pixel sphere-traced render of the CSG scene,
 evaluated every frame (see Rendering below), navigated by an always-on
 cursor-anchored camera.
@@ -141,7 +142,8 @@ Color legend: pale blue = selected; red = a subtracted shape's wireframe
 ## Rendering
 
 The viewport is a per-pixel sphere-traced render of the CSG scene
-(`shaders/raymarch.metal` + `shaders/sdf_scene.h`), evaluated every frame —
+(`shaders/slang/shapeshifter/raymarch.slang` + `shaders/sdf_scene.h`), evaluated
+every frame —
 edits and drags are visible live, with no reconstruction latency. Shading is
 normal-colored debug (color = 0.5·(n+1), gradient normal — no lighting). The
 wireframe draws for the selected object, plus any unselected Subtract node
@@ -166,7 +168,8 @@ CMake/ctest), and `Shapeshifter` (the Swift app, XcodeGen).
   controller, cursor-anchored navigation (`navigation.h`), SDF-traced picking,
   gizmo drag/scale math, DCSDD mesh reconstruction
   (dormant, background thread), and all Metal rendering (raymarch + wireframe
-  + shaded-mesh pipelines, depth buffer, per-frame encode) via metal-cpp.
+  + shaded-mesh pipelines, depth buffer, per-frame encode) through the engine's
+  RHI and render graph, with Slang shaders compiled at startup.
 - **Swift** (`app/Sources`) owns the 2-mode state machine and the pointer
   gesture state machine, raw AppKit input
   (mouse/keyboard/gesture events on the `CAMetalLayer`-backed viewport), and

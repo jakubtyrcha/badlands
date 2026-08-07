@@ -793,3 +793,34 @@ TEST_CASE("every wireframe vertex lies on the shape's own zero set") {
         }
     }
 }
+
+TEST_CASE("append_node_wireframe emits no NaN for a degenerate scale") {
+    // append_rounded_box_edges divides the rounding radius by the half-extents
+    // to get a unit-local flat width. With a zero extent, rb is also zero, so
+    // that is 0/0 -- and the NaN goes straight into the line vertex buffer.
+    //
+    // The shader's cube branch deliberately floors NOTHING, precisely so a
+    // zero-scale cube stays benign rather than becoming a special case. The
+    // wireframe has to hold up its end of that.
+    for (const Shape shape : {Shape::Cube, Shape::Octahedron, Shape::Capsule,
+                              Shape::Vesica}) {
+        CAPTURE(static_cast<int>(shape));
+        Node node;
+        node.id = 1;
+        node.shape = shape;
+        node.scale = {1.0f, 0.0f, 1.0f};
+        node.shape_param = 0.5f; // rounding on, so the division is reached
+
+        std::vector<LineVertex> out;
+        append_node_wireframe(out, node, simd_float4{1, 1, 1, 1},
+                              simd_float3{0.0f, 0.0f, 5.0f});
+        int nan_count = 0;
+        for (const LineVertex& v : out) {
+            if (std::isnan(v.pos.x) || std::isnan(v.pos.y) || std::isnan(v.pos.z)) {
+                ++nan_count;
+            }
+        }
+        CAPTURE(out.size());
+        CHECK(nan_count == 0);
+    }
+}

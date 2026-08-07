@@ -4,21 +4,18 @@
 // source of truth shared by the CPU (picking, DCSDD sampling, core/src/sdf.cpp)
 // and the GPU raymarch shader.
 //
-// TRIPLE-COMPILE: plain C++ (core/), MSL (shaders/*.metal) and Slang
-// (shaders/slang/shapeshifter/*.slang, which define SDF_SLANG before including
-// this). None of them share a standard library -- MSL has no <simd/simd.h> or
-// <cfloat>, Slang has neither plus no `sizeof` and no raw pointers -- so every
-// type and math call is selected in the shim block below, the same idiom
-// shared_types.h uses for its own typedefs.
+// DUAL-COMPILE: plain C++ (core/) and Slang (shaders/slang/shapeshifter/*.slang,
+// which define SDF_SLANG before including this). They share no standard library
+// -- Slang has no <simd/simd.h>, no <cfloat>, no `sizeof` and no raw pointers --
+// so every type and math call is selected in the shim block below, the same
+// idiom shared_types.h uses for its own typedefs.
 //
-// WHY A THIRD ARM RATHER THAN A SECOND FILE. Only the shim block is
-// language-specific; the ~450 lines of SDF math below are already written
-// against it and are language-neutral as a result. Porting the GPU side to
-// Slang by transcription would have copied those 450 lines to drift on their
-// own, to catch a class of error the compiler catches here for 43 lines. The
-// picking/rendering agreement this preserves is no longer REQUIRED -- see
-// core/src/picking.h -- it is simply free, and stays free until the raymarch
-// pass is replaced, at which point this arm is deleted rather than reconciled.
+// It was briefly three: MSL had an arm too, until the renderer moved onto the
+// RHI and the .metal files went away. That arm cost 43 lines rather than the
+// 450 a transcription would have, because only the shim block is
+// language-specific and the SDF math below is written against it. The same
+// property is why adding a third language back would be cheap if one is ever
+// wanted.
 
 #include "shared_types.h" // sq_float4, sq_float4x4
 
@@ -36,9 +33,6 @@
 typedef float2 sq_float2;
 #endif
 typedef float3 sq_float3;
-#elif defined(__METAL_VERSION__)
-typedef metal::float2 sq_float2;
-typedef metal::float3 sq_float3;
 #else
 #include <cfloat>
 #include <cmath>
@@ -46,11 +40,11 @@ typedef simd_float2 sq_float2;
 typedef simd_float3 sq_float3;
 #endif
 
-// MSL has no <cfloat>. This is the standard FLT_MAX text (glibc/Darwin
+// Slang has no <cfloat>. This is the standard FLT_MAX text (glibc/Darwin
 // <cfloat> define FLT_MAX with this exact literal) so the two branches agree
 // bit-for-bit once rounded to float32; the C++ branch uses the real FLT_MAX
 // so it is exact by construction, not just "close".
-#if defined(SDF_SLANG) || defined(__METAL_VERSION__)
+#if defined(SDF_SLANG)
 #define SDF_FLT_MAX 3.402823466e+38f
 #else
 #define SDF_FLT_MAX FLT_MAX
@@ -64,16 +58,14 @@ typedef simd_float3 sq_float3;
 // Slang has no raw buffer pointers; a StructuredBuffer indexes identically at
 // the call site (`nodes[i]`), which is all sdf_fold below asks of it.
 #define SDF_NODE_PTR StructuredBuffer<SdfNode>
-#elif defined(__METAL_VERSION__)
-#define SDF_NODE_PTR device const SdfNode*
 #else
 #define SDF_NODE_PTR const SdfNode*
 #endif
 
 // ---------------------------------------------------------------------------
 // Portable math toolkit: thin wrappers selecting metal:: vs simd_-prefixed
-// free functions per __METAL_VERSION__, so the actual SDF/ray-gen code below
-// reads the same in both languages. Kept to exactly what this file needs.
+// free functions per language, so the actual SDF/ray-gen code below reads the
+// same in both. Kept to exactly what this file needs.
 
 #if defined(SDF_SLANG)
 // Slang's builtins are unprefixed and match one-for-one, so this arm is a
@@ -110,32 +102,6 @@ inline sq_float4 sdf_transform(sq_float4x4 m, sq_float4 v) { return mul(m, v); }
 inline sq_float4 sdf_column(sq_float4x4 m, int i) {
     return sq_float4(m[0][i], m[1][i], m[2][i], m[3][i]);
 }
-#elif defined(__METAL_VERSION__)
-inline float sdf_abs(float v) { return metal::abs(v); }
-inline sq_float3 sdf_abs(sq_float3 v) { return metal::abs(v); }
-inline sq_float2 sdf_min(sq_float2 a, sq_float2 b) { return metal::min(a, b); }
-inline sq_float2 sdf_max(sq_float2 a, sq_float2 b) { return metal::max(a, b); }
-inline sq_float3 sdf_min(sq_float3 a, sq_float3 b) { return metal::min(a, b); }
-inline sq_float3 sdf_max(sq_float3 a, sq_float3 b) { return metal::max(a, b); }
-inline float sdf_min(float a, float b) { return metal::min(a, b); }
-inline float sdf_max(float a, float b) { return metal::max(a, b); }
-inline float sdf_length(sq_float2 v) { return metal::length(v); }
-inline float sdf_length(sq_float3 v) { return metal::length(v); }
-inline float sdf_dot(sq_float2 a, sq_float2 b) { return metal::dot(a, b); }
-inline sq_float3 sdf_cross(sq_float3 a, sq_float3 b) { return metal::cross(a, b); }
-inline sq_float3 sdf_normalize(sq_float3 v) { return metal::normalize(v); }
-inline float sdf_reduce_max(sq_float3 v) { return metal::max(v.x, metal::max(v.y, v.z)); }
-inline float sdf_reduce_min(sq_float3 v) { return metal::min(v.x, metal::min(v.y, v.z)); }
-inline float sdf_sqrt(float v) { return metal::sqrt(v); }
-inline float sdf_floor(float v) { return metal::floor(v); }
-inline float sdf_cos(float v) { return metal::cos(v); }
-inline float sdf_sin(float v) { return metal::sin(v); }
-inline float sdf_atan2(float y, float x) { return metal::atan2(y, x); }
-inline sq_float2 sdf_make2(float x, float y) { return sq_float2(x, y); }
-inline sq_float3 sdf_make3(float x, float y, float z) { return sq_float3(x, y, z); }
-inline sq_float4 sdf_make4(float x, float y, float z, float w) { return sq_float4(x, y, z, w); }
-inline sq_float4 sdf_transform(sq_float4x4 m, sq_float4 v) { return m * v; }
-inline sq_float4 sdf_column(sq_float4x4 m, int i) { return m.columns[i]; }
 #else
 inline float sdf_abs(float v) { return std::fabs(v); }
 inline sq_float3 sdf_abs(sq_float3 v) { return simd_abs(v); }
@@ -211,7 +177,7 @@ typedef struct {
     sq_float4 params;
 } SdfNode;
 
-// Compiled under both __METAL_VERSION__ (a future raymarch .metal TU) and
+// Compiled under both SDF_SLANG (shaders/slang/shapeshifter/raymarch.slang) and
 // plain C++ (core/tests), via the dual-compile typedefs above -- so this one
 // assert covers both sides, matching shared_types.h's MeshVertex precedent.
 SDF_STATIC_ASSERT(sizeof(SdfNode) == 64, "SdfNode must be 64 bytes");
@@ -236,8 +202,11 @@ SDF_STATIC_ASSERT(sizeof(SdfNode) == 64, "SdfNode must be 64 bytes");
 // Floor on a half-extent, guarding the cross-section contraction's division.
 // Node::scale is clamped to kNodeScaleMin by every drag, but SceneDocument::add
 // takes a Node verbatim, so the field can hold whatever a test or a future
-// importer puts there -- and a zero would otherwise produce inf, then NaN, and
-// a NaN propagates through the CSG fold to the whole scene.
+// importer puts there -- and a zero would otherwise produce inf, then NaN.
+// A NaN does NOT announce itself: sdf_fold reduces with fmin, which returns the
+// other operand rather than propagating, so the node folds to FLT_MAX and
+// merely disappears. picking.cpp evaluates a node directly and gets it raw,
+// where every comparison against it is false and the trace stalls.
 #define SDF_MIN_HALF_EXTENT 1e-5f
 
 // ---------------------------------------------------------------------------
@@ -510,22 +479,36 @@ inline float sdf_shape_roundness(float param) { return sdf_clamp(param, 0.0f, 1.
 inline float sdf_eval_node(SdfNode node, sq_float3 p) {
     const sq_float3 q = sdf_rotate(node.inv_rotation, p - node.pos_shape.xyz);
     // NOT named `half`: that's a reserved MSL type keyword (the 16-bit float
-    // type), and this header must compile under __METAL_VERSION__ too.
+    // type), and this header must compile under Slang too.
     const sq_float3 half_extents = node.half_extents_op.xyz;
     const int shape = int(node.pos_shape.w);
     const float param = node.params.x;
 
+    // ABS, but deliberately NOT sdf_safe_half_extents -- for the CUBE ALONE.
+    // sd_box divides by nothing, so it needs no floor, and not flooring is what
+    // keeps a zero-scale cube behaving exactly as it did before rounding
+    // existed: the field of a flat square, which is a real answer. It DOES need
+    // the absolute value: a negative scale component must mirror a shape, and
+    // taking a negative half-extent unsigned makes sd_box's `abs(q) - half`
+    // positive everywhere, i.e. empty space. Six of the eight shapes got this
+    // from sdf_safe_half_extents below; the cube silently did not, and
+    // append_node_wireframe's simd_abs(node.scale) already assumed otherwise.
+    const sq_float3 abs_half = sdf_abs(half_extents);
     if (shape == SDF_SHAPE_CUBE) {
-        // No safe half-extents and no division here, so a zero-scale cube still
-        // behaves exactly as it did before rounding existed.
-        const float rb = sdf_shape_roundness(param) * sdf_reduce_min(sdf_abs(half_extents));
-        return sdf_sd_box(q, half_extents - sdf_make3(rb, rb, rb)) - rb;
-    }
-    if (shape == SDF_SHAPE_SPHERE) {
-        return sdf_sd_ellipsoid(q, half_extents);
+        const float rb = sdf_shape_roundness(param) * sdf_reduce_min(abs_half);
+        return sdf_sd_box(q, abs_half - sdf_make3(rb, rb, rb)) - rb;
     }
 
     const sq_float3 h = sdf_safe_half_extents(half_extents);
+    // FLOORED, unlike the cube above, because sdf_sd_ellipsoid divides by the
+    // radii twice: a zero half-extent gives inf/inf = NaN at every point rather
+    // than the flat disc a flat sphere should be. It reached here because the
+    // sphere shares the cube's "no division" exemption, which was only ever
+    // true of the cube.
+    if (shape == SDF_SHAPE_SPHERE) {
+        return sdf_sd_ellipsoid(q, h);
+    }
+
     if (shape == SDF_SHAPE_OCTAHEDRON) {
         // The one shape that distinguishes no axis, so it contracts all three
         // onto s = min(h) rather than just the cross-section.

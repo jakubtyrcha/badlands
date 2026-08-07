@@ -13,6 +13,8 @@
 #define SDF_SLANG 1
 #include "shared_types.h"
 
+import output_transform;  // EncodeOutput: the one place a colour reaches the surface
+
 StructuredBuffer<LineVertex> vertices;
 ConstantBuffer<LineUniforms> line_uniforms;
 
@@ -31,5 +33,8 @@ LineVarying vs_main(uint vid : SV_VertexID) {
 
 [shader("fragment")]
 float4 fs_main(LineVarying in) : SV_Target {
-    return in.color;
+    // STRAIGHT alpha here (the chrome pass blends SrcAlpha/OneMinusSrcAlpha),
+    // and EncodeOutput passes alpha through untouched, so the conversion is
+    // just the primaries.
+    return EncodeOutput(in.color.rgb, in.color.a, kOutputExtendedLinearP3);
 }

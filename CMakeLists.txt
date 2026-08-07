@@ -1552,14 +1552,21 @@ endif()
 if(APPLE)
     add_executable(badlands_rhi_metal_tests
         src/engine/tests/rhi_metal_tests.cpp
+        src/engine/tests/metal_layer_swapchain_tests.mm
         third_party/catch2/extras/catch_amalgamated.cpp
     )
+    # ARC for the one Objective-C++ case, matching the backend it exercises.
+    set_source_files_properties(src/engine/tests/metal_layer_swapchain_tests.mm
+        PROPERTIES COMPILE_FLAGS "-fobjc-arc")
     target_include_directories(badlands_rhi_metal_tests PRIVATE
         ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
         ${CMAKE_SOURCE_DIR}/third_party/glm
         ${CMAKE_SOURCE_DIR}/src/engine/tests
     )
-    target_link_libraries(badlands_rhi_metal_tests PRIVATE badlands_rhi)
+    # QuartzCore for CAMetalLayer itself: the backend only ever messages a layer
+    # handed to it, so it needs no class symbol — a test that CONSTRUCTS one does.
+    target_link_libraries(badlands_rhi_metal_tests PRIVATE badlands_rhi
+        "-framework QuartzCore")
     target_link_options(badlands_rhi_metal_tests PRIVATE "-Wl,-ld_new")
     add_test(NAME badlands_rhi_metal_tests COMMAND badlands_rhi_metal_tests
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
@@ -2388,10 +2395,10 @@ add_library(shapeshifter_core STATIC
     ${SHAPESHIFTER_DIR}/core/src/gizmo.cpp
     ${SHAPESHIFTER_DIR}/core/src/lines.cpp
     ${SHAPESHIFTER_DIR}/core/src/mesh_job.cpp
-    ${SHAPESHIFTER_DIR}/core/src/metal_impl.cpp
     ${SHAPESHIFTER_DIR}/core/src/navigation.cpp
     ${SHAPESHIFTER_DIR}/core/src/picking.cpp
-    ${SHAPESHIFTER_DIR}/core/src/renderer.cpp
+    ${SHAPESHIFTER_DIR}/core/src/rhi_pipelines.cpp
+    ${SHAPESHIFTER_DIR}/core/src/rhi_renderer.cpp
     ${SHAPESHIFTER_DIR}/core/src/scene.cpp
     ${SHAPESHIFTER_DIR}/core/src/sdf.cpp
 )
@@ -2405,9 +2412,19 @@ target_include_directories(shapeshifter_core
     PUBLIC
         ${SHAPESHIFTER_DIR}/core/include
         ${SHAPESHIFTER_DIR}/shaders          # shared_types.h, ground_grid.h, sdf_scene.h
-        ${SHAPESHIFTER_DIR}/vendor/metal-cpp
 )
 target_compile_options(shapeshifter_core PRIVATE -iquote${SHAPESHIFTER_DIR}/core/src)
+
+# The Slang shaders are compiled from SOURCE at startup, so the editor needs to
+# find them on disk at run time. Everything else in this repo resolves such
+# paths relative to cwd and is run from the repo root -- but a launched .app
+# bundle has no such cwd, and the failure is silent and total: no compiler, no
+# pipelines, no renderer, a window that clears and draws nothing.
+target_compile_definitions(shapeshifter_core PRIVATE
+    SHAPESHIFTER_SHADER_DIR="${SHAPESHIFTER_DIR}/shaders"
+    # The engine's shared Slang modules, baked absolute for the same reason.
+    # output_transform lives there, and the editor presents through it.
+    BADLANDS_ENGINE_SLANG_DIR="${CMAKE_SOURCE_DIR}/shaders/slang/common")
 
 # DCSDD reconstruction is expensive numerical code (dense per-cell least-squares
 # solves x hundreds of cells x outer iterations). Unoptimized it runs ~43x slower
@@ -2418,18 +2435,25 @@ target_compile_options(shapeshifter_core PRIVATE -iquote${SHAPESHIFTER_DIR}/core
 target_compile_options(shapeshifter_core PRIVATE
     $<$<OR:$<CONFIG:>,$<CONFIG:Debug>>:-O2>)
 
+# The editor renders through the engine's RHI and render graph, and compiles its
+# shaders with the engine's Slang layer.
+#
+# NOT badlands_rhi_app: that shell owns an SDL window, and this app's window is
+# SwiftUI/AppKit. The RHI being separate from the shell -- so it never links SDL
+# -- is exactly what makes it usable from here at all.
 target_link_libraries(shapeshifter_core PUBLIC
+    badlands_rhi badlands_render_graph badlands_slang
     "-framework Metal" "-framework Foundation"
     "-framework QuartzCore" "-framework CoreGraphics")
 
-# Match the app's deployment target (editors/shapeshifter/project.yml says
-# macOS 15.0). Without this the archive builds at the SDK default and the link
-# warns that it was "built for newer 'macOS' version (26.0) than being linked
-# (15.0)" -- which is not cosmetic: the app would declare a 15.0 minimum while
-# carrying objects free to use APIs that do not exist there. Only this target
-# is constrained; the rest of the repo has no such contract to honour.
-target_compile_options(shapeshifter_core PUBLIC -mmacosx-version-min=15.0)
-target_link_options(shapeshifter_core PUBLIC -mmacosx-version-min=15.0)
+# NO deployment-target override any more, and the reason is a real change in
+# what this target is. It used to be a standalone editor core that could
+# honestly promise macOS 15; it now links badlands_rhi, the render graph and
+# badlands_slang, all built at the SDK default. Pinning this one archive lower
+# than its own dependencies produced the mismatch warning from the other side --
+# "built for newer 'macOS' version (26.0) than being linked (15.0)" -- and the
+# promise was never keepable anyway once the engine came in. The app's
+# deploymentTarget follows the engine instead (editors/shapeshifter/project.yml).
 
 # shapeshifter_core_tests: the editor core's own suite, moved across as-is.
 # It is still on doctest rather than this repo's Catch2 — porting 15 files is
@@ -2467,6 +2491,31 @@ endif()
 add_test(NAME shapeshifter_core_tests COMMAND shapeshifter_core_tests
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# shapeshifter_rhi_tests: the editor's RHI-side renderer, on the Null backend.
+#
+# Catch2 rather than the doctest suite next door, because this one links the RHI
+# and the graph and those suites are Catch2 -- two frameworks in one binary is
+# worse than two in one repo. The split is along a real seam: doctest covers the
+# editor's pure-CPU core, this covers what it does to a device.
+add_executable(shapeshifter_rhi_tests
+    ${SHAPESHIFTER_DIR}/tests/core/rhi_renderer_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(shapeshifter_rhi_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${CMAKE_SOURCE_DIR}/src
+    # badlands_write_png, for the headless frame dump -- the only way to look at
+    # what a SwiftUI app renders without a display.
+    ${CMAKE_SOURCE_DIR}/src/crates/assets/include)
+target_compile_options(shapeshifter_rhi_tests PRIVATE
+    -iquote${SHAPESHIFTER_DIR}/core/src)
+target_link_libraries(shapeshifter_rhi_tests PRIVATE shapeshifter_core assets)
+if(APPLE)
+    target_link_options(shapeshifter_rhi_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME shapeshifter_rhi_tests COMMAND shapeshifter_rhi_tests
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 # The editor's Slang entry points, compiled as a test rather than by a target.
 #
 # THIS IS WHAT KEEPS THE SLANG ARM OF sdf_scene.h HONEST. That header now
@@ -2484,6 +2533,11 @@ foreach(shader debug_lines mesh raymarch ground_grid)
                          ${SHAPESHIFTER_DIR}/shaders/slang/shapeshifter/${shader}.slang
                          -target metal -entry ${entry}
                          -I ${SHAPESHIFTER_DIR}/shaders
+                         # output_transform, which every fragment presents
+                         # through. Must match the editor's runtime search
+                         # paths (editor.cpp), or this compiles what the app
+                         # cannot.
+                         -I ${CMAKE_SOURCE_DIR}/shaders/slang/common
                          -o ${CMAKE_CURRENT_BINARY_DIR}/shapeshifter_${shader}_${entry}.metal
                  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     endforeach()
