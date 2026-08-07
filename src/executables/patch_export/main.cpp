@@ -29,10 +29,10 @@
 //   --out DIR          where the images go (created if absent).
 //   --layers a,b,c     any of height, biome, hillshade (default: all three).
 //   --height-range LO,HI
-//                      force the metre range the height channel maps over.
-//                      Default is the UNION across every window in the run, so
-//                      windows of one world are comparable by construction --
-//                      per-image autoscale silently makes them not.
+//                      force the metre range the height channel maps over, so
+//                      windows are comparable against each other. Default is
+//                      PER IMAGE (see the note at the write loop for why); the
+//                      run prints the union to hand back to this flag.
 //   --dump-patch       also write each window as a patch directory (patch_io),
 //                      which is the shareable and `mapview --load`-able form.
 //
@@ -87,6 +87,39 @@ struct Fetched {
   float water_max_m = 0.0f;
   float wet_fraction = 0.0f;
 };
+
+// A window name becomes a filename, so it has to BE one. A name carrying a
+// separator would write outside --out entirely.
+bool valid_window_name(const std::string& name) {
+  return !name.empty() && name != "." && name != ".." &&
+         name.find('/') == std::string::npos &&
+         name.find('\\') == std::string::npos;
+}
+
+// badlands_write_png reports nothing across the C ABI -- it logs to stderr and
+// returns void -- so an unwritable path or a full disk would otherwise leave a
+// success table and a 0 exit status over no images at all. Confirm the file
+// landed, and size-check the buffer against the dimensions being declared: the
+// Rust side reads w * h * 4 bytes from the pointer and a short buffer is UB
+// rather than a diagnostic.
+bool write_png_checked(const std::filesystem::path& path,
+                       const std::vector<uint8_t>& rgba, int w, int h) {
+  if (w <= 0 || h <= 0 ||
+      rgba.size() != static_cast<size_t>(w) * static_cast<size_t>(h) * 4) {
+    std::fprintf(stderr,
+                 "patch_export: %s: %zu bytes does not describe %dx%d RGBA\n",
+                 path.string().c_str(), rgba.size(), w, h);
+    return false;
+  }
+  badlands_write_png(path.string().c_str(), rgba.data(),
+                     static_cast<uint32_t>(w), static_cast<uint32_t>(h));
+  if (!std::filesystem::exists(path)) {
+    std::fprintf(stderr, "patch_export: %s was not written\n",
+                 path.string().c_str());
+    return false;
+  }
+  return true;
+}
 
 bool parse_pair(const std::string& text, double& a, double& b) {
   const size_t comma = text.find(',');
@@ -262,6 +295,13 @@ int main(int argc, char** argv) {
           return 2;
         }
       }
+      if (!want_height && !want_biome && !want_hillshade) {
+        std::fprintf(stderr,
+                     "patch_export: --layers '%s' selects nothing (want any of "
+                     "height, biome, hillshade)\n",
+                     v->c_str());
+        return 2;
+      }
     } else if (a == "--height-range") {
       auto v = next("--height-range");
       if (!v) return 2;
@@ -284,6 +324,24 @@ int main(int argc, char** argv) {
   if (load_dir.empty() || out_dir.empty() || windows.empty()) {
     std::fputs(kUsage, stderr);
     return 2;
+  }
+  // Names collide into filenames, and a second window writing over the first's
+  // images while the table still reports both is the same failure as a silently
+  // dropped line: you think you looked at something you did not.
+  std::vector<std::string> seen;
+  for (const Window& w : windows) {
+    if (!valid_window_name(w.name)) {
+      std::fprintf(stderr,
+                   "patch_export: window name '%s' is not a plain filename\n",
+                   w.name.c_str());
+      return 2;
+    }
+    if (std::find(seen.begin(), seen.end(), w.name) != seen.end()) {
+      std::fprintf(stderr, "patch_export: duplicate window name '%s'\n",
+                   w.name.c_str());
+      return 2;
+    }
+    seen.push_back(w.name);
   }
   if (patch_res <= 0 || patch_size_m <= 0.0f) {
     std::fprintf(stderr, "patch_export: --patch-size and --patch-res must be "
@@ -361,26 +419,26 @@ int main(int argc, char** argv) {
 
     const std::filesystem::path base = std::filesystem::path(out_dir);
     const std::string stem = f.window.name;
-    const uint32_t w = static_cast<uint32_t>(f.patch.height.width);
-    const uint32_t h = static_cast<uint32_t>(f.patch.height.height);
 
+    // Each layer declares the dimensions of the field it was encoded FROM.
+    // Fetch makes them all n x n today, but a future provider handing back a
+    // shorter biome raster must not be described by the height raster's size.
     if (want_height) {
-      const std::vector<uint8_t> rgba = badlands::mapgen::encode_height_water_rgba(
-          f.patch.height, f.patch.water_depth, range, water_scale_m);
-      badlands_write_png((base / (stem + "-height.png")).string().c_str(),
-                         rgba.data(), w, h);
+      all_ok &= write_png_checked(
+          base / (stem + "-height.png"),
+          badlands::mapgen::encode_height_water_rgba(
+              f.patch.height, f.patch.water_depth, range, water_scale_m),
+          f.patch.height.width, f.patch.height.height);
     }
     if (want_biome) {
-      const std::vector<uint8_t> rgba =
-          badlands::mapgen::encode_biome_rgba(f.patch.biome);
-      badlands_write_png((base / (stem + "-biome.png")).string().c_str(),
-                         rgba.data(), w, h);
+      all_ok &= write_png_checked(base / (stem + "-biome.png"),
+                                  badlands::mapgen::encode_biome_rgba(f.patch.biome),
+                                  f.patch.biome.width, f.patch.biome.height);
     }
     if (want_hillshade) {
-      const std::vector<uint8_t> rgba =
-          badlands::mapgen::encode_hillshade_rgba(f.patch);
-      badlands_write_png((base / (stem + "-hillshade.png")).string().c_str(),
-                         rgba.data(), w, h);
+      all_ok &= write_png_checked(base / (stem + "-hillshade.png"),
+                                  badlands::mapgen::encode_hillshade_rgba(f.patch),
+                                  f.patch.height.width, f.patch.height.height);
     }
 
     const std::string source_note =

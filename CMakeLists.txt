@@ -720,6 +720,12 @@ target_link_libraries(badlands_patch_lib PUBLIC badlands_mapgen_lib)
 # this: stage 3 proper (badlands_mapview_view below) links only
 # badlands_patch_lib, so it can see the PatchSource interface but never a
 # concrete provider.
+#
+# patch_export is NOT a provider -- it is a pure function of a PatchData. It
+# sits here beside patch_io because both SERIALIZE the contract (one to rasters,
+# one to images), and because the tool that wants it already links this target.
+# Keeping it out of badlands_patch_lib also keeps image encoders off stage 3,
+# which has no use for them.
 add_library(badlands_patch_providers STATIC
     src/mapgen/patch_io.cpp
     src/mapgen/synthetic_patch_source.cpp
