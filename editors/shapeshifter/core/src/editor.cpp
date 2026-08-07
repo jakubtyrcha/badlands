@@ -14,6 +14,7 @@
 #include "picking.h"
 #include "rhi_renderer.h"
 #include "scene.h"
+#include "shader_paths.h"
 
 namespace sq {
 
@@ -167,18 +168,14 @@ void Editor::attachLayer(void* caMetalLayer) {
     if (!impl_->device) return; // CreateDevice logged why
 
 
-    // ABSOLUTE, baked in by CMake. The rest of this repo resolves shader paths
-    // relative to cwd and is run from the repo root; a launched .app bundle has
-    // no such cwd, and getting this wrong fails silently and totally -- no
-    // compiler, no pipelines, no renderer, a window that clears and draws
-    // nothing with no error anywhere.
-    const std::string shaders = SHAPESHIFTER_SHADER_DIR;
-    // The engine's common modules ride along: every fragment here presents
-    // through output_transform, which is shared rather than transcribed so the
-    // editor and the engine cannot disagree about what an EDR surface wants.
-    const std::string search[] = {shaders + "/slang/shapeshifter", shaders,
-                                  BADLANDS_ENGINE_SLANG_DIR};
-    impl_->compiler = badlands::slang::CreateSlangCompiler(search);
+    // Two tiers, one winner, never the source tree -- shader_paths.h says why,
+    // and it has already logged which tier it took or exactly why neither
+    // worked. Getting this wrong used to fail silently and totally: no
+    // pipelines, no renderer, a window that clears and draws nothing.
+    const std::optional<ShaderLocation> shaders = ResolveShaderLocation();
+    if (!shaders) return; // ResolveShaderLocation logged, on stderr AND os_log
+
+    impl_->compiler = badlands::slang::CreateSlangCompiler(shaders->search_paths);
     if (!impl_->compiler) {
         spdlog::error("shapeshifter: no Slang compiler; the viewport will be blank");
         return;
@@ -187,8 +184,8 @@ void Editor::attachLayer(void* caMetalLayer) {
     impl_->renderer = RhiRenderer::Create(*impl_->device, *impl_->compiler,
                                           badlands::rhi::Format::RGBA16Float);
     if (!impl_->renderer) {
-        spdlog::error("shapeshifter: the renderer failed to build (shaders at {}); "
-                      "the viewport will be blank", shaders);
+        spdlog::error("shapeshifter: the renderer failed to build ({} tier, {}); "
+                      "the viewport will be blank", shaders->tier, shaders->root);
         return;
     }
     impl_->renderer->AttachLayer(caMetalLayer);
