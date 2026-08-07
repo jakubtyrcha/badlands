@@ -88,6 +88,22 @@ TEST_CASE("Null: CreateView after Destroy is refused", "[rhi]") {
   auto d = MakeNull();
   rhitest::CheckCreateViewAfterDestroyIsRefused(*d);
 }
+TEST_CASE("Null: cube textures and their views", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckCubeTexturesAndTheirViews(*d);
+}
+TEST_CASE("Null: cube dimension mismatches are refused", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckCubeDimensionMismatchesAreRefused(*d);
+}
+TEST_CASE("Null: cube views on bad targets are refused", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckCubeViewsOnBadTargetsAreRefused(*d);
+}
+TEST_CASE("Null: texture write bounds are refused", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckTextureWriteBoundsAreRefused(*d);
+}
 
 TEST_CASE("Null: sliced views honour their range", "[rhi]") {
   auto d = MakeNull();

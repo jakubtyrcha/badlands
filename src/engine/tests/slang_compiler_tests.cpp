@@ -57,6 +57,36 @@ public struct Params
 public float3 apply_tint(float3 c, float4 tint) { return c * tint.rgb; }
 )");
 
+    // A cube sample, which is the one thing in the IBL chain the toolchain had
+    // never been asked for. Slang reflects any non-buffer Resource as a sampled
+    // texture, so reflection alone cannot say whether the EMITTED MSL declares
+    // a texturecube or a texture2d -- and a texture2d bound to a cube handle is
+    // wrong pixels, not a compile error.
+    Put(dir / "fixture_cube.slang", R"(
+module fixture_cube;
+
+TextureCube<float4> env;
+SamplerState env_sampler;
+
+struct VOut { float4 pos : SV_Position; float3 dir : TEXCOORD0; };
+
+[shader("vertex")]
+VOut vs_cube(uint vid : SV_VertexID)
+{
+    let uv = float2(float((vid << 1) & 2), float(vid & 2));
+    VOut o;
+    o.pos = float4(uv * 2.0 - 1.0, 0.0, 1.0);
+    o.dir = float3(uv * 2.0 - 1.0, 1.0);
+    return o;
+}
+
+[shader("fragment")]
+float4 fs_cube(VOut i) : SV_Target
+{
+    return env.SampleLevel(env_sampler, normalize(i.dir), 1.5);
+}
+)");
+
     Put(dir / "fixture_compute.slang", R"(
 import fixture_common;
 
@@ -129,6 +159,39 @@ TEST_CASE("slang: compiles a compute entry to MSL with reflection",
   CHECK(ep.workgroup_size[0] == 48);
   CHECK(ep.workgroup_size[1] == 2);
   CHECK(ep.workgroup_size[2] == 1);
+}
+
+// The one link in the IBL toolchain that nothing else can vouch for.
+//
+// KindFromLayout maps every non-buffer Resource to SampledTexture, so a cube
+// and a 2D texture reflect IDENTICALLY -- which means reflection passing proves
+// nothing about what Slang emitted. A texture2d declared where the RHI binds a
+// cube handle is wrong pixels rather than a compile error, and it would surface
+// as "the prefilter looks smeared" three tasks later.
+TEST_CASE("slang: a TextureCube is emitted as a cube, not a 2D texture",
+          "[slang]") {
+  auto compiler = MakeCompiler();
+  REQUIRE(compiler);
+
+  auto shader = compiler->Get({.module = "fixture_cube", .entry = "fs_cube"},
+                              ShaderTarget::Metal);
+  REQUIRE(shader);
+  INFO(shader->source);
+  CHECK(shader->source.find("texturecube") != std::string::npos);
+  // Not merely "a cube appears somewhere": the 2D form must be absent, or a
+  // fixture that declared both would pass while binding the wrong one.
+  CHECK(shader->source.find("texture2d") == std::string::npos);
+
+  // Reflection still has to see it as a sampled texture, because that is what
+  // the RHI binding table keys on.
+  bool found = false;
+  for (const auto& b : shader->reflection.bindings) {
+    if (b.name == "env") {
+      found = true;
+      CHECK(b.kind == rhi::BindingKind::SampledTexture);
+    }
+  }
+  CHECK(found);
 }
 
 TEST_CASE("slang: reflects bindings by name and kind", "[slang]") {

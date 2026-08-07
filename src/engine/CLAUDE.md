@@ -17,6 +17,18 @@ Data flow: WESL (Rust) → WGSL → Dawn pipeline + reflection → material inst
 group) → scene-graph node → passes → SDL3. JPEG (Rust `assets`) → Dawn texture → GPU
 mips → sampled.
 
+## Screen-space work is a cost, not a free primitive
+This is a production engine. Each rule below buys real pixel throughput for
+almost no complexity, which is exactly why none of them is optional or deferred
+to a profiling session — they are cheaper to write than the version that skips
+them, and expensive to retrofit once call sites multiply.
+
+- **A fullscreen pass is ONE triangle, never two.** `Draw(3)` with the position derived from `SV_VertexID` — no vertex buffer, no index buffer. A two-triangle quad shades every 2x2 rasterizer quad straddling the diagonal **twice**, so a full-resolution pass pays for roughly an extra screen-diagonal of pixels and gains nothing. Every fullscreen VS under `shaders/slang/` already does this (`output.slang`, `resolve.slang`, `splat/resolve.slang`); a new one that does not is a regression, not a style choice.
+- **Scissor to the region actually being written.** If a pass covers a sub-rect, call `SetScissor` rather than letting the shader discard — a discarded pixel has already been shaded, so `discard` saves the write and nothing else. This is the only thing that makes a bounded-region or partial-resolution pass genuinely cheaper than a full one.
+- **Depth-test instead of branching on emptiness.** If a fullscreen pass computes an expensive result and then throws it away on some pixels, it has already paid for them. Bind the depth buffer read-only (`RasterPassBuilder::DepthReadOnly`) and let the hardware reject: reversed-Z clears to 0, so a triangle at `z = 0` with `CompareFunction::Less` runs **only** where geometry was rasterized, and the same triangle with `GreaterEqual` runs **only** where it was not. Two disjoint depth-tested draws beat one branchy fullscreen draw.
+- **Do not write a pixel a later pass will unconditionally overwrite.** If the coverage is known, express it as a depth test or a scissor rather than relying on the later pass to win. Overdraw that the graph could have avoided is the cost this section exists to name.
+- **A shader-side guard that depth already guarantees stays as a diagnostic, not as control flow.** Where a depth test makes the empty case unreachable, keep the check emitting a distinctive value rather than deleting it — a visbuffer/depth desync must be visible, per the RHI's rule 1.
+
 ## Invariants (read the cited code before touching these)
 - **Shader reflection is naga-in-Rust, not tint.** `shader_reflection.cpp` / `gpu_pipeline_generator.cpp` call the `wesl` crate's `wgsl_reflect*`. Pipelines use **explicit reflection-derived** bind-group layouts (not Dawn AUTO); build bind groups via `CreateBindGroup(device, pipeline, group, entries)`.
 - **Reversed-Z end to end:** depth clears to `0.0` (far); opaque depth-compare `GreaterEqual` (`Less` only for the shadow pass); `GLM_FORCE_DEPTH_ZERO_TO_ONE` is set project-wide; `Camera::GetProj` maps near→1, far→0.

@@ -121,6 +121,25 @@ const char* ToString(BackendKind k) {
   return "?";
 }
 
+const char* ToString(TextureDimension d) {
+  switch (d) {
+    case TextureDimension::Tex2D: return "Tex2D";
+    case TextureDimension::Tex2DArray: return "Tex2DArray";
+    case TextureDimension::Cube: return "Cube";
+  }
+  return "?";
+}
+
+const char* ToString(TextureViewDimension d) {
+  switch (d) {
+    case TextureViewDimension::Auto: return "Auto";
+    case TextureViewDimension::Tex2D: return "Tex2D";
+    case TextureViewDimension::Tex2DArray: return "Tex2DArray";
+    case TextureViewDimension::Cube: return "Cube";
+  }
+  return "?";
+}
+
 const char* ToString(BlendFactor f) {
   switch (f) {
     case BlendFactor::Zero: return "Zero";
@@ -417,7 +436,123 @@ std::optional<TextureViewDesc> ResolveViewDesc(const TextureViewDesc& requested,
         texture_label, r.layer_count, r.base_layer, layers);
     return std::nullopt;
   }
+
+  // Auto becomes concrete HERE, for the same reason a mip_count of 0 does: a
+  // resolved descriptor must not carry a value that means "ask again".
+  if (r.dimension == TextureViewDimension::Auto) {
+    switch (texture.dimension) {
+      case TextureDimension::Tex2D:
+        r.dimension = TextureViewDimension::Tex2D;
+        break;
+      case TextureDimension::Tex2DArray:
+        r.dimension = TextureViewDimension::Tex2DArray;
+        break;
+      case TextureDimension::Cube:
+        // A partial range cannot be a cube, and silently promoting it to one
+        // would be the accepted-and-ignored trap. A single face defaults to the
+        // flat 2D view that a render target wants; anything else in between
+        // stays an array slice.
+        r.dimension = (r.base_layer == 0 && r.layer_count == 6)
+                          ? TextureViewDimension::Cube
+                          : (r.layer_count == 1
+                                 ? TextureViewDimension::Tex2D
+                                 : TextureViewDimension::Tex2DArray);
+        break;
+    }
+  }
+
+  // A cube view is not "six layers you may sample by direction" -- the backend
+  // encodes the texture's own type, so both the resource and the range have to
+  // agree with the request. Refusing here rather than letting the backend
+  // silently hand back an array view is the difference between a diagnosable
+  // mistake and a shader sampling garbage.
+  if (r.dimension == TextureViewDimension::Cube) {
+    if (texture.dimension != TextureDimension::Cube) {
+      spdlog::error(
+          "rhi: CreateView on '{}': a Cube view needs a Cube texture, but this "
+          "one is {}",
+          texture_label, ToString(texture.dimension));
+      return std::nullopt;
+    }
+    if (r.base_layer != 0 || r.layer_count != 6) {
+      spdlog::error(
+          "rhi: CreateView on '{}': a Cube view covers all six faces, not {} "
+          "from {}",
+          texture_label, r.layer_count, r.base_layer);
+      return std::nullopt;
+    }
+  }
+  // The converse: a Tex2D view addresses ONE layer. Left unchecked, a
+  // whole-resource request on a cube would resolve to six layers and still
+  // claim to be a flat 2D image, which is the render-target-per-face case
+  // silently targeting all six.
+  if (r.dimension == TextureViewDimension::Tex2D && r.layer_count != 1) {
+    spdlog::error(
+        "rhi: CreateView on '{}': a Tex2D view covers one layer, not {}",
+        texture_label, r.layer_count);
+    return std::nullopt;
+  }
   return r;
+}
+
+bool ValidateTextureDesc(const TextureDesc& desc) {
+  const uint32_t layers = std::max(1u, desc.array_layers);
+  switch (desc.dimension) {
+    case TextureDimension::Tex2D:
+      if (layers != 1) {
+        spdlog::error(
+            "rhi: CreateTexture '{}': a Tex2D texture has one layer, not {} -- "
+            "say Tex2DArray if that is what was meant",
+            desc.label, layers);
+        return false;
+      }
+      return true;
+    case TextureDimension::Tex2DArray:
+      return true;
+    case TextureDimension::Cube:
+      if (layers != 6) {
+        spdlog::error(
+            "rhi: CreateTexture '{}': a Cube texture has exactly six faces, "
+            "not {}",
+            desc.label, layers);
+        return false;
+      }
+      if (desc.width != desc.height) {
+        spdlog::error(
+            "rhi: CreateTexture '{}': a Cube face is square, but this is {}x{}",
+            desc.label, desc.width, desc.height);
+        return false;
+      }
+      return true;
+  }
+  spdlog::error("rhi: CreateTexture '{}': unknown texture dimension {}",
+                desc.label, uint32_t(desc.dimension));
+  return false;
+}
+
+bool ValidateTextureWrite(const TextureDesc& desc, std::string_view label,
+                          uint32_t mip, uint32_t layer, size_t byte_count) {
+  const uint32_t mips = std::max(1u, desc.mip_levels);
+  const uint32_t layers = std::max(1u, desc.array_layers);
+  if (mip >= mips) {
+    spdlog::error("rhi: Write to '{}': mip {} is out of range ({} level(s))",
+                  label, mip, mips);
+    return false;
+  }
+  if (layer >= layers) {
+    spdlog::error("rhi: Write to '{}': layer {} is out of range ({} layer(s))",
+                  label, layer, layers);
+    return false;
+  }
+  const uint32_t w = std::max(1u, desc.width >> mip);
+  const uint32_t h = std::max(1u, desc.height >> mip);
+  const size_t needed = size_t(w) * FormatByteSize(desc.format) * h;
+  if (byte_count < needed) {
+    spdlog::error("rhi: Write to '{}' is short ({} < {} bytes for mip {})",
+                  label, byte_count, needed, mip);
+    return false;
+  }
+  return true;
 }
 
 std::unique_ptr<IRhiDevice> CreateDevice(const DeviceDesc& desc) {
