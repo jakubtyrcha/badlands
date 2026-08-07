@@ -145,8 +145,12 @@ final class DisplayLinkDriver: NSObject, CAMetalDisplayLinkDelegate {
     }
 
     func metalDisplayLink(_ link: CAMetalDisplayLink, needsUpdate update: CAMetalDisplayLink.Update) {
-        autoreleasepool { // load-bearing: drains metal-cpp autoreleased objects each frame
-            editor.render(Unmanaged.passUnretained(update.drawable as AnyObject).toOpaque())
+        // `update.drawable` is deliberately unused: the RHI's swapchain calls
+        // nextDrawable itself, so this callback is only a tick. The
+        // autoreleasepool stays load-bearing -- the RHI's Metal backend is ARC
+        // Objective-C++ and drains here each frame.
+        autoreleasepool {
+            editor.render()
         }
     }
 }
