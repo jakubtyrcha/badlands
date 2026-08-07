@@ -481,14 +481,22 @@ inline float sdf_eval_node(SdfNode node, sq_float3 p) {
     const int shape = int(node.pos_shape.w);
     const float param = node.params.x;
 
+    // ABS, but deliberately NOT sdf_safe_half_extents. These two are the only
+    // branches with no division, so they need no floor -- and not flooring is
+    // what keeps a zero-scale cube behaving exactly as it did before rounding
+    // existed. They DO need the absolute value: a negative scale component must
+    // mirror a shape, and taking a negative half-extent unsigned makes
+    // sd_box's `abs(q) - half` positive everywhere, i.e. empty space. Six of
+    // the eight shapes got this from sdf_safe_half_extents below; these two
+    // silently did not, and append_node_wireframe's simd_abs(node.scale)
+    // already assumed otherwise.
+    const sq_float3 abs_half = sdf_abs(half_extents);
     if (shape == SDF_SHAPE_CUBE) {
-        // No safe half-extents and no division here, so a zero-scale cube still
-        // behaves exactly as it did before rounding existed.
-        const float rb = sdf_shape_roundness(param) * sdf_reduce_min(sdf_abs(half_extents));
-        return sdf_sd_box(q, half_extents - sdf_make3(rb, rb, rb)) - rb;
+        const float rb = sdf_shape_roundness(param) * sdf_reduce_min(abs_half);
+        return sdf_sd_box(q, abs_half - sdf_make3(rb, rb, rb)) - rb;
     }
     if (shape == SDF_SHAPE_SPHERE) {
-        return sdf_sd_ellipsoid(q, half_extents);
+        return sdf_sd_ellipsoid(q, abs_half);
     }
 
     const sq_float3 h = sdf_safe_half_extents(half_extents);
