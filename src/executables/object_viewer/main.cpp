@@ -2811,7 +2811,8 @@ class ObjectViewerView : public rhi_app::RhiAppView {
     return true;
   }
 
-  bool OnEvent(const SDL_Event& e) override {
+  // The viewer's own input, reached through OnEvent below.
+  bool OnViewerEvent(const SDL_Event& e) {
     // NO ImGui GATING HERE any more -- the layer gives ImGui first refusal
     // before this is called, which is exactly the boilerplate the port removed.
     if (e.type == SDL_EVENT_MOUSE_WHEEL) {
@@ -2860,7 +2861,24 @@ class ObjectViewerView : public rhi_app::RhiAppView {
     output_->BeginFrame(frame_index);
   }
 
+  bool OnEvent(const SDL_Event& e) override {
+    // THE SELF-TEST STANDS IN FOR AN IMGUI WIDGET HOLDING FOCUS: consume
+    // EVERYTHING. If Escape still stops the loop, it is because the shell acted
+    // on it before asking anyone -- which is the whole claim, and the thing
+    // that broke once and left a window closable only from its title bar.
+    if (opt_.self_test_escape) return true;
+    return OnViewerEvent(e);
+  }
+
   void Update(const rhi_app::FrameTime& t) override {
+    // Pushed from inside the loop rather than injected around it, so it travels
+    // the same path a real key press does.
+    if (opt_.self_test_escape && t.index == 3) {
+      SDL_Event esc{};
+      esc.type = SDL_EVENT_KEY_DOWN;
+      esc.key.scancode = SDL_SCANCODE_ESCAPE;
+      SDL_PushEvent(&esc);
+    }
     if (!t.keys) return;
     if (orbiting_) {
       const float step = orbit_.distance * std::min(t.real_dt, 0.1f);
@@ -3036,11 +3054,40 @@ int RunWindowed(const Options& opt,
                                         "shaders/slang/app",
                                         "shaders/slang/ibl",
                                         "shaders/slang/ui"}});
-  return app.RunParsed(app_opts, [&](const rhi_app::RhiAppContext& ctx) {
-    auto v = std::make_unique<ObjectViewerView>(opt);
-    v->SetCompiler(ctx.compiler);
-    return v;
-  });
+  rhi_app::RunStats stats;
+  const int rc = app.RunParsed(
+      app_opts,
+      [&](const rhi_app::RhiAppContext& ctx) {
+        auto v = std::make_unique<ObjectViewerView>(opt);
+        v->SetCompiler(ctx.compiler);
+        return v;
+      },
+      &stats);
+  if (rc != 0) return rc;
+
+  if (opt.self_test_escape) {
+    // IT MUST HAVE STOPPED ON THE ESCAPE, well before the frame cap. Without
+    // this the flag is parsed and does nothing, and its ctest passes by running
+    // sixty frames and quitting normally -- which is what happened when the
+    // port dropped the check, leaving the regression it guards uncovered.
+    if (app_opts.max_frames == 0) {
+      spdlog::error(
+          "object_viewer self-test: --self-test-escape needs --frames N, or "
+          "there is no cap for stopping early to beat");
+      return 1;
+    }
+    if (stats.frames_begun >= app_opts.max_frames) {
+      spdlog::error(
+          "object_viewer self-test: ran all {} frames -- Escape was swallowed "
+          "by the event consumer instead of stopping the loop",
+          stats.frames_begun);
+      return 1;
+    }
+    spdlog::info("object_viewer self-test OK: Escape stopped the loop after {} "
+                 "of {} frames, through an event consumer that took everything",
+                 stats.frames_begun, app_opts.max_frames);
+  }
+  return 0;
 }
 
 }  // namespace

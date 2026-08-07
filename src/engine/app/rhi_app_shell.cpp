@@ -108,6 +108,53 @@ void AppShell::RequestResizePoints(uint32_t width, uint32_t height) {
   if (window_) SDL_SetWindowSize(window_, int(width), int(height));
 }
 
+FrameOutcome RunOneFrame(IRhiDevice& device, ISwapchain& swapchain,
+                         const AppShellCallbacks& cb, FrameInfo& info,
+                         const std::function<bool(FrameInfo&)>& apply_resize) {
+  FrameOutcome outcome;
+
+  // Paced HERE, at the top of the frame, not at Acquire. Blocking at acquire
+  // would stall the CPU after input has been sampled and the whole update has
+  // run, which is the difference between one frame of latency and three.
+  device.BeginFrame();
+  if (cb.OnFrameBegin) cb.OnFrameBegin(device.CurrentFrame());
+
+  // RESIZE RULE 1: applied at exactly one point, after the pacing wait and
+  // before any acquire or encoding. Nothing is recreated mid-frame.
+  const bool ready = !apply_resize || apply_resize(info);
+
+  AcquiredFrame frame;  // defaults to Skip
+  if (ready) frame = swapchain.Acquire();
+  if (frame.status == AcquireStatus::Ok) {
+    if (cb.OnRender && cb.OnRender(frame.view, info)) {
+      swapchain.Present();
+      outcome.presented = true;
+    } else {
+      // NOT a skipped frame -- the run ends. The drawable stays acquired and
+      // every later Acquire would be refused, so continuing means a black
+      // window for the rest of the process. See AppShellCallbacks::OnRender.
+      spdlog::error("rhi_app: frame {} could not be recorded, stopping",
+                    info.index);
+      outcome.aborted = true;
+    }
+  } else if (frame.status == AcquireStatus::Lost) {
+    spdlog::warn("rhi_app: surface lost, recreating");
+    swapchain.Resize(0, 0);
+    swapchain.Resize(info.width, info.height);
+  }
+  // Skip needs no handling at all: EndFrame retires a frame that submitted
+  // nothing, which is what keeps a minimized window from exhausting the pacing
+  // budget.
+  //
+  // And the abort is REPORTED rather than thrown from here, so this always
+  // runs: a break between BeginFrame and EndFrame takes a semaphore count that
+  // is never returned, and the destructor then trips libdispatch's "deallocated
+  // while in use" trap -- a crash that points nowhere near its cause.
+  device.EndFrame();
+  if (!ready) outcome.aborted = true;
+  return outcome;
+}
+
 RunStats AppShell::Run(const AppShellCallbacks& cb, uint64_t max_frames) {
   RunStats stats;
   // Coalesced: a live drag streams size events, and recreating the layer per
@@ -116,6 +163,34 @@ RunStats AppShell::Run(const AppShellCallbacks& cb, uint64_t max_frames) {
   uint32_t pending_w = applied_width_;
   uint32_t pending_h = applied_height_;
   SurfaceSizeTracker surface{applied_width_, applied_height_};
+
+  // Built ONCE, not per frame: it captures by reference and runs inside the
+  // frame, between the pacing wait and the acquire.
+  //
+  // Gated on what was last applied TO THE SWAPCHAIN, not on the targets: the
+  // targets are deliberately not rebuilt at zero size, so gating on them made a
+  // minimize-then-restore-to-the-same-size never tell the swapchain to come
+  // back from 0x0.
+  const std::function<bool(FrameInfo&)> apply_resize =
+      [&](FrameInfo& info) -> bool {
+    if (const auto action = surface.Update(pending_w, pending_h);
+        action.resize_swapchain) {
+      swapchain_->Resize(pending_w, pending_h);
+      if (action.rebuild_targets) {
+        applied_width_ = pending_w;
+        applied_height_ = pending_h;
+        if (cb.OnResize && !cb.OnResize(applied_width_, applied_height_)) {
+          spdlog::error("rhi_app: could not rebuild for {}x{}, stopping",
+                        pending_w, pending_h);
+          return false;
+        }
+      }
+    }
+    // RESIZE RULE 2: the size is captured once and used for everything.
+    info.width = applied_width_;
+    info.height = applied_height_;
+    return true;
+  };
 
   bool raised_on_show = false;
   running_ = true;
@@ -181,57 +256,11 @@ RunStats AppShell::Run(const AppShellCallbacks& cb, uint64_t max_frames) {
     // Paced HERE, at the top of the frame, not at Acquire. Blocking at acquire
     // would stall the CPU after input has been sampled and the whole update has
     // run, which is the difference between one frame of latency and three.
-    device_->BeginFrame();
     ++stats.frames_begun;
-    if (cb.OnFrameBegin) cb.OnFrameBegin(device_->CurrentFrame());
-
-    // RESIZE RULE 1: applied at exactly one point, after the pacing wait and
-    // before any acquire or encoding. Nothing is recreated mid-frame.
-    //
-    // Gated on what was last applied TO THE SWAPCHAIN, not on the targets: the
-    // targets are deliberately not rebuilt at zero size, so gating on them made
-    // a minimize-then-restore-to-the-same-size never tell the swapchain to come
-    // back from 0x0.
-    bool fatal = false;
-    if (const auto action = surface.Update(pending_w, pending_h);
-        action.resize_swapchain) {
-      swapchain_->Resize(pending_w, pending_h);
-      if (action.rebuild_targets) {
-        applied_width_ = pending_w;
-        applied_height_ = pending_h;
-        if (cb.OnResize && !cb.OnResize(applied_width_, applied_height_)) {
-          fatal = true;
-        }
-      }
-    }
-    // RESIZE RULE 2: the size is captured once and used for everything.
-    info.width = applied_width_;
-    info.height = applied_height_;
-
-    AcquiredFrame frame;  // defaults to Skip
-    if (!fatal) frame = swapchain_->Acquire();
-    if (frame.status == AcquireStatus::Ok) {
-      if (cb.OnRender && cb.OnRender(frame.view, info)) {
-        swapchain_->Present();
-        ++stats.frames_presented;
-      }
-    } else if (frame.status == AcquireStatus::Lost) {
-      spdlog::warn("rhi_app: surface lost, recreating");
-      swapchain_->Resize(0, 0);
-      swapchain_->Resize(applied_width_, applied_height_);
-    }
-    // Skip needs no handling at all: EndFrame retires a frame that submitted
-    // nothing, which is what keeps a minimized window from exhausting the
-    // pacing budget.
-    device_->EndFrame();
-
-    // Left HERE rather than at the failure itself. A break between BeginFrame
-    // and EndFrame takes a semaphore count that is never returned, and the
-    // destructor then trips libdispatch's "deallocated while in use" trap -- a
-    // crash that points nowhere near the failure that caused it.
-    if (fatal) {
-      spdlog::error("rhi_app: could not rebuild for {}x{}, stopping", pending_w,
-                    pending_h);
+    const FrameOutcome outcome =
+        RunOneFrame(*device_, *swapchain_, cb, info, apply_resize);
+    if (outcome.presented) ++stats.frames_presented;
+    if (outcome.aborted) {
       stats.aborted = true;
       break;
     }

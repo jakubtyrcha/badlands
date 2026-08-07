@@ -395,6 +395,21 @@ std::optional<ResolvedBindingTable> ResolveBindingTable(
   return out;
 }
 
+void RecordReadbackCopy(ICommandEncoder& encoder, ITextureView* src,
+                        IBuffer* staging) {
+  if (!src || !staging) return;
+  // STATED, not assumed. Without these the validation layer reports the copy's
+  // source as whatever the last pass left it in -- and on DX12 the copy really
+  // does read a resource still in RENDER_TARGET.
+  encoder.Transition(src->GetTexture(), ResourceState::CopySrc);
+  encoder.Transition(staging, ResourceState::CopyDst);
+  // The view's RESOLVED range says which subresource; ValidateReadbackSource
+  // has already established it is exactly one.
+  const TextureViewDesc& d = src->GetDesc();
+  encoder.CopyTextureToBuffer(src->GetTexture(), d.base_mip, d.base_layer,
+                              staging, 0);
+}
+
 bool ValidateReadbackSource(const ITextureView* src, size_t& out_bytes,
                             uint32_t& out_width, uint32_t& out_height) {
   out_bytes = 0;

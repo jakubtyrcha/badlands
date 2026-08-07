@@ -843,8 +843,18 @@ class NullDevice final : public IRhiDevice {
       spdlog::error("rhi/null: ReadTexture given a foreign encoder");
       return nullptr;
     }
+    // A STAGING BUFFER AND A REAL COPY, even though nothing executes. Null
+    // recorded neither, so the two backends disagreed about what a readback IS
+    // -- and a conformance check on the recorded commands could only ever pass
+    // on one of them.
+    auto staging = CreateBuffer({.size = bytes,
+                                 .usage = BufferUsage::CopyDst |
+                                          BufferUsage::MapRead,
+                                 .label = src->GetLabel() + ".readback"});
+    if (!staging) return nullptr;
     auto rb = std::make_shared<NullTextureReadback>(
         w, h, src->GetFormat(), bytes, src->GetLabel() + ".readback", retire_);
+    RecordReadbackCopy(encoder, src, staging.get());
     e->AddPendingReadback(rb->Completion());
     return rb;
   }

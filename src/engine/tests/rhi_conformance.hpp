@@ -435,6 +435,69 @@ inline void CheckCubeTexturesAndTheirViews(IRhiDevice& device) {
 // either would be requiring a timing difference, which is how rule 6 gets
 // broken by a test rather than by a backend.
 
+// A readback must RECORD the transitions and the copy it is made of.
+//
+// ASSERTED ON THE RECORDED COMMANDS, because nothing else can see them. The
+// copy goes to the encoder BENEATH the validation decorator, so the decorator's
+// copy check never runs on it and "the validation report is clean" passes
+// whether or not anything was recorded at all -- which is exactly how Null came
+// to record NOTHING while Metal recorded a bare copy with no state declared.
+//
+// Null-only, and not for convenience: the command log IS the claim. On Metal
+// the equivalent evidence is the texels, which CheckReadbackCompletes and the
+// Metal value cases already assert.
+inline void CheckReadbackRecordsItsCopy(IRhiDevice& device) {
+  auto* log = null::GetCommandLog(device);
+  REQUIRE(log);  // caller passes a Null device
+
+  auto tex = device.CreateTexture({.width = 4, .height = 4,
+                                   .format = Format::RGBA8Unorm,
+                                   .usage = TextureUsage::RenderTarget |
+                                            TextureUsage::Sampled |
+                                            TextureUsage::CopySrc,
+                                   .label = "readback_copy_src"});
+  REQUIRE(tex);
+  auto* view = tex->CreateView({.mip_count = 1, .layer_count = 1});
+  REQUIRE(view);
+
+  device.BeginFrame();
+  auto encoder = device.CreateCommandEncoder("readback_copy");
+  REQUIRE(encoder);
+  // Left as a render target, which is what a backbuffer capture reads from and
+  // the state a copy must not be issued in.
+  encoder->Transition(tex.get(), ResourceState::RenderTarget);
+  log->Clear();
+
+  auto readback = device.ReadTexture(*encoder, view);
+  REQUIRE(readback);
+
+  // THE COPY ITSELF. Null used to create a readback object and record nothing,
+  // so its "readback" was an empty promise that completed on schedule.
+  CHECK(log->Count(null::RecordedCommand::Kind::CopyTextureToBuffer) == 1);
+
+  // AND THE STATES IT NEEDS. Neither backend declared these: on DX12 that is a
+  // copy reading a resource still in RENDER_TARGET.
+  // Compared as IResource*, which is what the encoder records. ITexture reaches
+  // IResource virtually, so the two pointers are not interchangeable and
+  // comparing the ITexture* silently never matches.
+  const void* src_as_resource = static_cast<const IResource*>(tex.get());
+  bool saw_copy_src = false, saw_copy_dst = false;
+  for (const auto& c : log->All()) {
+    if (c.kind != null::RecordedCommand::Kind::Transition) continue;
+    if (c.state == ResourceState::CopySrc && c.object == src_as_resource) {
+      saw_copy_src = true;
+    }
+    if (c.state == ResourceState::CopyDst) saw_copy_dst = true;
+  }
+  CHECK(saw_copy_src);
+  CHECK(saw_copy_dst);
+
+  encoder->Finish();
+  device.Submit(*encoder);
+  device.EndFrame();
+  device.WaitIdle();
+}
+
 inline void CheckReadbackCompletes(IRhiDevice& device) {
   auto tex = device.CreateTexture({.width = 4, .height = 4,
                                    .format = Format::RGBA8Unorm,

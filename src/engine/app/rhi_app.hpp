@@ -98,7 +98,13 @@ struct FrameTime {
   double elapsed = 0.0;         // since the first frame
   uint32_t fixed_steps = 0;     // whole fixed steps elapsed this frame
   uint64_t index = 0;           // frames begun, from 0
-  const bool* keys = nullptr;   // SDL_GetKeyboardState, valid for this call
+  // SDL_GetKeyboardState, valid for this call only.
+  //
+  // NULL WHENEVER THE DEBUG UI OWNS THE KEYBOARD. The layer gates this the same
+  // way it gates events, because a filter on events alone does not cover POLLED
+  // state -- and typing into an ImGui field used to fly the camera one letter
+  // at a time. A view must handle null rather than assume it.
+  const bool* keys = nullptr;
 };
 
 // Turns a stream of real frame deltas into FrameTime.
@@ -211,6 +217,50 @@ struct RhiAppOptions {
 // reaches the app's parser as an unknown argument and gets refused there, which
 // reads as the app rejecting a flag the layer advertises.
 RhiAppOptions ParseAppArgs(int& argc, char** argv);
+
+// Should this frame be the one read back for --screenshot?
+//
+// THE LAST FRAME, NOT THE FIRST. It used to be "the first frame that renders,
+// and never again", which makes --frames N --fixed-dt D useless for the thing
+// those flags exist for: 60 deterministic frames were run and frame 0 was
+// written. `frame_cap` of 0 means the loop is uncapped, and there is no last
+// frame to wait for, so the first one is the only answer available.
+//
+// Pure, and exposed, so the rule can be checked without a window -- neither app
+// has an animating scene, so an end-to-end check of it would pass vacuously.
+constexpr bool ShouldCapture(uint64_t frame_index, uint64_t frame_cap,
+                             bool already_captured, bool requested) {
+  if (!requested || already_captured) return false;
+  if (frame_cap == 0) return true;
+  return frame_index + 1 >= frame_cap;
+}
+
+// The polled keyboard a view is allowed to see this frame.
+//
+// FILTERING EVENTS IS NOT ENOUGH. WASD is read from SDL_GetKeyboardState, which
+// no event filter touches, so a view kept flying the camera while the user
+// typed an exact value into a debug slider -- one letter at a time. Gated in
+// the layer rather than per view, because a view that forgets has the same bug.
+constexpr const bool* KeysForFrame(bool ui_wants_keyboard, const bool* polled) {
+  return ui_wants_keyboard ? nullptr : polled;
+}
+
+// What the process should exit with, given what the run actually did.
+//
+// EXTRACTED SO THE SILENT SUCCESSES ARE TESTABLE. Two of them shipped: a
+// --screenshot run that never recorded a readback exited 0 having written no
+// file, and a run whose every Acquire was Skipped exited 0 having presented
+// nothing -- the second of which made object_viewer's windowed ctests
+// unfailable against a permanently black window.
+struct RunOutcome {
+  bool aborted = false;
+  uint64_t frames_begun = 0;
+  uint64_t frames_presented = 0;
+  bool screenshot_requested = false;
+  bool screenshot_captured = false;
+  bool screenshot_written = false;
+};
+int ExitCodeFor(const RunOutcome& outcome);
 
 class RhiApp {
  public:

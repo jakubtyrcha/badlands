@@ -1,5 +1,7 @@
 #include "engine/app/rhi_app.hpp"
 
+#include "engine/app/surface_encode.hpp"
+
 #include <algorithm>
 #include <cerrno>
 #include <cstdlib>
@@ -26,13 +28,6 @@ namespace {
 // The overlay ImGui draws into. ENCODED and 8-bit, which is the space UI is
 // authored for -- see ui_composite.slang for why this is not optional.
 constexpr Format kUiFormat = Format::RGBA8Unorm;
-
-constexpr uint32_t kCompositeParamsSlot = 0;
-constexpr uint32_t kCompositeUiSlot = 1;
-
-struct CompositeParams {
-  float mode[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-};
 
 bool ParseFloatArg(const char* text, float& out) {
   char* end = nullptr;
@@ -80,8 +75,15 @@ RhiAppOptions ParseAppArgs(int& argc, char** argv) {
     const char* v = nullptr;
     if (std::strcmp(a, "--frames") == 0) {
       if (!value(v)) break;
-      if (!ParseU64Arg(v, opt.max_frames)) {
-        spdlog::error("rhi_app: --frames wants a whole number, got '{}'", v);
+      if (!ParseU64Arg(v, opt.max_frames) || opt.max_frames == 0) {
+        // ZERO IS REFUSED, not merely odd. `max_frames == 0` is the sentinel
+        // every consumer reads as "no cap", so accepting it would make one
+        // value mean two things: a --frames 0 run would go on forever rather
+        // than erroring, and a headless app checking `max_frames != 0` to
+        // refuse the flag would accept it and ignore it. object_viewer's own
+        // parser bounded this at 1..100000 before the layer took the flag over.
+        spdlog::error("rhi_app: --frames wants a whole number above zero, got "
+                      "'{}'", v);
         opt.valid = false;
       }
     } else if (std::strcmp(a, "--fixed-dt") == 0) {
@@ -99,6 +101,32 @@ RhiAppOptions ParseAppArgs(int& argc, char** argv) {
   }
   argc = out;
   return opt;
+}
+
+int ExitCodeFor(const RunOutcome& o) {
+  if (o.aborted) return 1;
+  // A SCREENSHOT THAT WAS ASKED FOR AND NEVER WRITTEN IS A FAILURE. It used to
+  // exit 0: `pending_shot` is only set inside OnRender, which never runs if the
+  // single capped frame's Acquire is Skipped, so an occluded window produced a
+  // clean exit and no file. Only scripts/screenshot.sh's own size check caught
+  // it, and nothing calling the binary directly did.
+  if (o.screenshot_requested && !o.screenshot_captured) {
+    spdlog::error(
+        "rhi_app: --screenshot was asked for but no frame was ever captured "
+        "({} frames begun, {} presented)",
+        o.frames_begun, o.frames_presented);
+    return 1;
+  }
+  if (o.screenshot_requested && !o.screenshot_written) return 1;
+  // RAN FRAMES AND PRESENTED NONE. object_viewer used to check this itself and
+  // the port dropped it, which left its windowed ctests unable to fail against
+  // the exact wedge the Metal swapchain logs about: 20 frames begun, 0
+  // presented, green test, black window.
+  if (o.frames_begun > 0 && o.frames_presented == 0) {
+    spdlog::error("rhi_app: ran {} frames and presented none", o.frames_begun);
+    return 1;
+  }
+  return 0;
 }
 
 namespace {
@@ -238,14 +266,27 @@ int RhiApp::RunParsed(const RhiAppOptions& opt, const ViewFactory& factory,
     return view->OnResize(w, h);
   };
   cb.OnUpdate = [&](const FrameInfo& f) {
+    // THE SAME FIRST REFUSAL AS OnEvent, for POLLED keys.
+    //
+    // Filtering events is not enough: WASD is read from SDL_GetKeyboardState,
+    // which no event filter touches. So typing an exact value into a debug
+    // slider also flew the camera -- every letter of it. Gated HERE rather than
+    // in each view, because a view that forgets is a view with the same bug.
+    const bool* keys =
+        KeysForFrame(ImGui::GetIO().WantCaptureKeyboard, f.keys);
     // WALL CLOCK, or exactly the fixed step -- see FrameClock, which is where
     // this logic lives so it can be tested without a window.
-    view->Update(clock.Advance(f.dt, f.index, f.keys));
+    view->Update(clock.Advance(f.dt, f.index, keys));
   };
   cb.OnFrameBegin = [&](uint64_t frame_index) {
     view->OnFrameBegin(frame_index);
     ImGui_ImplRHI_NewFrame(frame_index);
   };
+
+  // Computed HERE because the capture predicate needs it: a screenshot with no
+  // --frames is one frame, and with --frames N it is the LAST of them.
+  const uint64_t frame_cap =
+      !opt.screenshot_path.empty() && opt.max_frames == 0 ? 1 : opt.max_frames;
 
   TextureReadbackPtr pending_shot;
   cb.OnRender = [&](ITextureView* target, const FrameInfo& f) {
@@ -280,42 +321,56 @@ int RhiApp::RunParsed(const RhiAppOptions& opt, const ViewFactory& factory,
     // so it captures what was presented, and the layer needs to know nothing
     // about the app's passes. Recorded into this same encoder, before it is
     // finished, because Metal wants the completion handler attached pre-commit.
-    if (!opt.screenshot_path.empty() && !pending_shot) {
+    if (ShouldCapture(f.index, frame_cap, pending_shot != nullptr,
+                      !opt.screenshot_path.empty())) {
       pending_shot = device->ReadTexture(*encoder, target);
+      if (!pending_shot) {
+        // The RHI logged why. Continuing would run the remaining frames and
+        // then exit 0 having written nothing, which is the failure this whole
+        // path is the only place able to see.
+        spdlog::error("rhi_app: could not queue the screenshot readback");
+        encoder->Finish();
+        device->Submit(*encoder);
+        return false;
+      }
     }
     encoder->Finish();
     device->Submit(*encoder);
     return true;
   };
 
-  const uint64_t frame_cap =
-      !opt.screenshot_path.empty() && opt.max_frames == 0 ? 1 : opt.max_frames;
   const RunStats stats = shell->Run(cb, frame_cap);
   if (out_stats) *out_stats = stats;
 
-  int exit_code = stats.aborted ? 1 : 0;
+  RunOutcome outcome{.aborted = stats.aborted,
+                     .frames_begun = stats.frames_begun,
+                     .frames_presented = stats.frames_presented,
+                     .screenshot_requested = !opt.screenshot_path.empty(),
+                     .screenshot_captured = pending_shot != nullptr};
   if (pending_shot) {
     // WAIT, not OnComplete: the process exits immediately after this, and an
     // event delivered once the loop has stopped would be delivered never.
-    if (!pending_shot->Wait()) {
-      exit_code = 1;
-    } else {
-      const auto data = pending_shot->Data();
-      std::vector<uint8_t> rgba(data.begin(), data.end());
-      // BGRA on the wire (CAMetalLayer takes nothing else), RGBA in a PNG.
-      if (pending_shot->GetFormat() == Format::BGRA8Unorm ||
-          pending_shot->GetFormat() == Format::BGRA8UnormSrgb) {
-        for (size_t i = 0; i + 3 < rgba.size(); i += 4) {
-          std::swap(rgba[i], rgba[i + 2]);
-        }
+    if (pending_shot->Wait()) {
+      std::vector<uint8_t> rgba;
+      bool clipped = false;
+      // FORMAT-AWARE. The surface is RGBA16Float on an HDR display, and feeding
+      // those bytes to an RGBA8 encoder wrote a PNG of raw half-float bit
+      // patterns that still looked like a plausible file.
+      if (EncodeSurfaceToRgba8(pending_shot->Data(), pending_shot->GetFormat(),
+                               pending_shot->GetWidth(),
+                               pending_shot->GetHeight(), rgba, &clipped)) {
+        badlands_write_png(opt.screenshot_path.c_str(), rgba.data(),
+                           pending_shot->GetWidth(), pending_shot->GetHeight());
+        outcome.screenshot_written = true;
+        spdlog::info("rhi_app: wrote {} ({}x{}){}", opt.screenshot_path,
+                     pending_shot->GetWidth(), pending_shot->GetHeight(),
+                     clipped ? " -- extended-range values were clipped to 8-bit"
+                             : "");
       }
-      badlands_write_png(opt.screenshot_path.c_str(), rgba.data(),
-                         pending_shot->GetWidth(), pending_shot->GetHeight());
-      spdlog::info("rhi_app: wrote {} ({}x{})", opt.screenshot_path,
-                   pending_shot->GetWidth(), pending_shot->GetHeight());
     }
     pending_shot.reset();
   }
+  const int exit_code = ExitCodeFor(outcome);
 
   // Shutdown in reverse: the view's resources before the device that made
   // them, and ImGui's backend before its context.

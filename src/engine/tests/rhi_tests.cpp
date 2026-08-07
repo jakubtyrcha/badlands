@@ -92,6 +92,10 @@ TEST_CASE("Null: a texture readback completes", "[rhi]") {
   auto d = MakeNull();
   rhitest::CheckReadbackCompletes(*d);
 }
+TEST_CASE("Null: a readback records its transitions and its copy", "[rhi]") {
+  auto d = MakeNull();
+  rhitest::CheckReadbackRecordsItsCopy(*d);
+}
 TEST_CASE("Null: a readback notifies exactly once", "[rhi]") {
   auto d = MakeNull();
   rhitest::CheckReadbackNotifiesExactlyOnce(*d);

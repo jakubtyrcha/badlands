@@ -329,6 +329,22 @@ bool ValidateTextureDesc(const TextureDesc& desc);
 bool ValidateReadbackSource(const ITextureView* src, size_t& out_bytes,
                             uint32_t& out_width, uint32_t& out_height);
 
+class ICommandEncoder;
+
+// The transitions and the copy a readback is made of, recorded into `encoder`.
+//
+// SHARED, for the rule-6 reason, and because the two backends had already
+// diverged: Metal recorded the copy with NO transitions at all, and Null
+// recorded nothing whatsoever -- so the one copy in the RHI that the validation
+// layer exists to check was the one copy nothing checked. On a backend where
+// the barrier is real, that copies from a texture still in RENDER_TARGET.
+//
+// The TRANSITIONS BELONG HERE rather than to the caller: the staging buffer is
+// created inside ReadTexture and the caller has no name for it, so a caller
+// could not state it even if it wanted to.
+void RecordReadbackCopy(ICommandEncoder& encoder, ITextureView* src,
+                        IBuffer* staging);
+
 // Whether a Write() of `data` into (`mip`, `layer`) of `desc` is in bounds,
 // logging and returning false when it is not. `label` names the texture.
 //

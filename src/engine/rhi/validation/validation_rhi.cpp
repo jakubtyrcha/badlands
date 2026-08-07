@@ -1115,6 +1115,15 @@ class ValidationDevice final : public IRhiDevice {
           "ReadTexture: encoder did not come from this device -- refusing");
       return nullptr;
     }
+    // THE SOURCE'S STATE IS DECLARED HERE, on this decorator, because the copy
+    // itself is recorded by the backend against the INNER encoder and is
+    // therefore invisible to the tracker. Without this the readback leaves the
+    // source tracked as whatever the last pass wrote it as, so the next use of
+    // it is reported against a state the resource is no longer in -- a wrong
+    // diagnostic, which is worse than none.
+    if (src && src->GetTexture()) {
+      v->Transition(src->GetTexture(), ResourceState::CopySrc);
+    }
     // Textures and views are NOT wrapped by this decorator (CreateTexture
     // returns the backend's own), so the view passes straight through.
     return inner_->ReadTexture(*v->Inner(), src);

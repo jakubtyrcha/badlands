@@ -1756,11 +1756,10 @@ class MetalDevice final : public IRhiDevice {
         staging, static_cast<MetalBuffer*>(staging.get())->Handle(), w, h,
         src->GetFormat(), bytes, src->GetLabel() + ".readback", retire_);
 
-    // The view's RESOLVED range says which subresource; ValidateReadbackSource
-    // has already established it is exactly one.
-    const TextureViewDesc& d = src->GetDesc();
-    encoder.CopyTextureToBuffer(src->GetTexture(), d.base_mip, d.base_layer,
-                                staging.get(), 0);
+    // SHARED with Null, transitions included: this used to record a bare copy
+    // with no state declared at all, so the validation layer had nothing to
+    // check and the DX12 arm would have copied from a render target.
+    RecordReadbackCopy(encoder, src, staging.get());
 
     // ATTACHED NOW, BEFORE COMMIT. Metal asserts "Completed handler provided
     // after commit call", so this cannot wait until Submit -- which is exactly

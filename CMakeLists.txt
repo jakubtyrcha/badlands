@@ -281,6 +281,7 @@ target_include_directories(badlands_ibl PUBLIC
 add_library(badlands_rhi_app STATIC
     src/engine/app/rhi_app_shell.cpp
     src/engine/app/rhi_app.cpp
+    src/engine/app/surface_encode.cpp
     src/engine/app/ui_compositor.cpp)
 if(APPLE)
     target_sources(badlands_rhi_app PRIVATE
@@ -1685,6 +1686,14 @@ if(APPLE)
     add_test(NAME badlands_rhi_app_tests COMMAND badlands_rhi_app_tests
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+    # No app's DEFAULT output path may be tracked by git. Every entry here runs
+    # with WORKING_DIRECTORY = the source dir, so a tracked file at one of those
+    # paths is one the suite silently overwrites -- and *.png being LFS, a later
+    # `git add -A` stages a machine-specific render as an asset. Happened once.
+    add_test(NAME artifact_guard
+             COMMAND ${CMAKE_SOURCE_DIR}/scripts/artifact_guard.sh
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
     # Windowed resize, end to end: open a window, ask for a different size,
     # and assert everything sized to the frame followed the reported PIXEL
     # size. LABELLED and excluded from the default run because it needs a
@@ -1966,6 +1975,24 @@ if(APPLE)
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     set_tests_properties(object_viewer_windowed_scene PROPERTIES
                          LABELS display TIMEOUT 120)
+
+    # --screenshot, end to end. The exit code alone cannot cover this: the run
+    # used to exit 0 having written no file when its one capped frame's Acquire
+    # was skipped, and on an HDR display it wrote a valid PNG of the right size
+    # full of raw half-float bit patterns. The script checks the file too.
+    foreach(shot_app badlands_object_viewer badlands_rhi_lab)
+        if(shot_app STREQUAL badlands_rhi_lab)
+            set(shot_args --window)
+        else()
+            set(shot_args --scene spheres)
+        endif()
+        add_test(NAME ${shot_app}_windowed_screenshot
+                 COMMAND ${CMAKE_SOURCE_DIR}/scripts/windowed_screenshot_check.sh
+                         ${shot_app} ${shot_args}
+                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+        set_tests_properties(${shot_app}_windowed_screenshot PROPERTIES
+                             LABELS display TIMEOUT 120)
+    endforeach()
 endif()
 
 # badlands_imgui_rhi: the Dear ImGui renderer backend against the RHI, replacing
