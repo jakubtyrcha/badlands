@@ -627,6 +627,41 @@ class NullComputePass final : public IComputePass {
   bool ended_ = false;
 };
 
+// Null keeps real staging bytes so Data() has the size the contract promises.
+// They stay ZERO: NullTexture stores no texels (Write only counts them), so
+// there is nothing to copy. The conformance list asserts the completion
+// PROTOCOL here and the values in the Metal suite, where there is something to
+// assert -- claiming texels Null cannot produce would be the vacuous kind of
+// green.
+class NullTextureReadback final : public ITextureReadback, public NullResource {
+ public:
+  NullTextureReadback(uint32_t w, uint32_t h, Format fmt, size_t bytes,
+                      std::string label, RetireQueuePtr retire)
+      : NullResource(label, std::move(retire)), width_(w), height_(h),
+        format_(fmt), bytes_(bytes, 0),
+        completion_(std::make_shared<ReadbackCompletion>()) {}
+
+  bool Wait(std::chrono::milliseconds timeout) override {
+    return completion_->Wait(timeout, GetLabel());
+  }
+  void OnComplete(ReadbackCallback cb) override {
+    completion_->Register(std::move(cb));
+  }
+  bool IsReady() const override { return completion_->IsReady(); }
+  std::span<const uint8_t> Data() const override { return bytes_; }
+  uint32_t GetWidth() const override { return width_; }
+  uint32_t GetHeight() const override { return height_; }
+  Format GetFormat() const override { return format_; }
+
+  std::shared_ptr<ReadbackCompletion> Completion() const { return completion_; }
+
+ private:
+  uint32_t width_, height_;
+  Format format_;
+  std::vector<uint8_t> bytes_;
+  std::shared_ptr<ReadbackCompletion> completion_;
+};
+
 class NullCommandEncoder final : public ICommandEncoder {
  public:
   NullCommandEncoder(CommandLog* log, std::string label)
@@ -694,11 +729,21 @@ class NullCommandEncoder final : public ICommandEncoder {
   }
   bool IsFinished() const override { return finished_; }
 
+  // Readbacks whose copy was recorded here. Null has no GPU timeline, so
+  // Submit IS their completion -- see NullDevice::Submit.
+  void AddPendingReadback(std::shared_ptr<ReadbackCompletion> c) {
+    pending_readbacks_.push_back(std::move(c));
+  }
+  std::vector<std::shared_ptr<ReadbackCompletion>> TakePendingReadbacks() {
+    return std::move(pending_readbacks_);
+  }
+
  private:
   CommandLog* log_;
   std::string label_;
   std::vector<std::unique_ptr<NullRenderPass>> render_passes_;
   std::vector<std::unique_ptr<NullComputePass>> compute_passes_;
+  std::vector<std::shared_ptr<ReadbackCompletion>> pending_readbacks_;
   bool finished_ = false;
 };
 
@@ -788,9 +833,35 @@ class NullDevice final : public IRhiDevice {
     return std::make_unique<NullCommandEncoder>(&log_, label);
   }
   // Nothing executes, so nothing is ever in flight.
+  TextureReadbackPtr ReadTexture(ICommandEncoder& encoder, ITexture* src,
+                                uint32_t mip, uint32_t layer) override {
+    size_t bytes = 0;
+    if (!ValidateReadbackSource(src, mip, layer, bytes)) return nullptr;
+    auto* e = dynamic_cast<NullCommandEncoder*>(&encoder);
+    if (!e) {
+      spdlog::error("rhi/null: ReadTexture given a foreign encoder");
+      return nullptr;
+    }
+    const uint32_t w = std::max(1u, src->GetWidth() >> mip);
+    const uint32_t h = std::max(1u, src->GetHeight() >> mip);
+    auto rb = std::make_shared<NullTextureReadback>(
+        w, h, src->GetFormat(), bytes, src->GetLabel() + ".readback", retire_);
+    e->AddPendingReadback(rb->Completion());
+    return rb;
+  }
+
   void Submit(ICommandEncoder& encoder) override {
     log_.Record(
         {.kind = RecordedCommand::Kind::Submit, .object = &encoder});
+    // Null has no GPU and no timeline: the work is "done" the moment it is
+    // submitted. That is a TIMING difference from Metal, not a behavioural one
+    // -- the documented contract is only that Wait() returns with the data
+    // present and the callback fired, which holds either way. The conformance
+    // list deliberately does not assert un-readiness after Submit, because
+    // requiring that would be requiring the timing difference.
+    if (auto* e = dynamic_cast<NullCommandEncoder*>(&encoder)) {
+      for (auto& c : e->TakePendingReadbacks()) c->Signal();
+    }
   }
   void WaitIdle() override {
     RetireAll();

@@ -13,6 +13,7 @@
 // `GetCommandLog()` returning non-null, so a case still exercises the code path
 // on Metal even when it cannot inspect the result.
 
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -108,6 +109,10 @@ class FailAfterNDevice final : public IRhiDevice {
     return inner_.CreateCommandEncoder(l);
   }
   void Submit(ICommandEncoder& e) override { inner_.Submit(e); }
+  TextureReadbackPtr ReadTexture(ICommandEncoder& e, ITexture* src, uint32_t mip,
+                                 uint32_t layer) override {
+    return inner_.ReadTexture(e, src, mip, layer);
+  }
   void WaitIdle() override { inner_.WaitIdle(); }
   size_t InFlightCount() override { return inner_.InFlightCount(); }
   uint64_t BeginFrame() override { return inner_.BeginFrame(); }
@@ -416,6 +421,113 @@ inline void CheckCubeTexturesAndTheirViews(IRhiDevice& device) {
   CHECK(as_array != sampled);
   CHECK(as_array->GetDesc().dimension == TextureViewDimension::Tex2DArray);
   CHECK(sampled->GetDesc().dimension == TextureViewDimension::Cube);
+}
+
+// --- Async texture readback -------------------------------------------------
+//
+// The shared contract is the COMPLETION PROTOCOL, not the texels. Null has a
+// frame model but no GPU and no texel storage, so what both backends can
+// promise is: not ready before the work is submitted, ready once waited on, and
+// a callback that fires exactly once. The values themselves are asserted in the
+// Metal suite, where there is something to assert.
+//
+// Deliberately NOT asserted: that a readback is un-ready immediately after
+// Submit. Metal usually has not finished; Null completes at once. Requiring
+// either would be requiring a timing difference, which is how rule 6 gets
+// broken by a test rather than by a backend.
+
+inline void CheckReadbackCompletes(IRhiDevice& device) {
+  auto tex = device.CreateTexture({.width = 4, .height = 4,
+                                   .format = Format::RGBA8Unorm,
+                                   .usage = TextureUsage::Sampled |
+                                            TextureUsage::CopyDst |
+                                            TextureUsage::CopySrc,
+                                   .label = "readback_src"});
+  REQUIRE(tex);
+  std::vector<uint8_t> texels(4 * 4 * 4, 0x5a);
+  tex->Write(0, 0, AsBytes(texels));
+
+  device.BeginFrame();
+  auto encoder = device.CreateCommandEncoder("readback");
+  REQUIRE(encoder);
+  auto readback = device.ReadTexture(*encoder, tex.get(), 0, 0);
+  REQUIRE(readback);
+  CHECK(readback->GetWidth() == 4);
+  CHECK(readback->GetHeight() == 4);
+  CHECK(readback->GetFormat() == Format::RGBA8Unorm);
+
+  // Before anything is submitted there is nothing to be ready for. Both
+  // backends can promise this one.
+  CHECK_FALSE(readback->IsReady());
+
+  encoder->Finish();
+  device.Submit(*encoder);
+
+  // Wait returns true and, having returned, the data has landed. That ordering
+  // is the whole contract -- not "IsReady eventually flips".
+  REQUIRE(readback->Wait());
+  CHECK(readback->IsReady());
+  CHECK(readback->Data().size() == 4 * 4 * 4);
+  device.EndFrame();
+}
+
+inline void CheckReadbackNotifiesExactlyOnce(IRhiDevice& device) {
+  auto tex = device.CreateTexture({.width = 2, .height = 2,
+                                   .format = Format::RGBA8Unorm,
+                                   .usage = TextureUsage::CopyDst |
+                                            TextureUsage::CopySrc,
+                                   .label = "notify_src"});
+  REQUIRE(tex);
+
+  device.BeginFrame();
+  auto encoder = device.CreateCommandEncoder("notify");
+  auto readback = device.ReadTexture(*encoder, tex.get(), 0, 0);
+  REQUIRE(readback);
+
+  std::atomic<int> fired{0};
+  readback->OnComplete([&fired] { ++fired; });
+
+  encoder->Finish();
+  device.Submit(*encoder);
+  REQUIRE(readback->Wait());
+
+  // FIRED BY THE TIME WAIT RETURNS. A callback that arrives later is a
+  // callback a caller cannot rely on: --screenshot waits and then exits, so a
+  // completion delivered after that is a completion delivered never.
+  CHECK(fired.load() == 1);
+
+  // And registering after the fact runs immediately rather than never -- the
+  // case a caller hits when the copy finished while they were doing something
+  // else, and the one that silently does nothing if the backend only ever
+  // notifies from its completion handler.
+  std::atomic<int> late{0};
+  readback->OnComplete([&late] { ++late; });
+  CHECK(late.load() == 1);
+  CHECK(fired.load() == 1);  // and the first one is not called again
+  device.EndFrame();
+}
+
+inline void CheckReadbackRefusesUncopyableSource(IRhiDevice& device) {
+  // No CopySrc: the copy could never be encoded, so the readback must not
+  // exist rather than fail at submit (rule 13).
+  auto tex = device.CreateTexture({.width = 4, .height = 4,
+                                   .format = Format::RGBA8Unorm,
+                                   .usage = TextureUsage::Sampled,
+                                   .label = "not_copyable"});
+  REQUIRE(tex);
+  device.BeginFrame();
+  auto encoder = device.CreateCommandEncoder("refuse");
+
+  const std::string log = CaptureLog([&] {
+    CHECK(device.ReadTexture(*encoder, tex.get(), 0, 0) == nullptr);
+    // And an out-of-range subresource, by the same rule.
+    CHECK(device.ReadTexture(*encoder, tex.get(), 7, 0) == nullptr);
+    CHECK(device.ReadTexture(*encoder, tex.get(), 0, 3) == nullptr);
+    CHECK(device.ReadTexture(*encoder, nullptr, 0, 0) == nullptr);
+  });
+  INFO(log);
+  CHECK(log.find("not_copyable") != std::string::npos);
+  device.EndFrame();
 }
 
 // --- Creation-time refusals -------------------------------------------------

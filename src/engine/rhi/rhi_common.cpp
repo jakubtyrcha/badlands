@@ -395,6 +395,92 @@ std::optional<ResolvedBindingTable> ResolveBindingTable(
   return out;
 }
 
+bool ValidateReadbackSource(const ITexture* src, uint32_t mip, uint32_t layer,
+                            size_t& out_bytes) {
+  out_bytes = 0;
+  if (!src) {
+    spdlog::error("rhi: ReadTexture was given no source texture");
+    return false;
+  }
+  if (!Has(src->GetUsage(), TextureUsage::CopySrc)) {
+    spdlog::error(
+        "rhi: ReadTexture on '{}': the texture lacks TextureUsage::CopySrc, so "
+        "the copy could never be encoded",
+        src->GetLabel());
+    return false;
+  }
+  const uint32_t mips = std::max(1u, src->GetMipLevels());
+  const uint32_t layers = std::max(1u, src->GetArrayLayers());
+  if (mip >= mips) {
+    spdlog::error("rhi: ReadTexture on '{}': mip {} is out of range ({} level(s))",
+                  src->GetLabel(), mip, mips);
+    return false;
+  }
+  if (layer >= layers) {
+    spdlog::error(
+        "rhi: ReadTexture on '{}': layer {} is out of range ({} layer(s))",
+        src->GetLabel(), layer, layers);
+    return false;
+  }
+  const uint32_t w = std::max(1u, src->GetWidth() >> mip);
+  const uint32_t h = std::max(1u, src->GetHeight() >> mip);
+  const uint32_t texel = FormatByteSize(src->GetFormat());
+  if (texel == 0) {
+    spdlog::error("rhi: ReadTexture on '{}': format {} has no byte size",
+                  src->GetLabel(), ToString(src->GetFormat()));
+    return false;
+  }
+  out_bytes = size_t(w) * h * texel;
+  return true;
+}
+
+void ReadbackCompletion::Signal() {
+  ReadbackCallback to_run;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (ready_) return;  // idempotent: a second signal must not re-run anything
+    ready_ = true;
+    to_run = std::move(callback_);
+    callback_ = nullptr;
+  }
+  // NOTIFY BEFORE RUNNING, and run OUTSIDE the lock. A callback that blocks --
+  // a PNG encode, say -- would otherwise hold the mutex a waiter needs, so
+  // Wait() would not return until the callback it does not care about is done.
+  cv_.notify_all();
+  if (to_run) to_run();
+}
+
+bool ReadbackCompletion::Wait(std::chrono::milliseconds timeout,
+                              std::string_view label) {
+  std::unique_lock<std::mutex> lock(mutex_);
+  if (cv_.wait_for(lock, timeout, [this] { return ready_; })) return true;
+  spdlog::error(
+      "rhi: readback '{}' did not complete within {} ms -- the GPU may be hung, "
+      "which an unbounded wait would have turned into a process that never "
+      "returns and never says why",
+      label, timeout.count());
+  return false;
+}
+
+void ReadbackCompletion::Register(ReadbackCallback callback) {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!ready_) {
+      callback_ = std::move(callback);
+      return;
+    }
+  }
+  // ALREADY DONE: run it here, on the caller's thread, rather than storing a
+  // callback nothing will ever fire. A backend that only notified from its
+  // completion handler would silently drop this case.
+  if (callback) callback();
+}
+
+bool ReadbackCompletion::IsReady() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return ready_;
+}
+
 std::optional<TextureViewDesc> ResolveViewDesc(const TextureViewDesc& requested,
                                                const TextureDesc& texture,
                                                std::string_view texture_label) {

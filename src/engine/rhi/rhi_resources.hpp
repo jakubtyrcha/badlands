@@ -11,8 +11,12 @@
 // "used after free" becomes "used after Destroy", which is both a real bug
 // class and a checkable one.
 
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -77,14 +81,96 @@ class IBuffer : public virtual IResource {
   // Ordered against subsequently submitted command buffers.
   virtual void Write(uint64_t offset, std::span<const uint8_t> data) = 0;
 
-  // Blocking readback. Requires BufferUsage::MapRead. Returns false if the
-  // buffer cannot be mapped or the range is out of bounds.
+  // Reads the buffer's CURRENT contents. Requires BufferUsage::MapRead.
+  // Returns false if the buffer cannot be mapped or the range is out of bounds.
   //
-  // Blocking is deliberate: readback exists for tests and for screenshots,
-  // both of which want the value now. Dawn's async MapAsync + ProcessEvents
-  // dance is one of the things that DELETES in this port -- Metal and DX12 are
-  // both synchronous here (probe: ~4% of the wgpu surface is async plumbing).
+  // IT DOES NOT WAIT FOR THE GPU, and that is the trap in its name. On unified
+  // memory this is a memcpy out of live memory: if a submitted command buffer
+  // is still writing the range, this reads whatever is there now. Every caller
+  // today pairs it with IRhiDevice::WaitIdle, which stalls the WHOLE device to
+  // synchronise one copy.
+  //
+  // For a texture, prefer IRhiDevice::ReadTexture: it waits for exactly the
+  // copy that produced it, and it can notify instead of blocking.
   virtual bool Read(uint64_t offset, std::span<uint8_t> out) = 0;
+};
+
+// Invoked once, when a readback's data has landed on the CPU.
+//
+// THREAD: unspecified. It runs on whichever thread observes completion -- a
+// backend completion thread in the normal case, or the CALLER'S thread if the
+// copy had already finished when OnComplete was registered. Anything it touches
+// must tolerate both.
+using ReadbackCallback = std::function<void()>;
+
+// A texture copy in flight, and the completion that says it has landed.
+//
+// AWAITABLE, NOT POLLED. Both target APIs hand back a real completion object --
+// Metal a command buffer you can waitUntilCompleted or hang a listener off,
+// DX12 a fence you can SetEventOnCompletion and then WaitForSingleObject -- so
+// the interface exposes one rather than a readiness flag the caller has to spin
+// on. Nothing here refuses for not being finished yet; you either wait or you
+// are told.
+class ITextureReadback : public virtual IResource {
+ public:
+  // Blocks the CALLING thread until the data has landed. Returns false, after
+  // logging, if `timeout` expires first.
+  //
+  // FINITE BY DEFAULT on purpose. An unbounded wait turns a GPU hang into a
+  // process that never returns and never says why, which is strictly worse
+  // than an error -- and on Windows it is exactly what a TDR looks like from
+  // inside the app.
+  virtual bool Wait(std::chrono::milliseconds timeout =
+                        std::chrono::milliseconds(5000)) = 0;
+
+  // Registers a completion. Runs immediately, on the calling thread, if the
+  // data has already landed; otherwise when it does. Called at most once, and
+  // a second registration replaces the first.
+  virtual void OnComplete(ReadbackCallback callback) = 0;
+
+  // Whether the data has landed. A QUERY, not a gate: nothing in this
+  // interface refuses because this is false.
+  virtual bool IsReady() const = 0;
+
+  // The texels, tightly packed. Valid from completion until this object is
+  // destroyed -- the readback owns the staging memory and, on a backend that
+  // needs one (DX12's readback heap), the mapping. Reading it before
+  // completion is what Wait and OnComplete exist to prevent.
+  virtual std::span<const uint8_t> Data() const = 0;
+
+  virtual uint32_t GetWidth() const = 0;
+  virtual uint32_t GetHeight() const = 0;
+  virtual Format GetFormat() const = 0;
+};
+
+// The completion half of a readback, WRITTEN ONCE and embedded by every
+// backend.
+//
+// Shared for the reason ResolveViewDesc and ValidateTextureDesc are: "signal,
+// wake the waiter, run the callback exactly once" is fiddly enough that two
+// copies would drift, and the drift would be a race -- the least reproducible
+// kind of divergence there is. The BACKEND supplies only the trigger: Metal an
+// addCompletedHandler, DX12 a fence event, Null the submission itself.
+class ReadbackCompletion {
+ public:
+  // Called from whichever thread observes completion. Idempotent: a second
+  // signal is ignored rather than running the callback twice.
+  void Signal();
+
+  // Blocks until signalled. False on timeout, having logged `label`.
+  bool Wait(std::chrono::milliseconds timeout, std::string_view label);
+
+  // Runs `callback` now if already signalled, otherwise on signal. Replaces any
+  // previous registration.
+  void Register(ReadbackCallback callback);
+
+  bool IsReady() const;
+
+ private:
+  mutable std::mutex mutex_;
+  std::condition_variable cv_;
+  bool ready_ = false;
+  ReadbackCallback callback_;
 };
 
 class ITextureView : public virtual IResource {
@@ -229,6 +315,16 @@ std::optional<TextureViewDesc> ResolveViewDesc(const TextureViewDesc& requested,
 // once, they cannot drift apart as backends are added.
 bool ValidateTextureDesc(const TextureDesc& desc);
 
+// Whether `src` can be read back from at (`mip`, `layer`), logging and
+// returning false when it cannot. On success `out_bytes` receives the tightly
+// packed size of that subresource.
+//
+// A CREATION-TIME refusal (rule 13) and shared for the rule-6 reason: a
+// readback that cannot be encoded must not exist, and two backends deciding
+// that separately is two chances to disagree about what "cannot".
+bool ValidateReadbackSource(const ITexture* src, uint32_t mip, uint32_t layer,
+                            size_t& out_bytes);
+
 // Whether a Write() of `data` into (`mip`, `layer`) of `desc` is in bounds,
 // logging and returning false when it is not. `label` names the texture.
 //
@@ -241,6 +337,7 @@ bool ValidateTextureWrite(const TextureDesc& desc, std::string_view label,
                           uint32_t mip, uint32_t layer, size_t byte_count);
 
 using BufferPtr = std::shared_ptr<IBuffer>;
+using TextureReadbackPtr = std::shared_ptr<ITextureReadback>;
 using TexturePtr = std::shared_ptr<ITexture>;
 using SamplerPtr = std::shared_ptr<ISampler>;
 using BindingTablePtr = std::shared_ptr<IBindingTable>;

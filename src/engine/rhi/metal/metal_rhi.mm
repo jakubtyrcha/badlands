@@ -1275,6 +1275,52 @@ class MetalComputePass final : public IComputePass {
 // Encoder
 // ---------------------------------------------------------------------------
 
+// Metal's readback. Unified memory, so the staging buffer IS the CPU view --
+// no map, no unmap, no copy out. (DX12 will need Map/Unmap on a readback heap;
+// the interface hides that behind Data() precisely so this one does not have to
+// pretend it does.)
+class MetalTextureReadback final : public ITextureReadback, public MetalResource {
+ public:
+  MetalTextureReadback(BufferPtr staging, id<MTLBuffer> handle, uint32_t w,
+                       uint32_t h, Format fmt, size_t bytes, std::string label,
+                       RetireQueuePtr retire)
+      : MetalResource(label, std::move(retire)), staging_(std::move(staging)),
+        handle_(handle), width_(w), height_(h), format_(fmt), bytes_(bytes),
+        completion_(std::make_shared<ReadbackCompletion>()) {}
+
+  void Destroy() override {
+    // The staging buffer is a real RHI buffer, so it defers like any other.
+    if (staging_) staging_->Destroy();
+    handle_ = nil;
+    MarkDestroyed();
+  }
+
+  bool Wait(std::chrono::milliseconds timeout) override {
+    return completion_->Wait(timeout, GetLabel());
+  }
+  void OnComplete(ReadbackCallback cb) override {
+    completion_->Register(std::move(cb));
+  }
+  bool IsReady() const override { return completion_->IsReady(); }
+  std::span<const uint8_t> Data() const override {
+    if (!handle_) return {};
+    return {static_cast<const uint8_t*>(handle_.contents), bytes_};
+  }
+  uint32_t GetWidth() const override { return width_; }
+  uint32_t GetHeight() const override { return height_; }
+  Format GetFormat() const override { return format_; }
+
+  std::shared_ptr<ReadbackCompletion> Completion() const { return completion_; }
+
+ private:
+  BufferPtr staging_;
+  id<MTLBuffer> handle_;
+  uint32_t width_, height_;
+  Format format_;
+  size_t bytes_;
+  std::shared_ptr<ReadbackCompletion> completion_;
+};
+
 class MetalCommandEncoder final : public ICommandEncoder {
  public:
   MetalCommandEncoder(id<MTLCommandBuffer> cmd, std::string label)
@@ -1684,6 +1730,46 @@ class MetalDevice final : public IRhiDevice {
 
     [cmd commit];
     in_flight_.push_back(cmd);
+  }
+
+  TextureReadbackPtr ReadTexture(ICommandEncoder& encoder, ITexture* src,
+                                uint32_t mip, uint32_t layer) override {
+    size_t bytes = 0;
+    if (!ValidateReadbackSource(src, mip, layer, bytes)) return nullptr;
+    auto* me = dynamic_cast<MetalCommandEncoder*>(&encoder);
+    if (!me) {
+      spdlog::error("rhi/metal: ReadTexture given a foreign encoder");
+      return nullptr;
+    }
+
+    // A REAL RHI buffer, not a bare id<MTLBuffer>: that way the copy goes
+    // through the encoder's existing, tested CopyTextureToBuffer -- including
+    // whatever row alignment it already handles -- instead of a second blit
+    // written here that could disagree with it.
+    auto staging = CreateBuffer({.size = bytes,
+                                 .usage = BufferUsage::CopyDst |
+                                          BufferUsage::MapRead,
+                                 .label = src->GetLabel() + ".readback"});
+    if (!staging) return nullptr;  // CreateBuffer logged why
+    const uint32_t w = std::max(1u, src->GetWidth() >> mip);
+    const uint32_t h = std::max(1u, src->GetHeight() >> mip);
+    auto rb = std::make_shared<MetalTextureReadback>(
+        staging, static_cast<MetalBuffer*>(staging.get())->Handle(), w, h,
+        src->GetFormat(), bytes, src->GetLabel() + ".readback", retire_);
+
+    encoder.CopyTextureToBuffer(src, mip, layer, staging.get(), 0);
+
+    // ATTACHED NOW, BEFORE COMMIT. Metal asserts "Completed handler provided
+    // after commit call", so this cannot wait until Submit -- which is exactly
+    // why ReadTexture takes the encoder and is documented as pre-submit.
+    auto completion = rb->Completion();
+    [me->CommandBuffer() addCompletedHandler:^(id<MTLCommandBuffer>) {
+      completion->Signal();
+    }];
+    // The staging buffer outlives the copy because the READBACK owns it and
+    // the caller owns the readback -- the same GPU-timeline lifetime rule every
+    // other resource follows.
+    return rb;
   }
 
   void WaitIdle() override {

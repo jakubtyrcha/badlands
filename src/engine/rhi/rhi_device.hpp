@@ -128,9 +128,28 @@ class IRhiDevice {
   virtual std::unique_ptr<ICommandEncoder> CreateCommandEncoder(
       const std::string& label = {}) = 0;
   virtual void Submit(ICommandEncoder& encoder) = 0;
-  // Blocks until all submitted work has completed. Tests and readback want
-  // this; Metal and DX12 are both synchronous here, unlike Dawn.
+  // Blocks until all submitted work has completed.
+  //
+  // A SLEDGEHAMMER, and increasingly the wrong one: it stalls every submission
+  // to synchronise whichever one the caller cared about. ReadTexture below
+  // waits on exactly its own copy instead, and can notify rather than block.
   virtual void WaitIdle() = 0;
+
+  // Records a copy of one texture subresource into staging memory and returns
+  // the completion that says it has landed. The copy goes into `encoder`, so it
+  // is ordered against everything else recorded there and costs no extra
+  // submission.
+  //
+  // Returns null (after logging) if `src` lacks TextureUsage::CopySrc, or the
+  // subresource is out of range -- a creation-time refusal (rule 13), because a
+  // readback that cannot be encoded must not exist rather than fail later.
+  //
+  // MUST be called before the encoder is submitted: Metal asserts if a
+  // completion handler is attached after commit, so the backend hangs one at
+  // this point rather than at Submit.
+  virtual TextureReadbackPtr ReadTexture(ICommandEncoder& encoder, ITexture* src,
+                                         uint32_t mip = 0,
+                                         uint32_t layer = 0) = 0;
 
   // Submissions that have not yet retired. The retirement signal a frame model
   // will be built on, and the only way to observe that submissions are being

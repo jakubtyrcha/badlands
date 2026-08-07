@@ -1101,6 +1101,23 @@ class ValidationDevice final : public IRhiDevice {
     inner_->Submit(*v->Inner());
   }
 
+  // Forwarded, with no per-call check of its own: the refusals ReadTexture
+  // makes are creation-time preconditions in the shared validator, which must
+  // hold in release too (rule 13) and therefore cannot live here.
+  TextureReadbackPtr ReadTexture(ICommandEncoder& encoder, ITexture* src,
+                                 uint32_t mip, uint32_t layer) override {
+    auto* v = dynamic_cast<ValidationEncoder*>(&encoder);
+    if (!v) {
+      // Refused, not forwarded: the backend static_casts to its own encoder
+      // type, so a foreign one is a wrong-type cast (rule 3), exactly as in
+      // Submit above.
+      ctx_.recorder.Report(
+          "ReadTexture: encoder did not come from this device -- refusing");
+      return nullptr;
+    }
+    return inner_->ReadTexture(*v->Inner(), src, mip, layer);
+  }
+
   void WaitIdle() override { inner_->WaitIdle(); }
 
   size_t InFlightCount() override { return inner_->InFlightCount(); }
