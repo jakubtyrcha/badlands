@@ -279,7 +279,11 @@ void InitTerrain(Grid& g, const Params& p) {
 
 }  // namespace pg
 
-namespace {
+// PriorityFlood lives in `namespace pg` (not the anonymous namespace the rest
+// of this section uses) because protogen_swe.cpp's SweFillOracle test calls
+// it as an oracle across the TU boundary -- see protogen.hpp's declaration
+// and its "export deliberately" header note.
+namespace pg {
 
 // ------------------------------------------------------------ priority flood
 
@@ -322,6 +326,10 @@ void PriorityFlood(const Grid& g, std::vector<float>& filled,
     }
   }
 }
+
+}  // namespace pg
+
+namespace {
 
 // Bilinear height at a CONTINUOUS position, cell centres at (i+0.5, j+0.5).
 //
@@ -1386,6 +1394,14 @@ int main(int argc, char** argv) {
     else if (a == "--source-jitter") p.source_jitter_cells = std::stof(nxt());
     else if (a == "--bowl-rim") p.bowl_rim_m = std::stof(nxt());
     else if (a == "--bowl-well") p.bowl_well_m = std::stof(nxt());
+    // Phase-1 SWE fluid knobs (protogen_swe.cpp). Parsed here so they exist
+    // on the command line already; RunSweCycles itself is not called from
+    // main() until Task 7 wires the driver.
+    else if (a == "--swe-substeps") p.swe_substeps = std::stoi(nxt());
+    else if (a == "--cfl") p.cfl_number = std::stof(nxt());
+    else if (a == "--swe-manning-n") p.swe_manning_n = std::stof(nxt());
+    else if (a == "--eps-wet") p.eps_wet = std::stof(nxt());
+    else if (a == "--dt-floor") p.dt_floor_s = std::stof(nxt());
     else if (a == "--out") p.out = nxt();
     else { std::fprintf(stderr, "protogen: unknown arg '%s'\n", a.c_str()); return 2; }
   }
@@ -1406,10 +1422,13 @@ int main(int argc, char** argv) {
   std::printf("protogen: %dx%d cells, %.0f m world, %.1f m cells, %d workers\n"
               "  relief %.0f m, %d steps x %d drops\n"
               "  runoff %.2f m/yr, evaporation %.2f m/yr\n"
-              "  settle %.3f/step, sus-diffusion %.3f\n",
+              "  settle %.3f/step, sus-diffusion %.3f\n"
+              "  swe: %d substeps, CFL %.2f, manning-n %.3f, eps-wet %.4f m, "
+              "dt-floor %.1e s (not yet driven -- Task 7)\n",
               p.res, p.res, p.world_m, cell_m, workers, p.relief_m, p.steps,
               p.drops, p.runoff_m_per_yr, p.evaporation_m_per_yr,
-              p.settle_fraction, p.sus_diffusion);
+              p.settle_fraction, p.sus_diffusion, p.swe_substeps,
+              p.cfl_number, p.swe_manning_n, p.eps_wet, double(p.dt_floor_s));
 
   {
     std::error_code ec;

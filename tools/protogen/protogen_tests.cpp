@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -1037,6 +1038,492 @@ void SoilProductionSteadyState() {
   Check("P4 soil reaches h* ln(P0/E)", ok, buf);
 }
 
+// ===========================================================================
+// PHASE-1 SWE FLUID -- virtual-pipes shallow water (protogen_swe.cpp).
+//
+// Small grids (24-48 cells), but NOT always production 16 m cells: several of
+// these need a large CFL dt to reach quasi-steady state within a test's time
+// budget (filling a basin, reaching Manning equilibrium), and the timescale
+// that sets is real seconds of simulated flow, which the fixture's own
+// geometry/rain rate control independent of cell size -- so cell size is
+// chosen per test for that test's own convergence speed, not held fixed.
+// ===========================================================================
+
+// --- S1. a flat lake sits exactly still ------------------------------------
+// THE well-balancedness test: a prefilled lake whose surface (bed+h) is flat
+// over a sloping bed must produce EXACTLY zero flux and an EXACTLY unchanged
+// `h`, not merely a small residual. A scheme that differences bed and water
+// slope separately (rather than the combined head) fails this by construction
+// -- it is the classic well-balanced-SWE discretisation trap the brief warns
+// about, and is checked bit-exact, not within a tolerance.
+//
+// `relief_m = 1` is deliberate, not a stand-in for a "real" value: with it,
+// `bed = height[i] * relief_m` reduces to `height[i]` exactly (x*1.0 has no
+// rounding in IEEE 754), so this fixture can pick a water LEVEL and a bed
+// elevation within a factor of 2 of each other and know `h = level - bed`
+// reconstructs `bed + h == level` bit-for-bit (Sterbenz's lemma: subtracting
+// two same-sign floats within a factor of 2 is exact, and re-adding an exact
+// difference back to its minuend's counterpart reproduces the subtrahend
+// exactly when, as here, that subtrahend is itself a representable float).
+// Without this, `bed + (level - bed)` can differ from `level` by an ULP or
+// two, which would make every wet-neighbour `dhead` a tiny nonzero instead of
+// exactly 0 -- silently turning "exactly still" into "almost still".
+void SweWellBalancedness() {
+  Params p;
+  p.res = 32;
+  p.world_m = 16.0f * float(p.res);
+  p.relief_m = 1.0f;  // see header comment: makes bed reconstruction exact
+  p.runoff_m_per_yr = 0.f;
+  p.evaporation_m_per_yr = 0.f;
+  p.swe_substeps = 100;
+
+  Grid g(p.res);
+  const float level = 310.0f;
+  const int lo = 8, hi = 23;  // lake block, >= 8-cell dry margin to the border
+  const int cx = (lo + hi) / 2, cy = (lo + hi) / 2;
+  for (int y = 0; y < p.res; ++y)
+    for (int x = 0; x < p.res; ++x) {
+      const size_t i = g.idx(x, y);
+      if (x >= lo && x <= hi && y >= lo && y <= hi) {
+        const float dx = float(x - cx), dy = float(y - cy);
+        // Shallow, sloping bowl floor: stays in [290, 300], within a factor
+        // of 2 of `level` (310) everywhere, satisfying Sterbenz above.
+        const float bed = 290.0f + 0.25f * std::sqrt(dx * dx + dy * dy);
+        g.height[i] = bed;       // relief_m == 1 -> height IS metres
+        g.h[i] = level - bed;    // exact subtraction, see header comment
+      } else {
+        g.height[i] = 400.0f;    // dry margin, comfortably above `level`
+        g.h[i] = 0.f;
+      }
+    }
+  const std::vector<float> h0 = g.h;
+
+  SweRunResult r = RunSweCycles(g, p, /*cycles=*/3);
+
+  bool h_bitexact = true;
+  for (size_t i = 0; i < g.cells && h_bitexact; ++i)
+    if (g.h[i] != h0[i]) h_bitexact = false;
+  bool flux_zero = true;
+  float max_abs_flux = 0.f;
+  for (size_t i = 0; i < g.cells; ++i)
+    for (int k = 0; k < 4; ++k) {
+      max_abs_flux = std::max(max_abs_flux, std::fabs(g.flux[i][k]));
+      if (g.flux[i][k] != 0.f) flux_zero = false;
+    }
+  char buf[192];
+  std::snprintf(buf, sizeof(buf),
+                "status ok=%d, h bit-identical=%d, all flux exactly 0=%d "
+                "(max|flux| %.3e m3/s)",
+                r.ok, h_bitexact, flux_zero, double(max_abs_flux));
+  Check("SweWellBalancedness: flat lake stays exactly still",
+        r.ok && h_bitexact && flux_zero, buf);
+}
+
+// --- S2. rain fills a closed basin to its PriorityFlood spill surface ------
+// Constant rain over a fixed InitBowl basin, run to near-steady, and compare
+// the interior water surface to the static spill level PriorityFlood computes
+// for the same bed. The two cannot agree EXACTLY -- a steady inflow needs
+// SOME residual head above the hydrostatic spill level to drive the outflow
+// across the saddle -- so this is a tolerance check, not a bit-exact one, per
+// the brief.
+void SweFillOracle() {
+  Params p;
+  p.res = 32;
+  // Large cells: the physical fill TIME (rain rate vs. basin volume) does not
+  // depend much on cell size, but the CFL dt does (dt ~ cell_m), so a bigger
+  // cell buys more simulated seconds per substep and keeps this test's cycle
+  // count in the hundreds rather than needing an unreasonable number of them.
+  p.world_m = 64.0f * float(p.res);
+  p.relief_m = 1.0f;
+  p.bowl = true;
+  p.bowl_rim_m = 20.0f;
+  p.bowl_well_m = 15.0f;
+  p.bowl_sigma_frac = 0.15f;
+  p.runoff_m_per_yr = 800.0f;  // synthetic-fast, not a climate rate: see above
+  p.evaporation_m_per_yr = 0.f;
+  p.swe_substeps = 100;
+
+  Grid g(p.res);
+  InitTerrain(g, p);  // InitBowl: ramp + gaussian well, see protogen.cpp
+
+  std::vector<float> filled;
+  std::vector<int32_t> outlet_of;
+  PriorityFlood(g, filled, outlet_of);
+
+  const int cx = p.res / 2, cy = p.res / 2;  // InitBowl's well centre
+  const float spill_m = filled[g.idx(cx, cy)] * p.relief_m;
+  const float bed_m = g.height[g.idx(cx, cy)] * p.relief_m;
+
+  SweRunResult r = RunSweCycles(g, p, /*cycles=*/600);
+
+  const float surface_m = g.height[g.idx(cx, cy)] * p.relief_m + g.h[g.idx(cx, cy)];
+  const float gap_m = surface_m - spill_m;
+  // Generous, documented tolerance (T2/Manning's own culture): the basin
+  // never reaches a true hydrostatic level under continuous rain, and 600
+  // cycles is a runtime budget, not a convergence proof. 2 m against an
+  // ~15-20 m deep basin (the well's own amplitude) is within 10-15% of the
+  // fill depth, and comfortably distinguishes "filled to roughly the right
+  // level" from "did nothing" or "overflowed the rim" -- what this test
+  // exists to catch.
+  const bool ok = r.ok && gap_m > -0.5f && gap_m < 2.0f;
+  char buf[220];
+  std::snprintf(buf, sizeof(buf),
+                "status ok=%d; centre surface %.3f m vs PriorityFlood spill "
+                "%.3f m (bed %.3f m), gap %+.3f m",
+                r.ok, double(surface_m), double(spill_m), double(bed_m),
+                double(gap_m));
+  Check("SweFillOracle: basin fills to ~ the PriorityFlood spill surface", ok,
+        buf);
+}
+
+// --- S3. the water ledger closes --------------------------------------------
+// rain_in - evap_out - border_outflow == Delta(Sigma h * cell_area). Not a
+// discretisation approximation like the fill oracle above -- every term on
+// both sides is built from the SAME arithmetic SweDepth already did per
+// cell, just summed two different ways, so this should close to float
+// accumulation noise, not a physical tolerance.
+void SweWaterLedger() {
+  Params p;
+  p.res = 40;
+  p.world_m = 16.0f * float(p.res);
+  p.relief_m = 1.0f;
+  p.terrain = Params::Terrain::Plane;
+  p.bowl_rim_m = 15.0f;  // InitAnalytic's Plane: ramp from 15 m to 0
+  p.runoff_m_per_yr = 40.0f;
+  p.evaporation_m_per_yr = 15.0f;  // nonzero, exercises BOTH ledger terms
+  p.swe_substeps = 60;
+
+  Grid g(p.res);
+  InitTerrain(g, p);
+  const float cell_area = (p.world_m / float(p.res)) * (p.world_m / float(p.res));
+  double before_m3 = 0.0;
+  for (float hv : g.h) before_m3 += double(hv) * double(cell_area);
+
+  SweRunResult r = RunSweCycles(g, p, /*cycles=*/150);
+
+  double after_m3 = 0.0;
+  for (float hv : g.h) after_m3 += double(hv) * double(cell_area);
+  const double delta_storage = after_m3 - before_m3;
+  const double ledger =
+      g.swe_rain_in_m3 - g.swe_evap_out_m3 - g.swe_border_outflow_m3;
+  const double residual = ledger - delta_storage;
+  const double scale = std::max({std::fabs(g.swe_rain_in_m3),
+                                 std::fabs(delta_storage), 1.0});
+  const double rel = std::fabs(residual) / scale;
+  char buf[260];
+  std::snprintf(buf, sizeof(buf),
+                "rain %.4e - evap %.4e - border %.4e = %.4e m3 vs "
+                "Delta(storage) %.4e m3, residual %.4e (rel %.2e)",
+                g.swe_rain_in_m3, g.swe_evap_out_m3, g.swe_border_outflow_m3,
+                ledger, delta_storage, residual, rel);
+  Check("SweWaterLedger: rain - evap - border = Delta storage",
+        r.ok && rel < 1e-6, buf);
+}
+
+// --- S4. determinism ---------------------------------------------------------
+// Pins the fixed-chunk CFL/tripwire max-reduction: two identical runs (same
+// fixture, default thread count) must produce BIT-EXACT h AND flux, not just
+// visually-similar output.
+void SweDeterminism() {
+  Params p;
+  p.res = 32;
+  p.world_m = 16.0f * float(p.res);
+  p.relief_m = 1.0f;
+  p.bowl = true;
+  p.bowl_rim_m = 12.0f;
+  p.bowl_well_m = 8.0f;
+  p.runoff_m_per_yr = 200.0f;
+  p.swe_substeps = 40;
+
+  auto run = [&]() {
+    Grid g(p.res);
+    InitTerrain(g, p);
+    RunSweCycles(g, p, 40);
+    return g;
+  };
+  Grid a = run(), b = run();
+  bool h_same = true, flux_same = true;
+  for (size_t i = 0; i < a.cells && (h_same || flux_same); ++i) {
+    if (a.h[i] != b.h[i]) h_same = false;
+    for (int k = 0; k < 4; ++k)
+      if (a.flux[i][k] != b.flux[i][k]) flux_same = false;
+  }
+  char buf[80];
+  std::snprintf(buf, sizeof(buf), "h same=%d, flux same=%d", h_same, flux_same);
+  Check("SweDeterminism: bit-exact h and flux across identical runs",
+        h_same && flux_same,
+        (h_same && flux_same) ? std::string("identical") : std::string(buf));
+}
+
+// --- S5. tripwires never crash, always name the fault -----------------------
+void SweTripwire() {
+  {
+    Params p;
+    p.res = 24;
+    p.world_m = 16.0f * float(p.res);
+    p.relief_m = 1.0f;
+    p.out = "";  // empty: must not attempt a dump
+    Grid g(p.res);
+    InitTerrain(g, p);
+    g.h[g.idx(12, 12)] = std::numeric_limits<float>::quiet_NaN();
+    SweRunResult r = RunSweCycles(g, p, 5);
+    const bool named = r.reason.find("non-finite") != std::string::npos;
+    char buf[256];
+    std::snprintf(buf, sizeof(buf), "ok=%d aborted_cycle=%d reason=\"%s\"",
+                  r.ok, r.aborted_cycle, r.reason.c_str());
+    Check("SweTripwire: seeded NaN aborts at cycle 0, names the fault",
+          !r.ok && r.aborted_cycle == 0 && named, buf);
+  }
+  {
+    Params p;
+    p.res = 24;
+    p.world_m = 16.0f * float(p.res);
+    p.relief_m = 1.0f;
+    p.out = "";
+    // CFL dt here is cfl_number*cell_m/sqrt(g*h) ~ 0.5*16/sqrt(9.81*1) ~
+    // 2.6 s at h = 1 m, and only SHRINKS as h grows (never grows without
+    // bound), so 100 s comfortably exceeds it for any depth this fixture
+    // could plausibly reach in 5 cycles.
+    p.dt_floor_s = 100.0f;
+    Grid g(p.res);
+    InitTerrain(g, p);
+    std::fill(g.h.begin(), g.h.end(), 1.0f);  // some water, so CFL dt is finite
+    SweRunResult r = RunSweCycles(g, p, 5);
+    const bool named = r.reason.find("dt-floor") != std::string::npos;
+    char buf[256];
+    std::snprintf(buf, sizeof(buf), "ok=%d aborted_cycle=%d reason=\"%s\"",
+                  r.ok, r.aborted_cycle, r.reason.c_str());
+    Check("SweTripwire: dt below dt_floor_s aborts, names dt-floor",
+          !r.ok && r.aborted_cycle == 0 && named, buf);
+  }
+}
+
+// --- S6. the wet-dry front is stable ----------------------------------------
+// A cliff: deep water perched on the high side, bone-dry low side. Must
+// produce no NaN/Inf anywhere, must never let a cell's total substep outflow
+// exceed the volume it held at the START of that substep (the export clamp's
+// own promise, checked from OUTSIDE the pass rather than trusted), and the
+// front must actually advance (water reaches cells that started dry).
+void SweWetDryFrontStability() {
+  Params p;
+  p.res = 32;
+  p.world_m = 16.0f * float(p.res);
+  p.relief_m = 1.0f;
+  p.swe_manning_n = 0.035f;
+  const float cell_m = p.world_m / float(p.res);
+  const float cell_area = cell_m * cell_m;
+
+  Grid g(p.res);
+  const int cliff_x = 16;
+  for (int y = 0; y < p.res; ++y)
+    for (int x = 0; x < p.res; ++x) {
+      const size_t i = g.idx(x, y);
+      if (x >= cliff_x) { g.height[i] = 10.0f; g.h[i] = 5.0f; }  // high, wet
+      else { g.height[i] = 0.0f; g.h[i] = 0.0f; }                // low, dry
+    }
+
+  const float dt = 0.02f;  // small fixed substep; this test drives the
+                           // passes directly rather than through the CFL
+                           // reduction, so it needs its own stable choice
+  bool finite = true;
+  bool clamp_respected = true;
+  for (int s = 0; s < 300 && finite && clamp_respected; ++s) {
+    const std::vector<float> h_before = g.h;
+    SweFlux(g, p, dt);
+    for (size_t i = 0; i < g.cells; ++i) {
+      const float total_out =
+          g.flux[i][0] + g.flux[i][1] + g.flux[i][2] + g.flux[i][3];
+      // 1e-4 relative slack for float rounding in the clamp's own division.
+      if (double(total_out) * double(dt) >
+          double(h_before[i]) * double(cell_area) * 1.0001 + 1e-9)
+        clamp_respected = false;
+      for (int k = 0; k < 4; ++k)
+        if (!std::isfinite(g.flux[i][k])) finite = false;
+    }
+    SweDepth(g, p, dt);
+    SweVelocity(g, p);
+    for (size_t i = 0; i < g.cells; ++i)
+      if (!std::isfinite(g.h[i]) || !std::isfinite(g.velx[i]) ||
+          !std::isfinite(g.vely[i]))
+        finite = false;
+  }
+
+  bool advanced = false;
+  for (int y = 0; y < p.res; ++y)
+    for (int dxi = 1; dxi <= 3; ++dxi) {
+      const int x = cliff_x - dxi;
+      if (x < 0) continue;
+      if (g.h[g.idx(x, y)] > p.eps_wet) advanced = true;
+    }
+
+  char buf[160];
+  std::snprintf(buf, sizeof(buf),
+                "finite=%d, per-substep outflow<=volume=%d, front advanced "
+                "onto dry side=%d",
+                finite, clamp_respected, advanced);
+  Check("SweWetDryFrontStability", finite && clamp_respected && advanced, buf);
+}
+
+// --- S7. drag dissipates momentum through a lake body -----------------------
+// A deep, initially-still lake WITH A DRY MARGIN (same shore construction as
+// SweWellBalancedness -- lake bed well below a much higher surrounding bed,
+// so the lake edge never exports toward it: head_lake < head_margin always,
+// clamped to 0). Without that margin the lake's own perimeter sits directly
+// on the open array border, where the FULL 20 m depth drains against the
+// h=0 ghost from the very first substep -- a border-drainage transient that
+// dwarfs the injection signal this test means to isolate (measured on a
+// first attempt: near and far speeds both ~21-22 m/s, indistinguishable,
+// because the whole perimeter was firing at once).
+//
+// Each substep, ONE cell near the lake's edge gets a small direct depth
+// increment (bypassing the sim -- no knob needed, per the brief), mimicking
+// a steady trickle inflow. Interior velocity magnitude must decay with
+// distance from the injection point: an undamped scheme would let that
+// disturbance ring across the lake at roughly constant speed (a "jet");
+// Manning drag should bleed it off well before the far sample.
+void SweLakeMomentumDissipation() {
+  Params p;
+  p.res = 64;
+  p.world_m = 16.0f * float(p.res);
+  p.relief_m = 1.0f;
+  p.swe_manning_n = 0.035f;
+
+  Grid g(p.res);
+  const int lo = 8, hi = 55;  // lake block, 8-cell dry margin to the border
+  const int y_mid = (lo + hi) / 2;
+  for (int y = 0; y < p.res; ++y)
+    for (int x = 0; x < p.res; ++x) {
+      const size_t i = g.idx(x, y);
+      if (x >= lo && x <= hi && y >= lo && y <= hi) {
+        g.height[i] = 0.0f;
+        g.h[i] = 20.0f;
+      } else {
+        g.height[i] = 1000.0f;  // dry margin, far above the lake surface
+        g.h[i] = 0.0f;
+      }
+    }
+
+  const float dt = 0.3f;  // a little under this fixture's natural CFL dt
+                          // (~0.5*16/sqrt(9.81*20) ~ 0.57 s) so the wave
+                          // speed sqrt(g*h) ~ 14 m/s can cross several cells
+                          // per substep without a separate CFL call
+  const int inject_x = lo + 4;
+  const int near_x = inject_x + 4;
+  const int far_x = 48;  // well inside the block (hi=55), short of its own
+                         // far wall where reflection off the dry margin
+                         // would confound the reading
+  // 1 m/substep measured (scratchpad/diag_lake.cpp) as the smallest trickle
+  // that resolves into a clean monotone decay within an affordable substep
+  // count; smaller trickles (tried down to 2 cm) were still mostly numerical
+  // noise at these distances after 250-2000 substeps -- the signal exists
+  // but does not visibly organise into "decay with distance" that fast.
+  for (int s = 0; s < 800; ++s) {
+    g.h[g.idx(inject_x, y_mid)] += 1.0f;  // trickle, every substep
+    SweFlux(g, p, dt);
+    SweDepth(g, p, dt);
+    SweVelocity(g, p);
+  }
+
+  // Speed along the centreline at increasing distance from the injection.
+  auto speed_at = [&](int x) {
+    const size_t i = g.idx(x, y_mid);
+    return std::sqrt(double(g.velx[i]) * double(g.velx[i]) +
+                     double(g.vely[i]) * double(g.vely[i]));
+  };
+  const double near_speed = speed_at(near_x);
+  const double far_speed = speed_at(far_x);
+  bool no_blowup = true;
+  double worst_beyond_near = 0.0;
+  for (int x = near_x + 1; x <= far_x; ++x)
+    worst_beyond_near = std::max(worst_beyond_near, speed_at(x));
+  // "No jet": nothing past the near sample may exceed it by more than a
+  // little (a jet would show up as a LATER sample being as fast or faster
+  // than the one right by the source). "Decays": the far sample is a small
+  // fraction of the near one.
+  if (worst_beyond_near > near_speed * 1.1 + 1e-9) no_blowup = false;
+  const bool decays = near_speed > 1e-6 && far_speed < 0.3 * near_speed;
+
+  char buf[220];
+  std::snprintf(buf, sizeof(buf),
+                "near (x=%d) speed %.4e m/s, far (x=%d) speed %.4e m/s, "
+                "worst beyond near %.4e m/s",
+                near_x, double(near_speed), far_x, double(far_speed),
+                worst_beyond_near);
+  Check("SweLakeMomentumDissipation: velocity decays into the lake, no jet",
+        no_blowup && decays, buf);
+}
+
+// --- S8. Manning normal-depth convergence on a uniform incline --------------
+// Constant rain on a uniform slope S with an open downhill border: at
+// quasi-steady state, unit discharge at a column with upslope drainage
+// length L is q ~ rain*L (mass conservation: everything that fell upslope
+// passes through), and depth ~ Manning's h = (n*q/sqrt(S))^(3/5). This is
+// the drag term's end-to-end validation -- S1 checks the acceleration term
+// in isolation (drag never engages on a still lake), this checks the
+// acceleration/drag BALANCE.
+void SweManningConvergence() {
+  Params p;
+  p.res = 40;
+  p.world_m = 16.0f * float(p.res);
+  p.relief_m = 1.0f;
+  const float S = 0.05f;  // 5% slope
+  p.terrain = Params::Terrain::Plane;
+  p.bowl_rim_m = S * p.world_m;  // InitAnalytic's Plane: h = rim*(1-y/world)
+  p.runoff_m_per_yr = 50.0f;
+  p.evaporation_m_per_yr = 0.f;
+  p.swe_manning_n = 0.035f;
+  p.swe_substeps = 60;
+
+  Grid g(p.res);
+  InitTerrain(g, p);
+  RunSweCycles(g, p, /*cycles=*/300);
+
+  const float cell_m = p.world_m / float(p.res);
+  const int y_sample = p.res / 2;
+  const float L = float(y_sample) * cell_m;  // upslope drainage length
+
+  // Average over interior columns only (x=0/x=n-1 leak sideways off the open
+  // x-border even on an x-symmetric fixture -- see this function's header
+  // comment on why those two columns are excluded).
+  double q_sum = 0.0, h_sum = 0.0;
+  int n_cols = 0;
+  for (int x = 2; x <= p.res - 3; ++x) {
+    const size_t i = g.idx(x, y_sample);
+    q_sum += double(g.flux[i][2]) / double(cell_m);  // +y face, m^2/s
+    h_sum += double(g.h[i]);
+    ++n_cols;
+  }
+  const double q_measured = q_sum / std::max(1, n_cols);
+  const double h_measured = h_sum / std::max(1, n_cols);
+
+  const double rain_mps = double(p.runoff_m_per_yr) / kSecondsPerYear;
+  const double q_expected = rain_mps * double(L);
+  const double h_expected =
+      std::pow(double(p.swe_manning_n) * q_expected / std::sqrt(double(S)),
+              0.6);
+
+  const double q_rel =
+      std::fabs(q_measured - q_expected) / std::max(q_expected, 1e-12);
+  const double h_rel =
+      std::fabs(h_measured - h_expected) / std::max(h_expected, 1e-12);
+  // 30%: generous and stated honestly, not tuned to just clear a run. This
+  // is a first-order upwind virtual-pipes scheme on a coarse grid reaching
+  // only an approximate quasi-steady state within a bounded cycle count --
+  // not a high-order Manning solver -- so it is not held to the tight
+  // (<=10%) discretisation bars this file uses for exact-form invariants
+  // like T1/T2. What it must show is convergence to the RIGHT NUMBER, not an
+  // arbitrary one: 30% clearly separates "found Manning's law" from "found
+  // nothing" or "found the wrong power law".
+  const bool ok = q_rel < 0.3 && h_rel < 0.3;
+  char buf[260];
+  std::snprintf(buf, sizeof(buf),
+                "q %.4e vs rain*L %.4e m2/s (%.0f%%); h %.4f vs Manning "
+                "%.4f m (%.0f%%)",
+                q_measured, q_expected, 100 * q_rel, h_measured, h_expected,
+                100 * h_rel);
+  Check("SweManningConvergence", ok, buf);
+}
+
 int RunAll() {
   std::printf("protogen sanity tests (small grids, production 16 m cells)\n");
   MassConservation();
@@ -1068,6 +1555,16 @@ int RunAll() {
   SoilProductionSelfLimiting();
   SoilProductionConservesMass();
   SoilProductionSteadyState();
+
+  std::printf("\n  phase-1 SWE fluid (virtual-pipes shallow water)\n");
+  SweWellBalancedness();
+  SweFillOracle();
+  SweWaterLedger();
+  SweDeterminism();
+  SweTripwire();
+  SweWetDryFrontStability();
+  SweLakeMomentumDissipation();
+  SweManningConvergence();
 
   std::printf("\n  %d passed, %d failed, %d pending", g_pass, g_fail, g_pending);
   if (g_pending_ready)

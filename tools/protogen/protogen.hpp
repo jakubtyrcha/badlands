@@ -8,6 +8,7 @@
 // each .cpp's own comments for what that is. Export deliberately: this file
 // grows only when a symbol gains an actual caller in another TU.
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -234,11 +235,12 @@ struct Params {
   float settling = 0.8f;
 
   // --- climate, real units ---
-  // Temperate default. evaporation_m_per_yr is temporarily UNCONSUMED: the
-  // standing-water balance that read it against runoff was deleted with the
-  // rest of the lake machinery. Retained for the Eulerian shallow-water phase
-  // that replaces it; its KnobLiveness row is dropped until that phase gives
-  // it an effect to prove.
+  // Temperate default. `runoff_m_per_yr` feeds BOTH phase-0 (EffectiveDropVolume
+  // via the particle count) and phase-1 (SweDepth's rain term, same real rate).
+  // `evaporation_m_per_yr` regains a consumer as of the SWE fluid passes:
+  // SweDepth subtracts it from wet cells only, clamped so depth cannot go
+  // negative. It has no phase-0 effect (the particle walk's own evaporation is
+  // `evap_length_m`, a travel-distance e-fold, not this real-rate knob).
   float runoff_m_per_yr = 1.0f;
   float evaporation_m_per_yr = 0.8f;
 
@@ -246,6 +248,42 @@ struct Params {
   // the width term in the Manning flow-depth closure Descend uses off-channel
   // (see the depth_m derivation there).
   float channel_width_coeff = 5.0f;
+
+  // --- phase-1 SWE fluid: virtual-pipes shallow water (protogen_swe.cpp) ---
+  //
+  // Substeps run per RunSweCycles cycle, each Flux->Depth->Velocity. 50 is a
+  // starting point, not derived: the substep's OWN dt already comes from CFL,
+  // this just says how many of them run before the (currently empty) morpho
+  // hook gets a turn once Task 6 fills it in.
+  int swe_substeps = 50;
+  // CFL number for the substep dt: dt = cfl_number * cell_m / sqrt(g*h_max).
+  // 0.5 is the standard shallow-water safety factor -- explicit virtual-pipes
+  // schemes are stable up to ~1.0; 0.5 leaves headroom for the implicit drag
+  // term's own stiffness and for MORFAC-scaled bed change later.
+  float cfl_number = 0.5f;
+  // Manning roughness for the SWE fluid passes. A SEPARATE knob from
+  // `manning_n` (the phase-0 particle walk's), not an alias, even though the
+  // drag physics is identical (g*n^2/depth^(4/3)): the two closures see
+  // different flow regimes -- phase-0 is thin sheet-flow floored at
+  // `sheet_flow_depth_m`, phase-1 is a settled depth field spanning
+  // millimetres to lake-deep -- so retuning one must not silently retune the
+  // other. Same default (0.035) because nothing yet says the terrains
+  // disagree; a future task can diverge them once one does.
+  float swe_manning_n = 0.035f;
+  // Wet/dry threshold, metres. Below this a cell's OUTFLOW is forced to
+  // exactly zero regardless of head difference or carried-over flux, rather
+  // than left to fade out via the depth factor already in the flux law --
+  // so a nearly-dry cell cannot keep exporting on inertia from a wetter past,
+  // and the velocity derivation has a hard floor to guard against. 1 mm:
+  // shallower than any depth this sim treats as meaningful, deep enough to
+  // clear ordinary float noise in `h`.
+  float eps_wet = 1e-3f;
+  // Abort floor for the CFL-derived substep dt, seconds. Dt collapsing below
+  // this means either the CFL max-reduction found something unphysical
+  // (about to divide by ~0 wave speed) or a caller pushed cfl_number/Manning
+  // to an absurd combination -- either way, continuing would spend cycles
+  // producing output with no diagnosable meaning instead of naming the fault.
+  float dt_floor_s = 1e-5f;
 
   // THE landscape clock. One step represents this many years, and every
   // process scales with it: diffusion through k = D*dt/cell^2, and erosion
@@ -293,6 +331,30 @@ struct Grid {
   // ledger a particle walking off the map pays into.
   double injected_sus = 0.0, lost_offmap = 0.0;
 
+  // --- phase-1 SWE fluid state (protogen_swe.cpp) ---
+  //
+  // Depth `h`/`h_b`, metres, ping-ponged like every other Jacobi field here.
+  // `flux` needs NO ping-pong: SweFlux only ever reads a cell's own PREVIOUS
+  // flux plus depth (`h`, which SweFlux never writes), so overwriting the one
+  // buffer in place is never read-after-write hazardous -- see SweFlux's own
+  // comment for the full walk. Face order matches Diffuse/SettleSus's
+  // dx4/dy4: 0 = +x, 1 = -x, 2 = +y, 3 = -y; every entry is an OUTFLOW
+  // (>= 0), never signed -- the neighbour's own opposite-face entry is how a
+  // cell's inflow is read.
+  std::vector<float> h, h_b;
+  std::vector<std::array<float, 4>> flux;
+  // Cell-centred velocity, m/s -- derived each substep from `flux`/`h` alone
+  // (SweVelocity), not simulated state of its own.
+  std::vector<float> velx, vely;
+  // Water ledger, cubic metres. Rain in minus evaporation out minus what the
+  // open border drained away must equal the change in Sigma(h)*cell_area
+  // (SweWaterLedger). m^3 rather than a depth: every term is already a
+  // dt*rate*area or dt*flux integral at the point the pass touches the cell,
+  // so a further division back to a depth would only discard precision for
+  // no benefit -- there is no single area to divide a MULTI-CELL sum by.
+  double swe_rain_in_m3 = 0.0, swe_evap_out_m3 = 0.0,
+         swe_border_outflow_m3 = 0.0;
+
   explicit Grid(int res)
       : n(res), cells(size_t(res) * res), height(cells, 0.f),
         height_b(cells, 0.f),
@@ -302,7 +364,10 @@ struct Grid {
         momx(cells, 0.f), momy(cells, 0.f), momx_b(cells, 0.f), momy_b(cells, 0.f),
         soil(cells, 0.f), sus(cells, 0.f), sus_b(cells, 0.f),
         vol_track(cells, 0.f), mx_track(cells, 0.f), my_track(cells, 0.f),
-        visits(cells, 0u) {}
+        visits(cells, 0u),
+        h(cells, 0.f), h_b(cells, 0.f),
+        flux(cells, std::array<float, 4>{0.f, 0.f, 0.f, 0.f}),
+        velx(cells, 0.f), vely(cells, 0.f) {}
 
   inline size_t idx(int x, int y) const { return size_t(y) * n + x; }
   inline bool oob(int x, int y) const {
@@ -314,6 +379,11 @@ struct Grid {
 // a copy that can drift from it.
 struct SimStats {
   double t_drops = 0, t_grid = 0, t_settle = 0;
+  // Phase-1 SWE cycle timers, one bucket per dispatch-list pass plus the
+  // per-cycle CFL/tripwire reduction. Unused (stays zero) until RunSweCycles
+  // is wired into the driver (Task 7); RunSweCycles itself already fills
+  // them in when given a non-null SimStats*, so a caller can time it today.
+  double t_swe_reduce = 0, t_swe_flux = 0, t_swe_depth = 0, t_swe_velocity = 0;
 };
 
 // Definitions in protogen.cpp -- phase-0 land init, the whole-sim driver, and
@@ -321,6 +391,40 @@ struct SimStats {
 void InitTerrain(Grid& g, const Params& p);
 void RunSim(const Params& p, Grid& g, SimStats& st, bool verbose);
 void Cascade(Grid& g, const Params& p, int x, int y, float max_diff);
+
+// Barnes et al. priority-flood: every cell raised to the lowest elevation on
+// any path to the map edge, i.e. its spill level. Defined in protogen.cpp.
+// Test oracle only (SweFillOracle here; Task 5's warm start reuses it for
+// real) -- no production caller, exported because it now has one across a
+// TU boundary (see this file's header comment on exporting deliberately).
+void PriorityFlood(const Grid& g, std::vector<float>& filled,
+                   std::vector<int32_t>& outlet_of);
+
+// Phase-1 SWE fluid passes (protogen_swe.cpp). Each is a standalone,
+// gather-only Jacobi pass over the whole grid, reading only front-buffer
+// state and its own previous flux -- see protogen_swe.cpp's header comment
+// for the pass list's role as the frozen future GPU dispatch order, and each
+// function's own comment for its exact read/write set.
+void SweFlux(Grid& g, const Params& p, float dt);
+void SweDepth(Grid& g, const Params& p, float dt);
+void SweVelocity(Grid& g, const Params& p);
+
+// Outcome of RunSweCycles: `ok` false means a tripwire fired -- non-finite
+// state or a CFL-derived dt collapsed below `dt_floor_s`. `aborted_cycle`/
+// `reason` name where and why, so a caller (test or, from Task 7, the
+// driver) can report it rather than merely detect it.
+struct SweRunResult {
+  bool ok = true;
+  int aborted_cycle = -1;
+  std::string reason;
+};
+// Runs `cycles` SWE cycles (CFL dt -> swe_substeps x Flux/Depth/Velocity ->
+// empty morpho hook) starting from Grid `g`'s current `h`/`flux` state --
+// callable standalone, independent of RunSim/phase-0 (Task 5 supplies the
+// warm start that seeds `h` from phase-0's finished bed; nothing here
+// requires it). `stats`, if non-null, accumulates per-pass wall time.
+SweRunResult RunSweCycles(Grid& g, const Params& p, int cycles,
+                          SimStats* stats = nullptr);
 
 }  // namespace pg
 
