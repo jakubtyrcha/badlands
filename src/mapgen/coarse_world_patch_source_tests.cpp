@@ -437,7 +437,10 @@ TEST_CASE("CoarseWorldPatchSource: a resampled ramp keeps NODE registration",
   REQUIRE(write_coarse_manifest(dir.str(), man, &err));
 
   const size_t count = static_cast<size_t>(src_res) * src_res;
-  std::vector<float> height(count), water(count, 0.0f), soil(count, 2.0f);
+  // Soil DEEP (>= the relief filter's 3 m fade-out): a 45-degree ramp is
+  // squarely in the filter's slope gate, and this test asserts the PURE
+  // resample -- registration error and nothing else.
+  std::vector<float> height(count), water(count, 0.0f), soil(count, 4.0f);
   for (int y = 0; y < src_res; ++y)
     for (int x = 0; x < src_res; ++x)
       height[static_cast<size_t>(y) * src_res + x] =
@@ -465,4 +468,65 @@ TEST_CASE("CoarseWorldPatchSource: a resampled ramp keeps NODE registration",
     const float want = static_cast<float>(j) * p.texel_m;
     REQUIRE(p.height.at(j, 64) == Catch::Approx(want).margin(1e-3));
   }
+}
+
+TEST_CASE(
+    "CoarseWorldPatchSource: a fine fetch carries relief detail on "
+    "thin-soil steep ground",
+    "[patch]") {
+  // The relief chain's step 2 (2026-08-06 spec): after the Catmull-Rom
+  // resample, the detail filter adds sub-coarse-cell relief. Two worlds
+  // differing ONLY in soil depth isolate it -- deep soil closes the
+  // physical fade gate exactly, so any height difference between the two
+  // fetches IS the filter's delta, and it must exist, stay bounded, and
+  // never appear at 16 m output texels.
+  auto write_ramp_world = [](const std::string& dir, float soil_m) {
+    const int src_res = 64;
+    const float world_m = 1024.0f;
+    const float src_texel = world_m / static_cast<float>(src_res);
+    CoarseManifest man;
+    man.resolution = src_res;
+    man.world_size_m = world_m;
+    man.texel_m = src_texel;
+    man.soil_cut_mountain_m = 0.35f;
+    man.soil_cut_hills_m = 1.40f;
+    std::string err;
+    REQUIRE(write_coarse_manifest(dir, man, &err));
+    const size_t count = static_cast<size_t>(src_res) * src_res;
+    std::vector<float> height(count), water(count, 0.0f), soil(count, soil_m);
+    for (int y = 0; y < src_res; ++y)
+      for (int x = 0; x < src_res; ++x)
+        height[static_cast<size_t>(y) * src_res + x] =
+            0.6f * static_cast<float>(x) * src_texel;
+    write_raw(dir + "/0001-step-height.f32", height);
+    write_raw(dir + "/0001-step-water.f32", water);
+    write_raw(dir + "/0001-step-soil.f32", soil);
+  };
+
+  TempDir thin_dir("relief_thin"), deep_dir("relief_deep");
+  write_ramp_world(thin_dir.str(), 0.2f);
+  write_ramp_world(deep_dir.str(), 4.0f);
+  std::string err;
+  auto thin = LoadCoarseWorldPatchSource(thin_dir.str(), "0001-step", &err);
+  auto deep = LoadCoarseWorldPatchSource(deep_dir.str(), "0001-step", &err);
+  REQUIRE(thin != nullptr);
+  REQUIRE(deep != nullptr);
+
+  PatchRequest req;
+  req.origin_m = glm::dvec2(256.0, 256.0);
+  req.world_size_m = 256.0f;
+  req.resolution = 256;  // 1 m texels: the whole octave band is audible
+  const PatchData pt = thin->Fetch(req);
+  const PatchData pd = deep->Fetch(req);
+  const float diff = max_interior_diff(pt.height, pd.height, 8);
+  REQUIRE(diff > 0.05f);
+  REQUIRE(diff <= 4.0f);
+
+  // At source density the octave band is below the output Nyquist: the same
+  // two worlds must fetch identical heights.
+  req.world_size_m = 256.0f;
+  req.resolution = 16;  // 16 m texels
+  const PatchData ct = thin->Fetch(req);
+  const PatchData cd = deep->Fetch(req);
+  REQUIRE(max_interior_diff(ct.height, cd.height, 0) == 0.0f);
 }

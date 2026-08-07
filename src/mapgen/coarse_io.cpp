@@ -36,20 +36,32 @@ std::optional<CoarseManifest> load_coarse_manifest(const std::string& dir,
     std::istringstream ls(line);
     std::string key;
     if (!(ls >> key) || key.empty() || key[0] == '#') continue;
+    // A KNOWN key with an unparseable value is an error, not a silent
+    // default -- "seed abc" must not quietly become seed 0. ABSENT keys stay
+    // tolerated (the forward-compat rule below cuts both ways: older
+    // manifests keep loading, and it is the CONSUMER's job to reject a
+    // manifest missing something it cannot work without).
+    const auto parse = [&](auto& out_field) {
+      if (ls >> out_field) return true;
+      if (error) *error = path + ": invalid value for '" + key + "'";
+      return false;
+    };
     if (key == "resolution") {
-      have_res = static_cast<bool>(ls >> m.resolution);
+      if (!parse(m.resolution)) return std::nullopt;
+      have_res = true;
     } else if (key == "world_size_m") {
-      have_size = static_cast<bool>(ls >> m.world_size_m);
+      if (!parse(m.world_size_m)) return std::nullopt;
+      have_size = true;
     } else if (key == "seed") {
-      ls >> m.seed;
+      if (!parse(m.seed)) return std::nullopt;
     } else if (key == "runoff_m_per_yr") {
-      ls >> m.runoff_m_per_yr;
+      if (!parse(m.runoff_m_per_yr)) return std::nullopt;
     } else if (key == "steps") {
-      ls >> m.steps;
+      if (!parse(m.steps)) return std::nullopt;
     } else if (key == "soil_cut_mountain_m") {
-      ls >> m.soil_cut_mountain_m;
+      if (!parse(m.soil_cut_mountain_m)) return std::nullopt;
     } else if (key == "soil_cut_hills_m") {
-      ls >> m.soil_cut_hills_m;
+      if (!parse(m.soil_cut_hills_m)) return std::nullopt;
     }
     // Unknown keys -- including "texel_m", which is written for OTHER readers
     // only (see the header) -- are ignored on purpose: the writer may add

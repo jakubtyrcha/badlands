@@ -11,7 +11,9 @@
 #include <vector>
 
 #include "mapgen/biomes.hpp"
+#include "mapgen/cubic_sample.hpp"
 #include "mapgen/patch_io.hpp"
+#include "mapgen/relief_filter.hpp"
 #include "mapgen/river_clip.hpp"
 #include "mapgen/river_io.hpp"
 #include "mapgen/river_prune.hpp"
@@ -32,24 +34,6 @@ constexpr float kMinRiverBranchM = 32.0f;
 // weight) list, weights summing to 1.
 using Tap = std::pair<int, double>;
 
-// Mitchell-Netravali cubic family, ported from tools/protogen/window.cpp's
-// Cubic(). (B, C) = (0, 0.5) is Catmull-Rom -- interpolating (its weight is
-// exactly 1 at an integer sample offset and 0 at every other integer), mild
-// overshoot.
-double CubicWeight(double x, double B, double C) {
-  x = std::fabs(x);
-  const double x2 = x * x, x3 = x2 * x;
-  if (x < 1.0)
-    return ((12 - 9 * B - 6 * C) * x3 + (-18 + 12 * B + 6 * C) * x2 +
-            (6 - 2 * B)) /
-           6.0;
-  if (x < 2.0)
-    return ((-B - 6 * C) * x3 + (6 * B + 30 * C) * x2 + (-12 * B - 48 * C) * x +
-            (8 * B + 24 * C)) /
-           6.0;
-  return 0.0;
-}
-
 // CATMULL-ROM (B=0, C=0.5), NOT LANCZOS-3 -- the default kernel, and its
 // reasoning is ported verbatim from tools/protogen/window.cpp (measured
 // there): Lanczos-3 does not reproduce a linear ramp -- its weights sum to 1
@@ -62,8 +46,10 @@ double CubicWeight(double x, double B, double C) {
 // linear ramp to machine epsilon; Catmull-Rom is the interpolating member of
 // the Mitchell-Netravali family and roughly halves Lanczos's overshoot at
 // the same support.
-constexpr int kCubicSupport = 2;  // taps per side
-double CatmullRom(double x) { return CubicWeight(x, 0.0, 0.5); }
+//
+// The kernel itself (CatmullRom/CatmullRomDeriv/kCubicSupport) lives in
+// mapgen/cubic_sample.hpp, shared with the relief filter's point sampler --
+// two copies of the weights would let the raster and point paths drift.
 
 // Builds one output texel's cubic taps directly from WORLD METRES, unlike
 // tools/protogen/window.cpp's BuildTaps, which built one shared src_n/out_n
@@ -153,6 +139,17 @@ std::vector<Tap> BoxTaps(double origin_axis_m, float out_texel_m, int j,
 }
 
 enum class ResampleKind { Cubic, Box };
+
+// THE one biome rule: wet is Lake, dry classifies by soil against the
+// whole-world manifest cutoffs. Shared by Fetch (per patch texel) and the
+// loader (the whole-world raster the relief filter styles from), so the two
+// cannot drift when the rule grows.
+Biome ClassifyBiome(float soil_m, bool wet, const CoarseManifest& man) {
+  if (wet) return Biome::Lake;
+  if (soil_m < man.soil_cut_mountain_m) return Biome::Mountain;
+  if (soil_m < man.soil_cut_hills_m) return Biome::Hills;
+  return Biome::Plains;
+}
 
 std::vector<Tap> BuildAxisTaps(ResampleKind kind, double origin_axis_m,
                                float out_texel_m, int j, float src_texel_m,
@@ -330,12 +327,19 @@ Field2D<float> ReconstructWater(const Field2D<float>& bed_src,
     }
   }
 
-  // Maps an OUTPUT texel's centre to the SOURCE cell nominally beneath it.
+  // Maps an OUTPUT texel to the SOURCE cell nominally beneath it -- in NODE
+  // registration, like everything else here: output texel i IS world
+  // origin + i*out_texel_m, and source node s owns [(s-0.5), (s+0.5)] cells.
+  // An earlier revision used pixel centres ((i+0.5)*out, floor(wx/src)),
+  // which displaced every lake seed and flood cap ~0.5*src_texel_m to one
+  // side -- the same half-texel disagreement CubicTaps' comment documents.
   const auto source_cell = [&](int i, int j) {
-    const double wx = origin_m.x + (static_cast<double>(i) + 0.5) * out_texel_m;
-    const double wy = origin_m.y + (static_cast<double>(j) + 0.5) * out_texel_m;
-    const int sx = std::clamp(static_cast<int>(std::floor(wx / src_texel_m)), 0, sw - 1);
-    const int sy = std::clamp(static_cast<int>(std::floor(wy / src_texel_m)), 0, sh - 1);
+    const double wx = origin_m.x + static_cast<double>(i) * out_texel_m;
+    const double wy = origin_m.y + static_cast<double>(j) * out_texel_m;
+    const int sx = std::clamp(
+        static_cast<int>(std::floor(wx / src_texel_m + 0.5)), 0, sw - 1);
+    const int sy = std::clamp(
+        static_cast<int>(std::floor(wy / src_texel_m + 0.5)), 0, sh - 1);
     return sy * sw + sx;
   };
 
@@ -492,6 +496,16 @@ PatchData CoarseWorldPatchSource::Fetch(const PatchRequest& req) const {
   out.height = std::move(bed);
   out.soil = std::move(soil);
 
+  // --- relief detail (2026-08-06 spec): step 2 of the §3.4 chain. The
+  // filter's delta rides on the resampled bed BEFORE the water rebuild, so
+  // lake margins and levels see the detailed ground; the filter itself is
+  // masked off standing water, so a lake bed is never touched. At or below
+  // source density the octave band sits under the output Nyquist and the
+  // delta is exactly zero -- Box/Crop requests stay bit-identical.
+  const ReliefContext relief_ctx{&height_,       &soil_,      &biome_,
+                                 &water_depth_,  src_texel_m, manifest_.seed};
+  apply_relief(relief_ctx, req.origin_m, out_texel_m, out.height);
+
   // --- water -----------------------------------------------------------
   const Field2D<float> depth =
       ReconstructWater(height_, water_depth_, out.height, req.origin_m, src_texel_m, out_texel_m, n);
@@ -509,21 +523,9 @@ PatchData CoarseWorldPatchSource::Fetch(const PatchRequest& req) const {
   // --- biome, from the WHOLE-WORLD manifest cutoffs, never a per-patch
   // quantile -- see coarse_io.hpp on why the cutoffs live on the manifest.
   out.biome = Field2D<uint8_t>(n, n);
-  for (int i = 0; i < n * n; ++i) {
-    if (out.water_depth.data[i] > 0.0f) {
-      out.biome.data[i] = static_cast<uint8_t>(Biome::Lake);
-    } else {
-      const float s = out.soil.data[i];
-      Biome b;
-      if (s < manifest_.soil_cut_mountain_m)
-        b = Biome::Mountain;
-      else if (s < manifest_.soil_cut_hills_m)
-        b = Biome::Hills;
-      else
-        b = Biome::Plains;
-      out.biome.data[i] = static_cast<uint8_t>(b);
-    }
-  }
+  for (int i = 0; i < n * n; ++i)
+    out.biome.data[i] = static_cast<uint8_t>(ClassifyBiome(
+        out.soil.data[i], out.water_depth.data[i] > 0.0f, manifest_));
 
   // --- rivers: clip to the request rect, THEN rebase to patch-local, THEN
   // cull -- order matters (see river_clip.hpp / river_prune.hpp).
@@ -548,6 +550,16 @@ std::unique_ptr<CoarseWorldPatchSource> LoadCoarseWorldPatchSource(
     const std::string& dir, const std::string& tag, std::string* error) {
   const std::optional<CoarseManifest> man = load_coarse_manifest(dir, error);
   if (!man) return nullptr;
+  // The manifest tolerates absent keys (forward compat), but THIS consumer
+  // classifies biomes against the soil cutoffs -- a manifest without them
+  // would silently style every dry cell Plains. Reject it loudly instead.
+  if (!(man->soil_cut_mountain_m > 0.0f) || !(man->soil_cut_hills_m > 0.0f)) {
+    if (error)
+      *error = dir + "/world.txt: missing or non-positive soil cutoffs "
+                     "(soil_cut_mountain_m/soil_cut_hills_m) -- biome "
+                     "classification needs them";
+    return nullptr;
+  }
 
   std::string use_tag = tag;
   if (use_tag.empty()) {
@@ -587,6 +599,10 @@ std::unique_ptr<CoarseWorldPatchSource> LoadCoarseWorldPatchSource(
   src->water_depth_.data = std::move(water);
   src->soil_ = Field2D<float>(n, n);
   src->soil_.data = std::move(soil);
+  src->biome_ = Field2D<uint8_t>(n, n);
+  for (size_t i = 0; i < count; ++i)
+    src->biome_.data[i] = static_cast<uint8_t>(ClassifyBiome(
+        src->soil_.data[i], src->water_depth_.data[i] > 0.0f, *man));
   src->rivers_ = std::move(rivers);
   return src;
 }
