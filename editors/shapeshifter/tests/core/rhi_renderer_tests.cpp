@@ -200,3 +200,105 @@ TEST_CASE("shapeshifter: a skipped acquire presents nothing", "[ss-rhi]") {
   device->EndFrame();
   CHECK(null::PresentCount(*sc) == before);
 }
+
+#include "badlands_assets.h"
+
+TEST_CASE("shapeshifter: a headless frame draws the scene", "[ss-rhi][dump]") {
+  // Renders one frame to a texture, asserts on the pixels, and writes a PNG
+  // beside them.
+  //
+  // THIS IS THE TEST THAT WAS MISSING. Everything else passed while the app
+  // rendered nothing: the pipelines built, the graph compiled, Metal's
+  // validation layer stayed silent, and the window cleared to the background
+  // colour and stopped. "The GPU did not complain" is not "the frame drew
+  // something", and only reading the pixels back tells them apart.
+  auto device = CreateDevice({.backend = BackendKind::Metal,
+                              .enable_validation = true, .label = "dump"});
+  if (!device) { SUCCEED("no Metal device"); return; }
+  auto compiler = MakeCompiler();
+  REQUIRE(compiler);
+
+  const uint32_t W = 512, H = 512;
+  auto renderer = sq::RhiRenderer::Create(*device, *compiler, Format::RGBA8Unorm);
+  REQUIRE(renderer);
+
+  auto color_tex = device->CreateTexture(
+      {.width = W, .height = H, .format = Format::RGBA8Unorm,
+       .usage = TextureUsage::RenderTarget | TextureUsage::CopySrc,
+       .label = "dump_color"});
+  auto depth_tex = device->CreateTexture(
+      {.width = W, .height = H, .format = Format::Depth32Float,
+       .usage = TextureUsage::DepthStencil, .label = "dump_depth"});
+  auto readback = device->CreateBuffer(
+      {.size = uint64_t(W) * H * 4,
+       .usage = BufferUsage::CopyDst | BufferUsage::MapRead,
+       .label = "dump_readback"});
+  REQUIRE(color_tex); REQUIRE(depth_tex); REQUIRE(readback);
+
+  sq::SceneDocument doc;
+  sq::Node node;
+  node.id = 1;
+  node.shape = sq::Shape::Cube;
+  doc.add(node);
+
+  sq::Camera camera;
+  camera.eye = {2.5f, 2.0f, 3.5f};
+  camera.target = {0.0f, 0.0f, 0.0f};
+  camera.up = {0.0f, 1.0f, 0.0f};
+  // Camera has NO default member initialisers -- an uninitialised fov makes the
+  // projection garbage and every pass reject, which looks exactly like a broken
+  // renderer.
+  camera.fov_y_radians = 1.0472f;
+  camera.aspect = 1.0f;
+
+  device->BeginFrame();
+  renderer->BeginFrame(device->CurrentFrame());
+  graph::RenderGraph g(*device);
+  auto color = g.ImportTexture(color_tex.get(), ResourceState::Undefined, "c");
+  auto depth = g.ImportTexture(depth_tex.get(), ResourceState::Undefined, "d");
+  REQUIRE(renderer->BuildFrame(g, color, depth, doc, sq::kInvalidNode, camera, W, H));
+  REQUIRE(g.Compile());
+
+  auto encoder = device->CreateCommandEncoder("dump");
+  g.Execute(*encoder);
+  encoder->Transition(color_tex.get(), ResourceState::CopySrc);
+  encoder->Transition(readback.get(), ResourceState::CopyDst);
+  encoder->CopyTextureToBuffer(color_tex.get(), 0, 0, readback.get(), 0);
+  encoder->Finish();
+  device->Submit(*encoder);
+  device->EndFrame();
+  device->WaitIdle();
+
+  std::vector<uint8_t> pixels(size_t(W) * H * 4);
+  REQUIRE(readback->Read(0, pixels));
+  badlands_write_png("/tmp/shapeshifter_frame.png", pixels.data(), W, H);
+
+  auto at = [&](uint32_t x, uint32_t y) { return &pixels[(size_t(y) * W + x) * 4]; };
+
+  // 1. The frame drew SOMETHING. The clear colour is rgb(5,5,6) at 8 bits.
+  size_t lit = 0;
+  for (size_t i = 0; i < pixels.size(); i += 4) {
+    if (pixels[i] > 12 || pixels[i + 1] > 12 || pixels[i + 2] > 14) ++lit;
+  }
+  INFO("lit texels: " << lit << " of " << (W * H));
+  REQUIRE(lit > W * H / 100); // the grid alone covers far more than 1%
+
+  // 2. The RAYMARCH ran, not just the ground plate. The cube sits at the origin
+  // with the camera aimed at it, so the centre texel is its surface -- shaded by
+  // normal, which is saturated in a way no grid line is.
+  const uint8_t* centre = at(W / 2, H / 2);
+  INFO("centre rgba(" << int(centre[0]) << "," << int(centre[1]) << ","
+                      << int(centre[2]) << ")");
+  const int centre_max = std::max({centre[0], centre[1], centre[2]});
+  CHECK(centre_max > 100);
+
+  // 3. The GROUND PLATE ran. Its grid lines live out at the edges where the
+  // cube is not, so something above the clear colour must be there too.
+  size_t edge_lit = 0;
+  for (uint32_t x = 0; x < W; ++x) {
+    const uint8_t* p = at(x, H - 8);
+    if (p[0] > 12 || p[1] > 12 || p[2] > 14) ++edge_lit;
+  }
+  INFO("lit texels along the bottom edge: " << edge_lit);
+  CHECK(edge_lit > 0);
+}

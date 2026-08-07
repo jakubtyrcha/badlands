@@ -2185,6 +2185,14 @@ target_include_directories(shapeshifter_core
 )
 target_compile_options(shapeshifter_core PRIVATE -iquote${SHAPESHIFTER_DIR}/core/src)
 
+# The Slang shaders are compiled from SOURCE at startup, so the editor needs to
+# find them on disk at run time. Everything else in this repo resolves such
+# paths relative to cwd and is run from the repo root -- but a launched .app
+# bundle has no such cwd, and the failure is silent and total: no compiler, no
+# pipelines, no renderer, a window that clears and draws nothing.
+target_compile_definitions(shapeshifter_core PRIVATE
+    SHAPESHIFTER_SHADER_DIR="${SHAPESHIFTER_DIR}/shaders")
+
 # DCSDD reconstruction is expensive numerical code (dense per-cell least-squares
 # solves x hundreds of cells x outer iterations). Unoptimized it runs ~43x slower
 # than -O2 — measured on a single-cube remesh at the editor's config, 243.6s vs
@@ -2262,10 +2270,13 @@ add_executable(shapeshifter_rhi_tests
 )
 target_include_directories(shapeshifter_rhi_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
-    ${CMAKE_SOURCE_DIR}/src)
+    ${CMAKE_SOURCE_DIR}/src
+    # badlands_write_png, for the headless frame dump -- the only way to look at
+    # what a SwiftUI app renders without a display.
+    ${CMAKE_SOURCE_DIR}/src/crates/assets/include)
 target_compile_options(shapeshifter_rhi_tests PRIVATE
     -iquote${SHAPESHIFTER_DIR}/core/src)
-target_link_libraries(shapeshifter_rhi_tests PRIVATE shapeshifter_core)
+target_link_libraries(shapeshifter_rhi_tests PRIVATE shapeshifter_core assets)
 if(APPLE)
     target_link_options(shapeshifter_rhi_tests PRIVATE "-Wl,-ld_new")
 endif()

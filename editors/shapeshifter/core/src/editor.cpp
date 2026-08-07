@@ -5,6 +5,8 @@
 #include <cmath>
 #include <cstring>
 
+#include <spdlog/spdlog.h>
+
 #include "camera.h"
 #include "camera_controller.h"
 #include "gizmo.h"
@@ -148,18 +150,27 @@ void Editor::attachLayer(void* caMetalLayer) {
          .label = "shapeshifter"});
     if (!impl_->device) return; // CreateDevice logged why
 
-    // Both paths: the entry points live in shaders/slang/shapeshifter, the
-    // headers they include one level up. Relative to the app bundle's resource
-    // path would be wrong -- the shaders are compiled from source at startup,
-    // from the repo, which is what makes editing one a rebuild-free change.
-    const std::string search[] = {"editors/shapeshifter/shaders/slang/shapeshifter",
-                                  "editors/shapeshifter/shaders"};
+
+    // ABSOLUTE, baked in by CMake. The rest of this repo resolves shader paths
+    // relative to cwd and is run from the repo root; a launched .app bundle has
+    // no such cwd, and getting this wrong fails silently and totally -- no
+    // compiler, no pipelines, no renderer, a window that clears and draws
+    // nothing with no error anywhere.
+    const std::string shaders = SHAPESHIFTER_SHADER_DIR;
+    const std::string search[] = {shaders + "/slang/shapeshifter", shaders};
     impl_->compiler = badlands::slang::CreateSlangCompiler(search);
-    if (!impl_->compiler) return;
+    if (!impl_->compiler) {
+        spdlog::error("shapeshifter: no Slang compiler; the viewport will be blank");
+        return;
+    }
 
     impl_->renderer = RhiRenderer::Create(*impl_->device, *impl_->compiler,
                                           badlands::rhi::Format::RGBA16Float);
-    if (!impl_->renderer) return;
+    if (!impl_->renderer) {
+        spdlog::error("shapeshifter: the renderer failed to build (shaders at {}); "
+                      "the viewport will be blank", shaders);
+        return;
+    }
     impl_->renderer->AttachLayer(caMetalLayer, impl_->drawableWidthPx,
                                  impl_->drawableHeightPx);
 }
