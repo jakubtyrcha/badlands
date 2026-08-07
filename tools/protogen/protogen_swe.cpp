@@ -1743,7 +1743,22 @@ SweRunResult RunSweCycles(Grid& g, const Params& p, int cycles,
       // construction, so any residual here is a bug in one of them, not a
       // physical term this expression forgot. See kMassAuditRelTol for what
       // this check does and does not prove.
-      if ((cycle + 1) % kMassAuditEveryCycles == 0) {
+      //
+      // GATED ON THE GLOBAL CYCLE (`cycle_offset + cycle`), NOT the
+      // per-call-local `cycle` (fix round 2). A caller that batches --
+      // main()'s --snapshot-every loop -- restarts `cycle` at 0 on every
+      // call, so gating on the local value alone makes the cadence a
+      // function of how the run happens to be chunked: any batch size that
+      // is not a multiple of kMassAuditEveryCycles (7, say) never lands on
+      // `(local cycle + 1) % 10 == 0` in ANY batch, since every batch's
+      // local cycle only ever reaches 0..6 -- the periodic audit is then
+      // DEAD for the entire run, not merely blind to a short final tail.
+      // `cycle_offset` is 0 for every un-batched call (every existing test
+      // in this file), so this is a no-op there; BatchedMassAuditCatchesLeak
+      // (protogen_tests.cpp) pins the batched case directly with 7-cycle
+      // batches, a cadence chosen specifically because it shares no common
+      // factor with kMassAuditEveryCycles = 10.
+      if ((cycle_offset + cycle + 1) % kMassAuditEveryCycles == 0) {
         const double solid_now = SolidVolumeM3(g, p);
         const double created = g.swe_sed_morfac_created_m3 - audit_base_created;
         const double exported = g.swe_sed_border_export_m3 - audit_base_export;

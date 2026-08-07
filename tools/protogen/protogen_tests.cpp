@@ -3586,6 +3586,77 @@ void BatchedMassAuditCatchesLeak() {
         ok, buf);
 }
 
+// --- M22. the audit gate itself must use the GLOBAL cycle -----------------
+// Fix round 2. The periodic mass audit fires on `(cycle + 1) %
+// kMassAuditEveryCycles == 0` -- and with a batched driver, `cycle` restarts
+// at 0 on every call. Gating on that LOCAL value alone (round 1's fix left
+// this in place; only the BASELINE was threaded through) means any batch
+// size sharing no common factor with kMassAuditEveryCycles = 10 never lands
+// on the gate in ANY batch -- not merely a short final tail going unaudited
+// (round 1's report understated this), the periodic tripwire is DEAD for
+// the whole run.
+//
+// Drives the exact loop shape main() uses -- batches of a fixed cadence,
+// `cycle_offset` advancing by the batch size each call, one shared
+// `SweAuditBaseline` -- with `cadence = 7`, chosen specifically because it
+// shares no factor with 10: no batch's own LOCAL cycle index ever reaches a
+// multiple of 10 (0..6 only), so this is the exact shape that produces a
+// permanently dead gate if `cycle_offset` is missing from the modulus. The
+// same inert fixture and leak as BatchedMassAuditCatchesLeak -- injected
+// after the first batch, so the second batch's audit (global cycle 9, which
+// lands INSIDE that batch's own cycles 7-13, not merely at its boundary) is
+// what has to catch it.
+void BatchedMassAuditFiresOnNonMultipleCadence() {
+  Params p = MorphoBase(24, 16.f);
+  Grid g(p.res);
+  for (size_t i = 0; i < g.cells; ++i) {
+    g.height[i] = 5.0f;
+    g.h[i] = 3.0f;
+    g.soil[i] = 1.0f;
+  }
+  const float leak_m3 = 5.0f;
+  const float cell_area = 16.0f * 16.0f;
+  const float leak_depth = leak_m3 / cell_area;
+
+  const int cadence = 7;         // shares no factor with kMassAuditEveryCycles = 10
+  const int total_cycles = 14;   // two 7-cycle batches: global 0-6, then 7-13 --
+                                 // global cycle 9 (the first audit point) falls
+                                 // INSIDE the second batch, at its local index 2
+  SweAuditBaseline audit;
+  int cycles_run = 0;
+  bool r1_ok = false;
+  SweRunResult r2;
+  while (cycles_run < total_cycles) {
+    const int batch = std::min(cadence, total_cycles - cycles_run);
+    const SweRunResult r = RunSweCycles(g, p, batch, nullptr, &audit, cycles_run);
+    if (cycles_run == 0) {
+      r1_ok = r.ok;
+      // Inject the leak right after the first batch, before the second --
+      // by the time the gate next fires (global cycle 9, mid-way through
+      // batch two) the leak has been sitting in the grid for two cycles,
+      // which is exactly the point: the audit does not need to fire AT a
+      // batch boundary to catch something that crossed one.
+      g.sus[g.idx(p.res / 2, p.res / 2)] += leak_depth;
+    } else {
+      r2 = r;
+    }
+    cycles_run += batch;
+  }
+
+  const bool mentions_mass_audit =
+      r2.reason.find("mass audit") != std::string::npos;
+  const bool ok = r1_ok && !r2.ok && mentions_mass_audit;
+  char buf[260];
+  std::snprintf(buf, sizeof(buf),
+                "cadence 7 (shares no factor with 10): batch1 ok=%d, batch2 "
+                "ok=%d (want false -- gate must fire at global cycle 9, "
+                "inside this batch), reason names the mass audit=%d",
+                r1_ok, r2.ok, mentions_mass_audit);
+  Check("BatchedMassAuditFiresOnNonMultipleCadence: the periodic gate uses "
+        "the GLOBAL cycle, not the per-batch-local one",
+        ok, buf);
+}
+
 int RunAll() {
   std::printf("protogen sanity tests (small grids, production 16 m cells)\n");
   MassConservation();
@@ -3660,6 +3731,7 @@ int RunAll() {
   CyclesKnobLiveness();
   BoundaryClassification();
   BatchedMassAuditCatchesLeak();
+  BatchedMassAuditFiresOnNonMultipleCadence();
 
   std::printf("\n  %d passed, %d failed, %d pending", g_pass, g_fail, g_pending);
   if (g_pending_ready)
