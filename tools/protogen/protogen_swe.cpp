@@ -887,10 +887,38 @@ void SedExchange(Grid& g, const Params& p, float dt_morpho) {
         const float rate = std::min(1.0f, speed * dt_morpho / adapt_L);
         const float chan = ChannelizationFactor(g, p, i, cell_m);
         const float demand_fluid_m = rate * (cap_m - sus_m) * chan;
-        // MORFAC + clamp, applied to the DEMAND rather than to the yield.
-        // Deliberate: the clamp bounds how far the bed ELEVATION may move,
-        // and the substrate yield is monotone in and never exceeds the
-        // demand, so bounding the demand bounds the elevation too (strictly
+        // MORFAC + clamp, applied to the DEMAND rather than to the yield --
+        // so the substrate split below sees M cycles' worth of demand at
+        // once. THIS ORDER IS DELIBERATE AND RATIFIED; the argument is one
+        // identity. The soil-first yield law is EXACTLY additive over
+        // sequential demands on a monotonically DEPLETING soil column:
+        //
+        //   yield(D1) then yield(D2)  ==  yield(D1 + D2)
+        //
+        // for every case (both in soil; straddling the mantle; both in
+        // bedrock) -- so asking once for M*D removes exactly what M separate
+        // asks for D would, including the partial interval that crosses the
+        // soil/bedrock boundary. MorfacAggregationIdentity pins the linear
+        // half of that and MorfacMantleTransition the nonlinear half.
+        //
+        // The alternative, M*yield(D), is not merely a different convention:
+        // with D < soil it demands M*D of SOIL, so at M = 300 on a 0.5 m
+        // mantle it asks for 3 m of cover that does not exist, and the excess
+        // comes out of bedrock at erodibility 1.0 instead of 0.1 -- a 10x
+        // over-erosion of rock that no ledger would notice.
+        //
+        // TWO PRECONDITIONS, both real:
+        //  1. The demand D must be the same across the M intervals. It is not
+        //     -- the flow responds as the channel deepens -- and that is
+        //     MORFAC's general quasi-steady caveat, sharpest exactly at the
+        //     mantle transition (see MorfacMantleTransition's own comment).
+        //  2. The column must only DEPLETE. Soil production violates this;
+        //     RunSweCycles has a tripwire for it, and `ProduceSoil`
+        //     (protogen.cpp) carries the matching landmine note.
+        //
+        // Clamping the demand rather than the yield is also what keeps this
+        // simple: the yield is monotone in and never exceeds the demand, so
+        // bounding the demand bounds the elevation change too (strictly
         // tighter on bedrock, which is the safe direction).
         const float demand_bed_m =
             -ClampMorfacBedDelta(-demand_fluid_m, h_m, p);
@@ -1100,6 +1128,23 @@ void SedAdvect(Grid& g, const Params& p, float dt_morpho) {
           }
           vx += latx;
           vy += laty;
+          // RENORMALISE BACK TO THE ORIGINAL SPEED. This closure is a
+          // ROTATION of the sediment flux, not an amplification of it:
+          // Ikeda's and Struiksma's result says transport DEVIATES from the
+          // flow direction on a laterally tilted bed, and says nothing about
+          // it going faster. Adding a perpendicular component without
+          // rescaling lengthens the vector by sqrt(1 + (coeff*slope)^2) --
+          // up to 1.414x at the 45-degree bound, which binds exactly at
+          // steep banks, i.e. exactly where the meandering mechanism lives
+          // and exactly where a spurious 41% transport boost would be least
+          // visible and most damaging. One sqrt buys the semantics the
+          // comment above already claimed.
+          const float defl_mag = std::sqrt(vx * vx + vy * vy);
+          if (defl_mag > 0.f) {
+            const float renorm = speed / defl_mag;
+            vx *= renorm;
+            vy *= renorm;
+          }
         }
 
         float dxc = -vx * dt_sub / cell_m;  // backtrace, in CELLS
@@ -1156,8 +1201,35 @@ void SedAdvect(Grid& g, const Params& p, float dt_morpho) {
     return double(ToMetres(g.sus[i], p)) * double(cell_area);
   });
   const double target_m3 = std::max(before_m3 - export_m3, 0.0);
+
+  // THE FIXER'S GAIN IS BOUNDED, and what it cannot fix is ledgered rather
+  // than quietly absorbed. Unbounded, `target/after` is a loaded gun: a
+  // gather that collapses -- an expanding wet-dry front, where neighbouring
+  // cells backtrace to wildly different places and most of them sample dry
+  // ground -- drives `after` toward zero and the factor toward infinity,
+  // multiplying the whole suspended field by an arbitrary number and dumping
+  // the result into whichever cells happened to gather anything. That is not
+  // a mass fix, it is mass teleportation, and because the fixer defines the
+  // total the periodic audit then checks against, THE AUDIT CANNOT SEE IT.
+  // Measured on a bone-dry-start fixture before this bound: a 3.0x factor on
+  // cycle 0.
+  //
+  // So: the factor is clamped to [1/kMaxAdvectFixFactor, kMaxAdvectFixFactor],
+  // and the mass the clamp refuses to move --
+  // `target - (what the field actually ends up holding)` -- is booked to
+  // `swe_sed_advect_fix_residual_m3`, which the audit subtracts as a known
+  // term. A nonzero residual is a REPORTED failure of the advection step, not
+  // a silently balanced book.
   double fix = 1.0;
-  if (after_m3 > 0.0) fix = target_m3 / after_m3;
+  bool clamped = false;
+  if (after_m3 > 0.0) {
+    fix = target_m3 / after_m3;
+    if (fix > kMaxAdvectFixFactor) { fix = kMaxAdvectFixFactor; clamped = true; }
+    if (fix < 1.0 / kMaxAdvectFixFactor) {
+      fix = 1.0 / kMaxAdvectFixFactor;
+      clamped = true;
+    }
+  }
   if (fix != 1.0) {
     const float fixf = float(fix);
     badlands::ParallelFor(size_t(n), [&](size_t yy) {
@@ -1165,6 +1237,17 @@ void SedAdvect(Grid& g, const Params& p, float dt_morpho) {
       for (int x = 0; x < n; ++x) g.sus[g.idx(x, y)] *= fixf;
     });
   }
+  // Booked ONLY when the fixer could not do its job -- the factor hit its
+  // bound, or the gather returned an empty field with mass still owed. Left
+  // unbooked otherwise because `after * fix == target` identically there, so
+  // the difference would be nothing but double round-off (~1e-14 m3) and
+  // would turn a term that is supposed to mean "the advection failed here"
+  // into permanent noise. The after_m3 == 0 case IS booked: the whole of
+  // `target_m3` has genuinely vanished (the gather found nothing anywhere and
+  // there is no field left to scale), and that branch used to destroy the
+  // difference with no entry anywhere -- the silent hole this term closes.
+  if (clamped || after_m3 == 0.0)
+    g.swe_sed_advect_fix_residual_m3 += target_m3 - after_m3 * fix;
   g.swe_sed_advect_fix_max =
       std::max(g.swe_sed_advect_fix_max, std::fabs(fix - 1.0));
   g.swe_sed_border_export_m3 += export_m3;
@@ -1189,19 +1272,40 @@ void SedAdvect(Grid& g, const Params& p, float dt_morpho) {
 // substrate arithmetic at all: whatever leaves a donor as soil arrives as
 // soil.
 //
-// Shed magnitude is `settling * 0.5 * (largest excess)`, split between the
-// receiving neighbours in proportion to their own excess. NOT `Cascade`'s
-// per-neighbour `settling * excess * 0.5` applied eight times: Cascade
-// re-reads `height` after every single transfer (its own comment says so) and
-// is self-limiting because of it, while a Jacobi pass commits all eight at
-// once from stale state and would shed up to ~3x the excess in one step --
-// an oscillation, not a relaxation. Keying the total on the LARGEST excess
-// keeps one pass strictly under-relaxed and the sequence geometric.
-void TalusFlux(Grid& g, const Params& p) {
+// Shed magnitude is `relax * 0.5 * (largest excess)`, split between the
+// receiving neighbours in proportion to their own excess. Two separate
+// factors doing two separate jobs:
+//
+//   `0.5 * largest excess` is the STABILITY CAP, not a rate. It is NOT
+//   `Cascade`'s per-neighbour `settling * excess * 0.5` applied eight times:
+//   Cascade re-reads `height` after every single transfer (its own comment
+//   says so) and is self-limiting because of it, while a Jacobi pass commits
+//   all eight at once from stale state and would shed up to ~3x the excess in
+//   one step -- an oscillation, not a relaxation. Keying the total on the
+//   LARGEST excess keeps one pass strictly under-relaxed whatever the rate
+//   below says.
+//
+//   `relax = min(1, talus_relaxation_per_yr * dt_bed)` is the RATE, and
+//   `dt_bed` is the BED-clock interval `morfac * dt_morpho`. See
+//   Params::talus_relaxation_per_yr for why this pass needed a clock at all
+//   (without one the hillslope/fluvial ratio tracked swe_substeps, morfac and
+//   resolution) and why the clock is the bed's rather than the fluid's (talus
+//   moves substrate, and the substrate is what MORFAC accelerates). Same
+//   saturating first-order shape as SedExchange's own rate factors, so the
+//   two passes relax on comparable terms.
+void TalusFlux(Grid& g, const Params& p, float dt_bed_s) {
   const int n = g.n;
   const float cell_m = p.world_m / float(p.res);
   const float tan_repose = std::tan(p.repose_angle_deg * 3.14159265f / 180.0f);
   const float diag_m = cell_m * 1.41421356f;
+  const float rate_per_s =
+      std::max(0.f, p.talus_relaxation_per_yr) / float(kSecondsPerYear);
+  const float relax = std::min(1.0f, rate_per_s * std::max(dt_bed_s, 0.f));
+  if (!(relax > 0.f)) {
+    std::fill(g.talus.begin(), g.talus.end(),
+              std::array<float, 8>{0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f});
+    return;
+  }
 
   badlands::ParallelFor(size_t(n), [&](size_t yy) {
     const int y = int(yy);
@@ -1236,7 +1340,7 @@ void TalusFlux(Grid& g, const Params& p) {
         }
       }
       if (excess_sum > 0.f) {
-        float move_total = p.settling * 0.5f * excess_max;
+        float move_total = relax * 0.5f * excess_max;
         if (move_total > soil_m) move_total = soil_m;  // donor-limited
         for (int k = 0; k < 8; ++k)
           f[k] = move_total * (excess[k] / excess_sum);
@@ -1353,27 +1457,48 @@ ReduceResult DeterministicMaxDepth(const Grid& g, const Params& p) {
 // than at the end of it, rare enough that the two extra whole-grid reductions
 // it costs stay in the noise against 10 cycles x swe_substeps fluid passes.
 constexpr int kMassAuditEveryCycles = 10;
+// WHAT THIS AUDIT IS, STATED BEFORE THE NUMBERS, because the numbers are
+// easy to over-read: IT IS A BOOKKEEPING-CONSISTENCY CHECK, NOT AN
+// INDEPENDENT CONSERVATION CHECK. `SedAdvect` renormalises the suspended
+// field to a total it computes from its OWN border-export estimate, so the
+// advection half of the chain closes here by construction and this audit
+// cannot testify that the export estimate is physically right. What it does
+// testify to is that everything else agrees with the books: the substrate
+// split, the MORFAC staggering, the talus pairing, the float32 write-backs,
+// and (via `swe_sed_advect_fix_residual_m3`) any mass the fixer refused to
+// place. That is a genuine and useful check -- it catches a 2% yield-scaling
+// bug within 40 cycles, measured -- but it is not proof of conservation, and
+// anything that reads it as such is reading it wrong.
+//
 // Audit tolerance, as (relative term) + (absolute term):
 //
 //   RELATIVE, 1e-3 of everything the run has moved. This is what catches a
 //   real leak, which is always a FRACTION of the transported mass (a missing
-//   substrate term, a talus transfer that does not pair, an advection fixer
-//   pointed at the wrong total). 0.1% is far below any such bug and far above
-//   the double-precision summation noise of the reductions themselves
-//   (~1e-7 relative at 1e6 cells).
+//   substrate term, a talus transfer that does not pair, a fixer pointed at
+//   the wrong total). 0.1% is far below any such bug and far above the
+//   double-precision summation noise of the reductions themselves (~1e-7
+//   relative at 1e6 cells).
 //
-//   ABSOLUTE, 1e-6 of the starting solid volume. This is the float32
-//   QUANTISATION BUDGET, and it is not optional: `height` is a single-
-//   precision landform elevation, so at production settings (relief_m = 400,
-//   surfaces around 300 m) its representable step is ~2.4e-5 m -- the same
-//   order as a single cycle's unaccelerated bed delta. Every cell's update
-//   therefore rounds, the roundings random-walk, and after ~100 cycles on a
-//   1024^2 grid they accumulate to tens of cubic metres against a ~1e11 m3
-//   baseline. That drift is real, unavoidable in float32, and must not be
-//   reported as a mass leak; 1e-6 of the baseline sits comfortably above it
-//   and still catches anything structural.
+//   ABSOLUTE, 1e-8 of the starting solid volume: the float32 QUANTISATION
+//   BUDGET, and sized to what that argument actually supports rather than to
+//   a comfortable-looking round number. `height` is a single-precision
+//   landform elevation, so at production settings (relief_m = 400, surfaces
+//   around 300 m) its representable step is ~2.4e-5 m and each write rounds
+//   by up to half of that. SedExchange reads its own write back and scales
+//   the sediment side to the realised delta, so its roundings do NOT leak;
+//   TalusApply's do, because the donor/receiver pairing is exact only on the
+//   INTENDED transfers. Those roundings random-walk: sqrt(N*C) * 1.2e-5 m *
+//   cell_area, which at N = 1e6 cells and C = 1000 cycles is ~1e2 m3 against
+//   a ~7.7e10 m3 baseline -- 1.3e-9 relative. 1e-8 leaves roughly an order of
+//   magnitude of headroom over that.
+//
+//   THIS TERM WAS 1e-6 AND THAT WAS WRONG BY ~1000x. Nothing failed because
+//   of it, which is the point: on ExnerLedger's own fixture the absolute term
+//   alone came to 1.3% of the transported mass, so the audit was carrying a
+//   blind spot two orders wider than its stated justification. Tightening it
+//   makes the audit strictly better and moved no test.
 constexpr double kMassAuditRelTol = 1e-3;
-constexpr double kMassAuditAbsFrac = 1e-6;
+constexpr double kMassAuditAbsFrac = 1e-8;
 
 // Total solid on the grid, m^3: the bed (`height`, which already includes the
 // soil layer -- bedrock is implicitly height - soil, see Grid) plus the
@@ -1477,9 +1602,46 @@ SweRunResult RunSweCycles(Grid& g, const Params& p, int cycles,
   // caller that runs RunSweCycles more than once on the same Grid audits its
   // own segment instead of re-auditing history.
   const bool morpho = p.morfac > 0.f;
+
+  // SOIL-PRODUCTION TRIPWIRE. This guards a mistake nobody has made yet, and
+  // that is deliberate -- it is here so the mistake cannot be made silently.
+  //
+  // The whole MORFAC-before-substrate-split order (see SedExchange) rests on
+  // ONE identity: the soil-first yield law is EXACTLY additive over
+  // sequential demands on a DEPLETING soil column, so asking it once for M
+  // cycles' worth of demand removes exactly what M separate asks would.
+  // WEATHERING BREAKS THAT IDENTITY, because the column stops being merely
+  // depleting: between two real fluid intervals, soil production adds cover
+  // back, so the soil/bedrock boundary moves BOTH ways and where it sits
+  // after M intervals depends on the interleaving -- which a single
+  // yield(M*D) call has no way to know. The error is not small either: it is
+  // largest exactly at the transition, which is the boundary that decides
+  // whether a slope is armoured rock or strippable regolith.
+  //
+  // `ProduceSoil` is phase-0-only today (protogen.cpp, called from RunSim),
+  // so this cannot fire from any current path. It exists for the future
+  // wiring -- someone running weathering inside or alongside the phase-1
+  // cycle loop -- and it fires on the ONLY configuration where the identity
+  // is actually load-bearing, morfac > 1. At morfac <= 1 there is no
+  // aggregation happening and nothing to break. The fix, when someone needs
+  // this combination, is to sub-step SedExchange across the mantle rather
+  // than to widen the guard.
+  if (morpho && p.enable_soil_production && p.morfac > 1.0f) {
+    result.ok = false;
+    result.aborted_cycle = 0;
+    result.reason =
+        "cycle 0: soil production is enabled with morfac > 1 -- the "
+        "MORFAC-before-substrate-split aggregation in SedExchange is exact "
+        "only over a monotonically DEPLETING soil column, and weathering "
+        "adds cover back between fluid intervals. Sub-step the exchange "
+        "across the mantle, or run this combination at morfac <= 1";
+    return result;
+  }
+
   const double audit_baseline_m3 = morpho ? SolidVolumeM3(g, p) : 0.0;
   const double audit_base_export = g.swe_sed_border_export_m3;
   const double audit_base_created = g.swe_sed_morfac_created_m3;
+  const double audit_base_fix_residual = g.swe_sed_advect_fix_residual_m3;
 
   for (int cycle = 0; cycle < cycles; ++cycle) {
     // h_max floored at eps_wet: a bone-dry grid has zero wave speed, which
@@ -1531,7 +1693,12 @@ SweRunResult RunSweCycles(Grid& g, const Params& p, int cycles,
       auto m1 = std::chrono::steady_clock::now();
       SedAdvect(g, p, dt_morpho);
       auto m2 = std::chrono::steady_clock::now();
-      TalusFlux(g, p);
+      // BED-clock interval: `morfac` fluid cycles' worth. This is the second
+      // and last place `morfac` enters the code (ClampMorfacBedDelta is the
+      // other) and, like that one, it is a fluid-clock -> bed-clock
+      // conversion. See Params::talus_relaxation_per_yr.
+      const float dt_bed = p.morfac * dt_morpho;
+      TalusFlux(g, p, dt_bed);
       TalusApply(g, p);
       auto m3 = std::chrono::steady_clock::now();
       if (stats) {
@@ -1544,34 +1711,43 @@ SweRunResult RunSweCycles(Grid& g, const Params& p, int cycles,
       // are not left implicit anywhere else:
       //
       //   solid_now = solid_baseline + morfac_created - border_export
+      //                              - advect_fix_residual
       //
       // `morfac_created` is signed (negative while the landscape is net
       // eroding, since MORFAC destroys the bed material it does not hand to
       // `sus`); `border_export` is the solid SedAdvect ledgered as leaving
-      // through the open border. Everything else -- the substrate split,
-      // deposition, the whole talus pair -- is conservative by construction,
-      // so any residual here is a bug in one of them, not a physical term
-      // this expression forgot.
+      // through the open border; `advect_fix_residual` is mass the advection
+      // mass fixer refused to place once its gain hit kMaxAdvectFixFactor,
+      // and is exactly 0 on a healthy run. Everything else -- the substrate
+      // split, deposition, the whole talus pair -- is conservative by
+      // construction, so any residual here is a bug in one of them, not a
+      // physical term this expression forgot. See kMassAuditRelTol for what
+      // this check does and does not prove.
       if ((cycle + 1) % kMassAuditEveryCycles == 0) {
         const double solid_now = SolidVolumeM3(g, p);
         const double created = g.swe_sed_morfac_created_m3 - audit_base_created;
         const double exported = g.swe_sed_border_export_m3 - audit_base_export;
-        const double expected = audit_baseline_m3 + created - exported;
+        const double unplaced =
+            g.swe_sed_advect_fix_residual_m3 - audit_base_fix_residual;
+        const double expected =
+            audit_baseline_m3 + created - exported - unplaced;
         const double resid = solid_now - expected;
         const double moved = std::fabs(created) + std::fabs(exported) +
+                             std::fabs(unplaced) +
                              std::fabs(solid_now - audit_baseline_m3);
         const double tol = kMassAuditRelTol * moved +
                            kMassAuditAbsFrac * std::fabs(audit_baseline_m3);
         if (!(std::fabs(resid) <= tol)) {
           result.ok = false;
           result.aborted_cycle = cycle;
-          char buf[288];
+          char buf[352];
           std::snprintf(buf, sizeof(buf),
                         "cycle %d: sediment-mass audit -- residual %.6e m3 "
                         "exceeds tolerance %.6e m3 (solid %.6e, baseline "
-                        "%.6e, morfac-created %.6e, border-export %.6e)",
+                        "%.6e, morfac-created %.6e, border-export %.6e, "
+                        "advect-unplaced %.6e)",
                         cycle, resid, tol, solid_now, audit_baseline_m3,
-                        created, exported);
+                        created, exported, unplaced);
           result.reason = buf;
           WriteAbortSnapshot(g, p, cycle);
           return result;

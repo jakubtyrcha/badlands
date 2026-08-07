@@ -769,6 +769,31 @@ namespace {
 // the conservative choice and avoids inventing volume. Since `height` is the
 // surface and bedrock is implicit (height - soil), leaving height untouched
 // while raising soil IS the conversion.
+//
+// ============================ LANDMINE, READ BEFORE MOVING THIS =============
+// THIS PASS IS PHASE-0-ONLY, AND WIRING IT INTO THE PHASE-1 CYCLE LOOP AT
+// morfac > 1 IS A CORRECTNESS BUG, NOT A CONFIGURATION CHOICE.
+//
+// Phase 1's `SedExchange` (tools/protogen/protogen_swe.cpp) applies MORFAC to
+// the erosion demand BEFORE the soil/bedrock split, i.e. it asks the yield law
+// once for M cycles' worth of demand instead of asking it M times. That is
+// exact -- but only because the soil-first yield law is exactly ADDITIVE over
+// sequential demands on a MONOTONICALLY DEPLETING column:
+//
+//     yield(D1) then yield(D2)  ==  yield(D1 + D2)      (soil only shrinks)
+//
+// THIS PASS BREAKS THAT PRECONDITION. Weathering puts cover BACK between fluid
+// intervals, so across M real intervals the soil/bedrock boundary moves in both
+// directions and where it ends up depends on the interleaving -- which a single
+// yield(M*D) call cannot know. The error is worst exactly at the transition,
+// which is the boundary deciding whether a slope is armoured rock or strippable
+// regolith, so it is not a rounding-scale concern.
+//
+// `RunSweCycles` carries a tripwire for precisely this (it aborts on
+// `enable_soil_production && morfac > 1`, with the reason spelled out). The fix,
+// when someone genuinely needs weathering under acceleration, is to SUB-STEP
+// `SedExchange` across the mantle -- not to widen the guard.
+// ============================================================================
 void ProduceSoil(Grid& g, const Params& p) {
   if (!p.enable_soil_production) return;
   const float h_star = std::max(p.soil_efold_m, 1e-6f);
@@ -1412,6 +1437,8 @@ int main(int argc, char** argv) {
       p.sus_settling_velocity_m_per_s = std::stof(nxt());
     else if (a == "--transverse-slope")
       p.transverse_slope_coeff = std::stof(nxt());
+    else if (a == "--talus-relaxation")
+      p.talus_relaxation_per_yr = std::stof(nxt());
     else if (a == "--out") p.out = nxt();
     else { std::fprintf(stderr, "protogen: unknown arg '%s'\n", a.c_str()); return 2; }
   }
@@ -1436,14 +1463,15 @@ int main(int argc, char** argv) {
               "  swe: %d substeps, CFL %.2f, manning-n %.3f, eps-wet %.4f m, "
               "dt-floor %.1e s (not yet driven -- Task 7)\n"
               "  morpho: morfac %.0f, Kc %.4g s, settling %.1e m/s, "
-              "transverse-slope %.2f, repose %.0f deg\n",
+              "transverse-slope %.2f, repose %.0f deg, talus %.3g /yr\n",
               p.res, p.res, p.world_m, cell_m, workers, p.relief_m, p.steps,
               p.drops, p.runoff_m_per_yr, p.evaporation_m_per_yr,
               p.settle_fraction, p.sus_diffusion, p.swe_substeps,
               p.cfl_number, p.swe_manning_n, p.eps_wet, double(p.dt_floor_s),
               double(p.morfac), double(p.capacity_Kc_s),
               double(p.sus_settling_velocity_m_per_s),
-              double(p.transverse_slope_coeff), double(p.repose_angle_deg));
+              double(p.transverse_slope_coeff), double(p.repose_angle_deg),
+              double(p.talus_relaxation_per_yr));
 
   {
     std::error_code ec;

@@ -85,6 +85,18 @@ constexpr float kMaxBedDeltaFraction = 0.1f;
 // numbers the pass enforces.
 constexpr int kMaxAdvectSubsteps = 8;
 constexpr float kMaxBacktraceCells = 4.0f;
+// Bound on SedAdvect's mass fixer, as a multiplicative factor either way.
+// The fixer rescales the suspended field to a total the pass computes
+// independently, which is fine while the correction is small and dangerous
+// when it is not: an unbounded `target/after` lets a collapsing gather
+// multiply the whole field arbitrarily, and since the fixer sets the total
+// the mass audit then checks, the audit is structurally blind to it. 2x is
+// well above anything a healthy step produces (measured worst case 1.31x on
+// a warm-started fixture, and only in the first two cycles) and well below
+// the 3x a bone-dry start produced before the bound existed. Beyond it the
+// pass stops scaling and books the difference to
+// `Grid::swe_sed_advect_fix_residual_m3` instead.
+constexpr double kMaxAdvectFixFactor = 2.0;
 
 // ---------------------------------------------------------------- parameters
 
@@ -413,8 +425,45 @@ struct Params {
   // toward the inside of a bend and builds the point bar that steers the
   // flow further. 1.0 is mid-range for the classic closure's 1/f(theta),
   // which sits at ~0.5-2 for ordinary Shields numbers; at a 5% transverse
-  // slope it deflects the flux by ~2.9 degrees.
+  // slope it deflects the flux by ~2.9 degrees. The closure ROTATES the
+  // transport vector and does not lengthen it -- SedAdvect renormalises back
+  // to the undeflected speed, see there.
   float transverse_slope_coeff = 1.0f;
+  // Talus (avalanche) relaxation rate, PER YEAR: the e-folding rate at which
+  // bed slope in excess of `repose_angle_deg` is shed downhill. The talus
+  // pair sheds min(1, rate*dt_bed) of its stability-capped amount per pass,
+  // so this is what puts that pass on a CLOCK at all.
+  //
+  // WHY IT NEEDED ONE, AND WHY IT IS THE **BED** CLOCK. Before this the pass
+  // shed a fixed fraction of the excess PER CALL, with no dt and no morfac in
+  // it -- so the hillslope/fluvial ratio silently tracked `swe_substeps`,
+  // `morfac` and the grid resolution, none of which are physics. Talus is a
+  // BED process (it moves substrate, not water), and under MORFAC the bed
+  // advances `morfac` times the fluid clock, so talus must advance with it:
+  // otherwise a run at morfac 300 models 300 cycles of river incision against
+  // one cycle of hillslope response, and produces gorges with no talus aprons
+  // purely as an artefact of the accelerator. THIS IS THE SECOND AND LAST
+  // PLACE `morfac` ENTERS (the first is ClampMorfacBedDelta); both are the
+  // same operation -- converting a fluid-clock quantity onto the bed clock --
+  // and neither is on the `sus` side.
+  //
+  // NOT `Params::settling`, which the first version of this pass borrowed
+  // without saying so. That knob is phase-0 `Cascade`'s per-visit settle
+  // fraction, a dimensionless share of a serial in-place relaxation with no
+  // clock behind it; reusing it silently coupled two passes that have
+  // different discretisations and different meanings. Phase 1 gets its own
+  // rate, in real units, and `settling` is left to phase 0.
+  //
+  // 1.0/yr: an over-steepened regolith slope relaxes toward repose on the
+  // order of a year -- fast against every landform timescale here, slow
+  // against a fluid cycle. That is the right shape, because repose is a
+  // CONSTRAINT the landscape is pushed back toward rather than a slow process
+  // that shapes it. A DELIBERATE consequence: at morfac 1 a cycle covers
+  // minutes of real time, so the pass is very nearly inert -- correct physics
+  // (nothing avalanches in five minutes), and the reason the invariance
+  // fixtures that mean to COVER talus raise this knob explicitly rather than
+  // hoping the default bites.
+  float talus_relaxation_per_yr = 1.0f;
 
   // THE landscape clock. One step represents this many years, and every
   // process scales with it: diffusion through k = D*dt/cell^2, and erosion
@@ -526,8 +575,19 @@ struct Grid {
   //                               the fixer had to work, and a value far from
   //                               0 means the advection step is too long for
   //                               the flow field.
+  //   `swe_sed_advect_fix_residual_m3`
+  //                               solid the mass fixer could NOT place,
+  //                               because its gain hit `kMaxAdvectFixFactor`
+  //                               or because the gather collapsed to an empty
+  //                               field. Signed. It should be exactly 0 on
+  //                               any healthy run; a nonzero value is a
+  //                               reported failure of the advection step
+  //                               rather than a quietly balanced book, and
+  //                               the audit subtracts it as a known term so
+  //                               it cannot masquerade as conservation.
   double swe_sed_border_export_m3 = 0.0;
   double swe_sed_morfac_created_m3 = 0.0;
+  double swe_sed_advect_fix_residual_m3 = 0.0;
   double swe_sed_advect_fix_max = 0.0;
 
   explicit Grid(int res)
@@ -605,9 +665,12 @@ void SweVelocity(Grid& g, const Params& p);
 // skipped, so they run on the fluid clock, not on a clock of their own. The
 // only quantity on the accelerated BED clock is the bed-elevation delta
 // inside SedExchange, and it gets there through `ClampMorfacBedDelta` alone.
+// `dt_bed_s` is the BED-clock interval, `morfac * dt_morpho` -- see
+// Params::talus_relaxation_per_yr for why the talus pair runs on the bed
+// clock and not the fluid one.
 void SedExchange(Grid& g, const Params& p, float dt_morpho);
 void SedAdvect(Grid& g, const Params& p, float dt_morpho);
-void TalusFlux(Grid& g, const Params& p);
+void TalusFlux(Grid& g, const Params& p, float dt_bed_s);
 void TalusApply(Grid& g, const Params& p);
 
 // The transport capacity SedExchange itself uses -- THE single definition,
@@ -667,16 +730,22 @@ struct SweRunResult {
 SweRunResult RunSweCycles(Grid& g, const Params& p, int cycles,
                           SimStats* stats = nullptr);
 
-// THE ONE PLACE `p.morfac` IS EVER APPLIED. Scales a proposed bed-elevation
+// ONE OF THE TWO PLACES `p.morfac` IS EVER APPLIED (the other is the talus
+// pair's bed-clock interval in RunSweCycles -- see
+// Params::talus_relaxation_per_yr). Both are the SAME operation, converting a
+// fluid-clock quantity onto the accelerated bed clock; neither is ever on the
+// `sus` side, which is the whole point of the staggered scheme.
+//
+// Scales a proposed bed-elevation
 // delta (metres, either sign, on the FLUID clock) by `p.morfac`, then bounds
 // the magnitude to `kMaxBedDeltaFraction * depth_m` so one fluid cycle's
 // accelerated bed change can never exceed a fixed fraction of the water
 // sitting on top of it (see kMaxBedDeltaFraction for why that bound is what
 // makes MORFAC legitimate). ACTIVE as of Task 6: `SedExchange` is the sole
-// caller, on both the erosion and the deposition side, and NOTHING else in
-// the codebase multiplies by `morfac` -- in particular the `sus` side of the
-// exchange never does, which is the entire point of the staggered scheme
-// (`sus` lives on the fluid clock, the bed on the accelerated one).
+// caller, on both the erosion and the deposition side. In particular the
+// `sus` side of the exchange never scales by `morfac` (`sus` lives on the
+// fluid clock, the bed on the accelerated one) -- that asymmetry IS the
+// staggered scheme.
 // Exported (not a private helper in protogen_swe.cpp) so a test can exercise
 // its clamp behaviour directly.
 float ClampMorfacBedDelta(float raw_delta_m, float depth_m, const Params& p);
