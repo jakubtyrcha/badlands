@@ -2195,7 +2195,14 @@ target_compile_options(shapeshifter_core PRIVATE -iquote${SHAPESHIFTER_DIR}/core
 target_compile_options(shapeshifter_core PRIVATE
     $<$<OR:$<CONFIG:>,$<CONFIG:Debug>>:-O2>)
 
+# The editor renders through the engine's RHI and render graph, and compiles its
+# shaders with the engine's Slang layer.
+#
+# NOT badlands_rhi_app: that shell owns an SDL window, and this app's window is
+# SwiftUI/AppKit. The RHI being separate from the shell -- so it never links SDL
+# -- is exactly what makes it usable from here at all.
 target_link_libraries(shapeshifter_core PUBLIC
+    badlands_rhi badlands_render_graph badlands_slang
     "-framework Metal" "-framework Foundation"
     "-framework QuartzCore" "-framework CoreGraphics")
 
@@ -2242,6 +2249,28 @@ if(APPLE)
     target_link_options(shapeshifter_core_tests PRIVATE "-Wl,-ld_new")
 endif()
 add_test(NAME shapeshifter_core_tests COMMAND shapeshifter_core_tests
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# shapeshifter_rhi_tests: the editor's RHI-side renderer, on the Null backend.
+#
+# Catch2 rather than the doctest suite next door, because this one links the RHI
+# and the graph and those suites are Catch2 -- two frameworks in one binary is
+# worse than two in one repo. The split is along a real seam: doctest covers the
+# editor's pure-CPU core, this covers what it does to a device.
+add_executable(shapeshifter_rhi_tests
+    ${SHAPESHIFTER_DIR}/tests/core/rhi_renderer_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(shapeshifter_rhi_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${CMAKE_SOURCE_DIR}/src)
+target_compile_options(shapeshifter_rhi_tests PRIVATE
+    -iquote${SHAPESHIFTER_DIR}/core/src)
+target_link_libraries(shapeshifter_rhi_tests PRIVATE shapeshifter_core)
+if(APPLE)
+    target_link_options(shapeshifter_rhi_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME shapeshifter_rhi_tests COMMAND shapeshifter_rhi_tests
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # The editor's Slang entry points, compiled as a test rather than by a target.
