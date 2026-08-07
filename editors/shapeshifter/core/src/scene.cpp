@@ -96,6 +96,26 @@ const Node* SceneDocument::find(int32_t id) const {
     return nullptr;
 }
 
+NodePlacement SceneDocument::placement(int32_t id) const {
+    NodePlacement out;
+    const Node* node = find(id);
+    if (node == nullptr) {
+        return out; // unknown id: identity frame, no box, no contact
+    }
+
+    out.frame.position = node->position;
+    out.frame.rotation = node->rotation;
+    out.frame.uniform_scale = 1.0f;
+    // simd_abs, matching append_node_wireframe and sdf_safe_half_extents: the
+    // evaluator measures against abs(half_extents), so a negative component
+    // mirrors the solid rather than inverting the box.
+    out.half_extents = 0.5f * simd_abs(node->scale);
+    if (node->snapped) {
+        out.contact = WorldContact{node->snap_point, node->snap_normal};
+    }
+    return out;
+}
+
 Node& SceneDocument::add(Node node) {
     nodes_.push_back(std::move(node));
     return nodes_.back();

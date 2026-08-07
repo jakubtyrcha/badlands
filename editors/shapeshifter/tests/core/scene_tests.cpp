@@ -456,3 +456,92 @@ TEST_CASE("Editor: every shape survives the whole app-facing round trip") {
         CHECK(attached.snapped);
     }
 }
+
+// --- placement(): the single placement resolver -----------------------------
+//
+// Pins what placement() answers while it still reads the node's world-space
+// fields directly. These expectations must survive the storage becoming
+// parent-local: a world-rooted node's placement is the same either way, which
+// is exactly the claim the rework rests on.
+
+TEST_CASE("placement reports a spawned node's world frame") {
+    SceneDocument doc;
+    const int32_t id = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{1, 2, 3});
+
+    const NodePlacement p = doc.placement(id);
+    check_float3_approx(p.frame.position, simd_float3{1, 2, 3});
+    CHECK(p.frame.uniform_scale == doctest::Approx(1.0f));
+    CHECK(simd_length(p.frame.rotation.vector) == doctest::Approx(1.0f));
+    // half_extents is scale * 0.5, the same quantity pack_scene writes.
+    check_float3_approx(p.half_extents, simd_float3{0.5f, 0.5f, 0.5f});
+    CHECK_FALSE(p.contact.has_value());
+    CHECK(p.binding_resolved);
+}
+
+TEST_CASE("placement carries a node's rotation and non-uniform scale") {
+    SceneDocument doc;
+    Node n;
+    n.id = 7;
+    n.shape = Shape::Cube;
+    n.position = simd_float3{0, 1, 0};
+    n.rotation = simd_quaternion(float(M_PI_2), simd_float3{0, 1, 0});
+    n.scale = simd_float3{2, 4, 8};
+    doc.add(n);
+
+    const NodePlacement p = doc.placement(7);
+    check_float3_approx(p.frame.position, simd_float3{0, 1, 0});
+    // Per-node non-uniform scale is untouched: it lives in half_extents and is
+    // applied in the node's own local space, so it never becomes shear.
+    check_float3_approx(p.half_extents, simd_float3{1, 2, 4});
+    check_float3_approx(simd_act(p.frame.rotation, simd_float3{1, 0, 0}), simd_float3{0, 0, -1});
+}
+
+// simd_abs, matching append_node_wireframe and sdf_safe_half_extents: the
+// evaluator measures against abs(half_extents), so a negative component
+// mirrors the solid rather than inverting the box.
+TEST_CASE("placement reports absolute half-extents for a negative scale") {
+    SceneDocument doc;
+    Node n;
+    n.id = 1;
+    n.scale = simd_float3{-2, 1, 1};
+    doc.add(n);
+
+    check_float3_approx(doc.placement(1).half_extents, simd_float3{1, 0.5f, 0.5f});
+}
+
+TEST_CASE("placement reports a snapped node's contact in world space") {
+    SceneDocument doc;
+    const int32_t base = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    const int32_t detail = doc.spawn_snapped(Shape::Sphere, Op::Add, simd_float3{0, 0.5f, 0},
+                                             simd_float3{0, 1, 0}, base);
+
+    const NodePlacement p = doc.placement(detail);
+    REQUIRE(p.contact.has_value());
+    check_float3_approx(p.contact->point, simd_float3{0, 0.5f, 0});
+    check_float3_approx(p.contact->normal, simd_float3{0, 1, 0});
+}
+
+// The tether's whole subject: dragging a detail moves it, and deliberately
+// leaves its contact on the surface it was placed on.
+TEST_CASE("placement's contact does not follow the node's position") {
+    SceneDocument doc;
+    const int32_t base = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    const int32_t detail = doc.spawn_snapped(Shape::Sphere, Op::Add, simd_float3{0, 0.5f, 0},
+                                             simd_float3{0, 1, 0}, base);
+    doc.find(detail)->position = simd_float3{0, 3, 0};
+
+    const NodePlacement p = doc.placement(detail);
+    check_float3_approx(p.frame.position, simd_float3{0, 3, 0});
+    REQUIRE(p.contact.has_value());
+    check_float3_approx(p.contact->point, simd_float3{0, 0.5f, 0});
+}
+
+TEST_CASE("placement of an unknown id is the default") {
+    SceneDocument doc;
+    doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{5, 5, 5});
+
+    const NodePlacement p = doc.placement(kInvalidNode);
+    check_float3_approx(p.frame.position, simd_float3{0, 0, 0});
+    check_float3_approx(p.half_extents, simd_float3{0, 0, 0});
+    CHECK_FALSE(p.contact.has_value());
+}

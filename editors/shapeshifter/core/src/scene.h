@@ -7,6 +7,8 @@
 
 #include <shapeshifter/ShapeshifterCore.h>  // Shape, Op, kInvalidNode
 
+#include "frame.h"  // Frame, NodePlacement, WorldContact
+
 namespace sq {
 
 // Fixed camera-ray distance an unsnapped spawn (ray miss) lands at.
@@ -43,6 +45,21 @@ public:
     Node* find(int32_t id);
     const Node* find(int32_t id) const;
     const std::vector<Node>& nodes() const { return nodes_; }
+
+    // WHERE A NODE IS. The only way to ask, and deliberately the only way:
+    // consumers that compose placement out of a Node's own fields are what make
+    // nested transforms impossible, because there is no seam for a parent's
+    // contribution to enter through.
+    //
+    // Today this is a direct read of the node's world-space fields, so it
+    // answers exactly what those fields already said. The storage behind it is
+    // about to become parent-local, and routing every consumer through here
+    // FIRST is what lets that happen without the build ever going red.
+    //
+    // An unknown id yields a default NodePlacement (identity frame, no contact),
+    // which is the same degrade-don't-crash rule nodePosition and nodeScale
+    // already follow.
+    NodePlacement placement(int32_t id) const;
     // Direct add for tests; spawn_snapped/spawn_unsnapped below are the real
     // spawn entry points (id/name allocation, snap bookkeeping).
     Node& add(Node node);
