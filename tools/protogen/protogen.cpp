@@ -781,8 +781,12 @@ std::vector<float> ClassifyBoundaryWater(const Grid& g, const Params& p) {
   for (size_t i = 0; i < g.cells; ++i)
     surface[i] = g.height[i] * p.relief_m + g.h[i];
 
+  // ONE flag, not two: every cell this pass ever marks is both "reached by
+  // the flood fill" and "part of a lake region" -- there is no seed or
+  // growth site that sets one without the other (see the two write sites
+  // below), so a separate `tagged` array alongside `visited` tracked nothing
+  // `visited` did not already say. Doubled as the output mask directly.
   std::vector<uint8_t> visited(g.cells, 0);
-  std::vector<uint8_t> tagged(g.cells, 0);
   std::vector<int32_t> stack;
   stack.reserve(g.cells);
   static const int dx[4] = {1, -1, 0, 0}, dy[4] = {0, 0, 1, -1};
@@ -798,7 +802,6 @@ std::vector<float> ClassifyBoundaryWater(const Grid& g, const Params& p) {
       if (!is_seed) continue;
 
       visited[i] = 1;
-      tagged[i] = 1;
       stack.clear();
       stack.push_back(int32_t(i));
       while (!stack.empty()) {
@@ -814,7 +817,6 @@ std::vector<float> ClassifyBoundaryWater(const Grid& g, const Params& p) {
           if (std::fabs(surface[j] - surface[cur]) > kLakeSurfaceContinuityM)
             continue;  // discontinuous surface: a channel head, not a shore
           visited[j] = 1;
-          tagged[j] = 1;
           stack.push_back(int32_t(j));
         }
       }
@@ -823,7 +825,7 @@ std::vector<float> ClassifyBoundaryWater(const Grid& g, const Params& p) {
 
   std::vector<float> out(g.cells, 0.f);
   for (size_t i = 0; i < g.cells; ++i)
-    if (tagged[i]) out[i] = g.h[i];
+    if (visited[i]) out[i] = g.h[i];
   return out;
 }
 
@@ -1623,18 +1625,22 @@ double FractionDrainsOffMap(const Grid& g) {
   return g.cells ? double(drains) / double(g.cells) : 0.0;
 }
 
-// Depression count, off-map drainage fraction, and the two advection-fixer
-// diagnostics carried on `Grid` since Task 6. Called TWICE by a `--cycles >
+// Depression count, off-map drainage fraction, the two advection-fixer
+// diagnostics carried on `Grid` since Task 6, and (final-review finding 1)
+// the bed-quantization discard counters. Called TWICE by a `--cycles >
 // 0` run that completes -- once on the phase-0-finished grid (right after
 // the first WriteWorldArtifacts), once on the phase-1-finished one -- so the
 // two prints together are the "before vs after phase 1" comparison Task 8's
 // full-run validation is built around; a `--cycles 0` run gets only the
-// first. The advection-fixer numbers are naturally 0 on the phase-0-only
-// print (phase 1 has not run yet). Matters most for a MORFAC-accelerated
-// production run, where a dry-start or otherwise ill-posed advection step
-// can quietly destroy suspended load -- `swe_sed_advect_fix_max`/
-// `swe_sed_advect_fix_residual_m3` are how that would show up here rather
-// than only in the (rarer) mass-audit tripwire.
+// first. The advection-fixer and quantization numbers are naturally 0 on the
+// phase-0-only print (phase 1 has not run yet). Matters most for a
+// MORFAC-accelerated production run, where a dry-start or otherwise
+// ill-posed advection step can quietly destroy suspended load --
+// `swe_sed_advect_fix_max`/`swe_sed_advect_fix_residual_m3` are how that
+// would show up here rather than only in the (rarer) mass-audit tripwire --
+// and where a small `--relief` widens the quantization quantum against a
+// fixed bed-delta magnitude, which the discard counters make visible instead
+// of silent.
 void PrintRunDiagnostics(const Grid& g, const char* phase_label) {
   const int depressions = CountLocalMinima8(g);
   const double off_map_frac = FractionDrainsOffMap(g);
@@ -1642,9 +1648,15 @@ void PrintRunDiagnostics(const Grid& g, const char* phase_label) {
       "protogen: %s diagnostics\n"
       "  depressions (8-neighbour local minima on the final bed): %d\n"
       "  cells draining off-map (D8 on the final bed): %.2f%%\n"
-      "  advection fixer: worst |factor-1| %.4e, unplaced residual %.4e m3\n",
+      "  advection fixer: worst |factor-1| %.4e, unplaced residual %.4e m3\n"
+      "  bed quantization discards: erosion %.0f cells / %.4e m solid, "
+      "deposition %.0f cells / %.4e m solid\n",
       phase_label, depressions, 100.0 * off_map_frac,
-      g.swe_sed_advect_fix_max, g.swe_sed_advect_fix_residual_m3);
+      g.swe_sed_advect_fix_max, g.swe_sed_advect_fix_residual_m3,
+      g.swe_sed_quant_discard_erosion_count,
+      g.swe_sed_quant_discard_erosion_m,
+      g.swe_sed_quant_discard_deposition_count,
+      g.swe_sed_quant_discard_deposition_m);
 }
 
 // ------------------------------------------------- perf report (Task 7) ----
@@ -1792,18 +1804,15 @@ int main(int argc, char** argv) {
     else if (a == "--source-jitter") p.source_jitter_cells = std::stof(nxt());
     else if (a == "--bowl-rim") p.bowl_rim_m = std::stof(nxt());
     else if (a == "--bowl-well") p.bowl_well_m = std::stof(nxt());
-    // Phase-1 SWE fluid knobs (protogen_swe.cpp). Parsed here so they exist
-    // on the command line already; RunSweCycles itself is not called from
-    // main() until Task 7 wires the driver.
+    // Phase-1 SWE fluid knobs (protogen_swe.cpp), consumed by the
+    // RunSweCycles call below once `p.cycles > 0`.
     else if (a == "--swe-substeps") p.swe_substeps = std::stoi(nxt());
     else if (a == "--cfl") p.cfl_number = std::stof(nxt());
     else if (a == "--swe-manning-n") p.swe_manning_n = std::stof(nxt());
     else if (a == "--eps-wet") p.eps_wet = std::stof(nxt());
     else if (a == "--dt-floor") p.dt_floor_s = std::stof(nxt());
     // Phase-1 morphodynamics (Task 6). `--morfac` is the landform-time
-    // accelerator; the other three are the transport law's own knobs. Same
-    // caveat as the fluid flags above: parsed here so they exist on the
-    // command line, with RunSweCycles not called from main() until Task 7.
+    // accelerator; the other three are the transport law's own knobs.
     else if (a == "--morfac") p.morfac = std::stof(nxt());
     else if (a == "--kc") p.capacity_Kc_s = std::stof(nxt());
     else if (a == "--settling-velocity")

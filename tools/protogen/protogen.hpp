@@ -90,12 +90,21 @@ constexpr float kMaxBacktraceCells = 4.0f;
 // independently, which is fine while the correction is small and dangerous
 // when it is not: an unbounded `target/after` lets a collapsing gather
 // multiply the whole field arbitrarily, and since the fixer sets the total
-// the mass audit then checks, the audit is structurally blind to it. 2x is
-// well above anything a healthy step produces (measured worst case 1.31x on
-// a warm-started fixture, and only in the first two cycles) and well below
-// the 3x a bone-dry start produced before the bound existed. Beyond it the
-// pass stops scaling and books the difference to
-// `Grid::swe_sed_advect_fix_residual_m3` instead.
+// the mass audit then checks, the audit is structurally blind to it.
+//
+// 2x is NOT confined to a fixture's first two cycles -- that was an early,
+// pre-production reading. The branch's own production runs (Task 8's
+// `--morfac 10`, 3000 cycles, README "Full-map runs") measure a SUSTAINED
+// worst |factor-1| of 0.380 at 8 km and 0.466 at 16 km, i.e. the fixer
+// routinely scales the field 1.38-1.47x, not a rare early transient. Real
+// headroom to this bound is therefore closer to 2.5-3x than the 4-5x the old
+// "1.31x" reading implied. Tightening the bound would not make the
+// underlying advection step any more accurate -- it would just convert more
+// of the correction into unplaced mass booked to
+// `Grid::swe_sed_advect_fix_residual_m3` (a silent-by-default ledger term,
+// not a tripwire) once a cycle's fix hits the tighter cap, so 2x is kept as
+// the bound that still lets the fixer do its job at the disagreement
+// magnitude production runs actually produce.
 constexpr double kMaxAdvectFixFactor = 2.0;
 
 // ---------------------------------------------------------------- parameters
@@ -333,13 +342,22 @@ struct Params {
   //
   // Substeps run per RunSweCycles cycle, each Flux->Depth->Velocity. 50 is a
   // starting point, not derived: the substep's OWN dt already comes from CFL,
-  // this just says how many of them run before the (currently empty) morpho
-  // hook gets a turn once Task 6 fills it in.
+  // this just says how many of them run before the morpho hook (SedExchange
+  // -> SedAdvect -> TalusFlux -> TalusApply, active since Task 6) gets a turn.
   int swe_substeps = 50;
   // CFL number for the substep dt: dt = cfl_number * cell_m / sqrt(g*h_max).
   // 0.5 is the standard shallow-water safety factor -- explicit virtual-pipes
   // schemes are stable up to ~1.0; 0.5 leaves headroom for the implicit drag
   // term's own stiffness and for MORFAC-scaled bed change later.
+  //
+  // NAMED OMISSION: the bound uses the wave speed sqrt(g*h) alone, not the
+  // full advective CFL speed |u|+sqrt(g*h) a textbook shallow-water scheme
+  // would use. In practice the margin still holds -- SweFlux's own export
+  // clamp caps a substep's outflow at the water the cell actually holds
+  // regardless of what dt implies, and the drag term is solved implicitly,
+  // so the two together carry the advective contribution this dt bound
+  // itself does not account for. Not proof the margin holds at every
+  // possible velocity, just the reason it has not needed to be exact.
   float cfl_number = 0.5f;
   // Manning roughness for the SWE fluid passes. A SEPARATE knob from
   // `manning_n` (the phase-0 particle walk's), not an alias, even though the
@@ -365,13 +383,14 @@ struct Params {
   // producing output with no diagnosable meaning instead of naming the fault.
   float dt_floor_s = 1e-5f;
   // Morphological acceleration factor: how many fluid cycles' worth of bed
-  // change Task 6's morpho hook is allowed to apply per ACTUAL fluid cycle
-  // (the standard MORFAC trick -- run the fluid at its own timescale, but
-  // let the slower bed evolve faster than real sediment transport would, so
-  // a landform-scale run does not need landform-scale fluid time). 1.0
-  // (identity, i.e. no acceleration) because nothing computes a bed delta
-  // yet to accelerate -- Task 6 is this knob's first real consumer; see
-  // `ClampMorfacBedDelta` below for where it is applied.
+  // change the morpho hook (SedExchange, via `ClampMorfacBedDelta` below) is
+  // allowed to apply per ACTUAL fluid cycle (the standard MORFAC trick -- run
+  // the fluid at its own timescale, but let the slower bed evolve faster than
+  // real sediment transport would, so a landform-scale run does not need
+  // landform-scale fluid time). 1.0 (identity, i.e. no acceleration) is the
+  // library DEFAULT so a caller that never sets `--morfac` gets unaccelerated
+  // physics rather than a silently-tuned one; production runs override it
+  // (README's chosen config is `--morfac 10`).
   float morfac = 1.0f;
 
   // --- phase-1 morphodynamics: the Exner exchange (protogen_swe.cpp) -------
@@ -604,6 +623,32 @@ struct Grid {
   double swe_sed_morfac_created_m3 = 0.0;
   double swe_sed_advect_fix_residual_m3 = 0.0;
   double swe_sed_advect_fix_max = 0.0;
+
+  // Float32 quantization diagnostic (final-review finding 1). SedExchange's
+  // read-back guard ("THE BED DELTA IS WRITTEN, THEN READ BACK", see its own
+  // comment) is what keeps the exchange conservative in float32 -- but at
+  // production relief `height`'s representable step is on the order of the
+  // bed delta itself, so a delta under half a ULP is not merely rounded, it
+  // is DISCARDED ENTIRELY: `d_hu != 0 && realised_hu == 0`. That is not a bug
+  // (the guard's whole job is to make the OTHER two fields agree with what
+  // the bed actually did, and it does), but it is a real, measured loss of
+  // sub-ULP exchange -- 65.8% of wet-cell deltas realised as exactly zero in
+  // one production-relief (`relief_m = 400`) cycle. These four counters let
+  // that be watched rather than merely asserted: counts and discarded metres
+  // (the requested `bed_delta_m` on a cell where the bed did not move at
+  // all), split erosion/deposition because a silently-failed-to-detach
+  // parcel and a silently-failed-to-settle one are different failure modes.
+  // `--relief` scales the quantum (`ToHeightUnits` divides by `relief_m`),
+  // so a SMALLER relief makes this worse, not better. Diagnostic only,
+  // accumulated across a whole run by SedExchange, printed by
+  // PrintRunDiagnostics; nothing else reads them. See README's "Open"
+  // section for the open design question (double-precision bed storage, or
+  // storing a delta from a per-run base elevation, vs. leaving the
+  // conservative discard as-is).
+  double swe_sed_quant_discard_erosion_count = 0.0;
+  double swe_sed_quant_discard_deposition_count = 0.0;
+  double swe_sed_quant_discard_erosion_m = 0.0;
+  double swe_sed_quant_discard_deposition_m = 0.0;
 
   explicit Grid(int res)
       : n(res), cells(size_t(res) * res), height(cells, 0.f),

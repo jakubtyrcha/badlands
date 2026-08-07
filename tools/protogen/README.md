@@ -279,8 +279,11 @@ ripple into the other.
 
 ## Verification
 
-`protogen --test` — **79 assertions** on 32–1024 cell grids at (mostly) the
-production 16 m cell size, run in ~6 s:
+`protogen --test` — **80 assertions** on 32–1024 cell grids at (mostly) the
+production 16 m cell size, run in ~22 s (wall time on the reference machine;
+this suite grew from ~6 s across Tasks 5-8 as the phase-1 SWE/warm-start/morpho
+sections were added, and it is machine-load-sensitive -- treat it as an order
+of magnitude, not a regression gate):
 
 | section | assertions |
 |---|---|
@@ -288,7 +291,7 @@ production 16 m cell size, run in ~6 s:
 | physics invariants (some `PEND` until a mechanism lands) | 15 |
 | phase-1 SWE fluid (virtual-pipes shallow water) | 11 |
 | phase-0 → phase-1 warm start | 2 |
-| phase-1 morphodynamics (Exner + advection + talus) | 28 |
+| phase-1 morphodynamics (Exner + advection + talus) | 29 |
 | driver, output boundary | 4 |
 
 The two-phase water suite checks the SWE relaxation against the exact
@@ -436,6 +439,25 @@ decision.
 
 ## Open
 
+- **Float32 bed-delta quantization silently discards sub-ULP sediment
+  exchange.** At production relief (`relief_m = 400`), `SedExchange`'s
+  per-cycle bed deltas sit at 1-5 ULP of `Grid::height`'s representable step.
+  The read-back guard (`height_b[i] - height[i]`, see `SedExchange`'s own
+  "THE BED DELTA IS WRITTEN, THEN READ BACK" comment) correctly keeps the
+  exchange conservative in float32 — it never credits `sus` with material the
+  bed did not actually move — but a delta under half a ULP is not rounded, it
+  is DISCARDED ENTIRELY: measured **65.8% of wet-cell deltas realised as
+  exactly zero** in one production-relief cycle. `Grid` now carries four
+  diagnostic counters, `swe_sed_quant_discard_{erosion,deposition}_{count,m}`
+  (incremented by `SedExchange`, printed by `PrintRunDiagnostics` beside the
+  advect-fixer numbers), so this is watched rather than only asserted.
+  `--relief` scales the quantum directly (`ToHeightUnits` divides by
+  `relief_m`), so a SMALLER relief makes the effect worse, not better. The
+  fix — a double-precision bed, or storing a delta from a per-run base
+  elevation rather than an absolute height — is an OPEN design decision,
+  out of scope here: today's discard is conservative (no mass is invented),
+  merely lossy, and this task adds the diagnostic and this note, not a change
+  to the bed representation.
 - **The lake-outlet backwater watch item is real but small.** `ClassifyBoundaryWater`'s
   surface-continuity growth (see "What it is") is not re-checked against the
   seed speed threshold once a region is growing, so a genuinely-flowing

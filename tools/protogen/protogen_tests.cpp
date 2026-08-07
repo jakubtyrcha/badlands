@@ -3195,6 +3195,15 @@ void ChannelPersistence() {
   // erosion stays IN the channel rather than scouring the plain -- which is
   // what "does not unnaturally widen" means when measured rather than
   // eyeballed.
+  //
+  // `on_keep > 0.9` DOES NOT DISCRIMINATE ON THIS FIXTURE, and that is worth
+  // stating rather than leaving implicit: both arms deepen the section well
+  // past 100% (measured 114% on, 118% off) because the whole reach is
+  // actively incising over 150 cycles regardless of the factor -- the factor
+  // changes WHERE the cut concentrates, not whether the section survives.
+  // The 0.9 bound is a floor against a regression that erases the channel
+  // entirely, not the thing that tells "on" from "off"; that discriminating
+  // power rests entirely on `on_conc`/`off_conc` below, deliberately.
   const bool holds = std::get<3>(on) && on_keep > 0.9 && on_conc >= 8.0;
   // Factor OFF: it must fail the SAME bar. If this ever passes, the amendment
   // is inert and the half above is measuring nothing.
@@ -3317,6 +3326,19 @@ void MorphoKnobLiveness() {
       // swe_substeps * dt` -- KnobLiveness's own harness runs phase-0's
       // RunSim, which never touches this at all.
       {"swe_substeps", [](Params& p, int i) { p.swe_substeps = i ? 5 : 60; }},
+      // Also a fluid depth knob needing its own row for the SAME reason as
+      // swe_substeps above: KnobLiveness's phase-0 harness runs RunSim, which
+      // never calls SweDepth -- the only consumer of `evaporation_m_per_yr`
+      // (Params' own comment: phase-0's own evaporation is the unrelated
+      // `evap_length_m` travel e-fold, a different knob entirely). Set well
+      // above the harness's own `runoff_m_per_yr` (400 m/yr, set below) so
+      // the "on" value visibly dries the channel within the harness's 30
+      // cycles rather than losing against a still-wetter inflow --
+      // SweWaterLedger already proves the term itself works at a modest
+      // 15 m/yr, so this is a fixture-scale headroom choice, not evidence
+      // the term needs that much to function.
+      {"evaporation_m_per_yr", [](Params& p, int i) {
+         p.evaporation_m_per_yr = i ? 0.f : 2000.f; }},
       {"capacity_Kc_s", [](Params& p, int i) {
          p.capacity_Kc_s = i ? 0.02f : 0.5f; }},
       {"sus_settling_velocity", [](Params& p, int i) {

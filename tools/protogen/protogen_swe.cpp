@@ -852,10 +852,19 @@ void SedExchange(Grid& g, const Params& p, float dt_morpho) {
   const float w_settle = std::max(p.sus_settling_velocity_m_per_s, 0.f);
 
   std::vector<double> row_created(size_t(n), 0.0);
+  // Quantization-discard counters (final-review finding 1; see the matching
+  // Grid fields' own comment). Per-row like `row_created` above, combined
+  // serially afterwards for the same reproducibility reason.
+  std::vector<double> row_quant_erosion_count(size_t(n), 0.0);
+  std::vector<double> row_quant_deposition_count(size_t(n), 0.0);
+  std::vector<double> row_quant_erosion_m(size_t(n), 0.0);
+  std::vector<double> row_quant_deposition_m(size_t(n), 0.0);
 
   badlands::ParallelFor(size_t(n), [&](size_t yy) {
     const int y = int(yy);
     double created_acc = 0.0;
+    double quant_erosion_count_acc = 0.0, quant_deposition_count_acc = 0.0;
+    double quant_erosion_m_acc = 0.0, quant_deposition_m_acc = 0.0;
     for (int x = 0; x < n; ++x) {
       const size_t i = g.idx(x, y);
       const float h_m = g.h[i];
@@ -982,6 +991,24 @@ void SedExchange(Grid& g, const Params& p, float dt_morpho) {
       g.height_b[i] = g.height[i] + d_hu;
       const float realised_hu = g.height_b[i] - g.height[i];
       const float ratio = (d_hu != 0.f) ? (realised_hu / d_hu) : 0.f;
+      // Quantization discard (final-review finding 1): a nonzero request that
+      // realised as exactly zero. Split by side so a caller can tell "flow
+      // wanted to erode but couldn't detach" from "flow wanted to deposit but
+      // couldn't settle" -- `bed_delta_m`'s own sign (+ deposition, -
+      // erosion) is what SedExchange already used to reach this branch, so
+      // reading it again here does not re-derive anything. Counted in METRES
+      // (the pre-quantization request), not height units, so `--relief`'s
+      // effect on the quantum shows up as a change in how OFTEN this fires
+      // rather than needing a second unit conversion to interpret.
+      if (d_hu != 0.f && realised_hu == 0.f) {
+        if (bed_delta_m < 0.f) {
+          quant_erosion_count_acc += 1.0;
+          quant_erosion_m_acc += double(-bed_delta_m);
+        } else {
+          quant_deposition_count_acc += 1.0;
+          quant_deposition_m_acc += double(bed_delta_m);
+        }
+      }
       soil_delta_m *= ratio;
       sus_delta_m *= ratio;
       created_m *= ratio;
@@ -990,13 +1017,29 @@ void SedExchange(Grid& g, const Params& p, float dt_morpho) {
       created_acc += double(created_m) * double(cell_area);
     }
     row_created[size_t(y)] = created_acc;
+    row_quant_erosion_count[size_t(y)] = quant_erosion_count_acc;
+    row_quant_deposition_count[size_t(y)] = quant_deposition_count_acc;
+    row_quant_erosion_m[size_t(y)] = quant_erosion_m_acc;
+    row_quant_deposition_m[size_t(y)] = quant_deposition_m_acc;
   });
 
   // Serial, fixed-order combine (row index 0..n-1), same reproducibility
   // argument as SweDepth's ledger partials.
   double created_total = 0.0;
-  for (int y = 0; y < n; ++y) created_total += row_created[size_t(y)];
+  double quant_erosion_count_total = 0.0, quant_deposition_count_total = 0.0;
+  double quant_erosion_m_total = 0.0, quant_deposition_m_total = 0.0;
+  for (int y = 0; y < n; ++y) {
+    created_total += row_created[size_t(y)];
+    quant_erosion_count_total += row_quant_erosion_count[size_t(y)];
+    quant_deposition_count_total += row_quant_deposition_count[size_t(y)];
+    quant_erosion_m_total += row_quant_erosion_m[size_t(y)];
+    quant_deposition_m_total += row_quant_deposition_m[size_t(y)];
+  }
   g.swe_sed_morfac_created_m3 += created_total;
+  g.swe_sed_quant_discard_erosion_count += quant_erosion_count_total;
+  g.swe_sed_quant_discard_deposition_count += quant_deposition_count_total;
+  g.swe_sed_quant_discard_erosion_m += quant_erosion_m_total;
+  g.swe_sed_quant_discard_deposition_m += quant_deposition_m_total;
 
   g.height.swap(g.height_b);
   g.soil.swap(g.soil_b);
@@ -1810,8 +1853,9 @@ SweRunResult RunSweCycles(Grid& g, const Params& p, int cycles,
   return result;
 }
 
-// See the declaration (protogen.hpp) for the design intent -- this is
-// scaffolding for Task 6, called by nothing today.
+// See the declaration (protogen.hpp) for the design intent. `SedExchange`
+// (above, in this file) is the sole caller, on both the erosion and the
+// deposition side.
 float ClampMorfacBedDelta(float raw_delta_m, float depth_m, const Params& p) {
   const float scaled = raw_delta_m * p.morfac;
   const float bound = kMaxBedDeltaFraction * std::max(depth_m, 0.0f);
