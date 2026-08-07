@@ -70,6 +70,20 @@ public:
     void AttachLayer(void* ca_metal_layer);
     void SetViewportSize(uint32_t width_px, uint32_t height_px);
 
+    // Copies the next presented frame out, for the ONE test that asserts the
+    // window is not black. Null (the default) costs nothing.
+    //
+    // It exists because the alternative did not work. The presented-frame gate
+    // used to build its own swapchain so the drawable stayed reachable -- and
+    // in doing so it skipped RenderFrame entirely, which is where the lazy
+    // swapchain construction, the deferred resize and the colour-space check
+    // live. That is the exact code that shipped a black window, and its gate
+    // could not see it. Capturing from inside the real path is what closes that.
+    //
+    // Filled with the drawable's raw RGBA16Float texels after the frame that
+    // follows the call, then cleared. The frame is not otherwise altered.
+    void CaptureNextFrame(std::vector<uint8_t>* out) { capture_ = out; }
+
     // Per-frame scene inputs, same contract as the metal-cpp renderer.
     void set_scene_lines_dirty();
     void set_mesh(const TriangleMesh& mesh);
@@ -135,6 +149,7 @@ private:
     // the allocator's ring grows onto a different buffer they must be rebuilt.
     badlands::rhi::IBuffer* table_buffer_ = nullptr;
 
+    std::vector<uint8_t>* capture_ = nullptr; // see CaptureNextFrame
     uint32_t width_px_ = 0;
     uint32_t height_px_ = 0;
     bool pending_resize_ = false;

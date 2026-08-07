@@ -37,16 +37,24 @@ foreach(dir ${CANDIDATES})
     if(NOT rc EQUAL 0)
         continue()
     endif()
-    if(workspace STREQUAL ${EXPECTED_PROJECT})
+    # QUOTED: an unquoted expansion splits a path containing a space into
+    # several if() arguments, which is a CMake syntax error -- the test would
+    # then fail for a reason that has nothing to do with bundle freshness.
+    if(workspace STREQUAL "${EXPECTED_PROJECT}")
         file(GLOB found ${dir}/Build/Products/*/Shapeshifter.app)
         list(APPEND BUNDLES ${found})
     endif()
 endforeach()
 
 if(NOT BUNDLES)
+    # EXIT 77, not 0. ctest reports this as SKIPPED (SKIP_RETURN_CODE), because
+    # a silent pass here is indistinguishable from a real one -- and this test
+    # skips whenever Xcode's build location is customised, which would have left
+    # the stale-bundle gate passing vacuously forever.
     message(STATUS "T5 skipped: no Shapeshifter.app built from ${EXPECTED_PROJECT} "
                    "(run xcodebuild -scheme Shapeshifter)")
-    return()
+    execute_process(COMMAND ${CMAKE_COMMAND} -E true)
+    cmake_language(EXIT 77)
 endif()
 
 foreach(app ${BUNDLES})

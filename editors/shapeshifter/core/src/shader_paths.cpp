@@ -3,6 +3,7 @@
 #include <CoreFoundation/CoreFoundation.h>
 
 #include <climits>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 
@@ -106,20 +107,28 @@ std::optional<ShaderLocation> ShaderLocationAt(const std::string& root,
     return loc;
 }
 
-std::optional<ShaderLocation> ResolveShaderLocation() {
+ShaderResolution ResolveShaderTiers() {
     const std::string bundle_root = BundleShaderRoot();
     if (!bundle_root.empty()) {
-        if (auto loc = ShaderLocationAt(bundle_root, "bundle")) {
+        // PRESENT-BUT-WRONG IS NOT ABSENT. A bundle whose manifest disagrees is
+        // a mispaired app, and continuing from the staged tree would render it
+        // perfectly on the one machine that has a staged tree -- so the stale
+        // bundle becomes invisible from running the app, which is the whole
+        // failure this mechanism exists to end. Only a MISSING bundle falls
+        // through, which is the ordinary non-bundled case.
+        if (FileExists(fs::path(bundle_root) / "MANIFEST")) {
+            auto loc = ShaderLocationAt(bundle_root, "bundle");
+            if (!loc) return {std::nullopt, ShaderTierProblem::BundleMismatch};
             spdlog::info("shapeshifter: shaders from the {} tier at {}",
                          loc->tier, loc->root);
-            return loc;
+            return {loc, ShaderTierProblem::None};
         }
     }
 
     if (auto loc = ShaderLocationAt(SHAPESHIFTER_STAGED_SHADER_DIR, "staged")) {
         spdlog::info("shapeshifter: shaders from the {} tier at {}", loc->tier,
                      loc->root);
-        return loc;
+        return {loc, ShaderTierProblem::None};
     }
 
     ReportFatal(
@@ -129,7 +138,22 @@ std::optional<ShaderLocation> ResolveShaderLocation() {
         "  Neither carries a MANIFEST matching this binary ({}).",
         bundle_root.empty() ? "<not bundled>" : bundle_root,
         SHAPESHIFTER_STAGED_SHADER_DIR, SHAPESHIFTER_SHADER_HASH);
-    return std::nullopt;
+    return {std::nullopt, ShaderTierProblem::NoUsableTier};
+}
+
+std::optional<ShaderLocation> ResolveShaderLocation() {
+    ShaderResolution r = ResolveShaderTiers();
+    if (r.problem == ShaderTierProblem::BundleMismatch) {
+        ReportFatal("refusing to run against shaders this binary was not built "
+                    "with. Rebuild the app.");
+        // FLUSHED, THEN _Exit. spdlog buffers, and os_log has already taken its
+        // copy; _Exit rather than exit because the Metal device, the layer and
+        // a half-built renderer are alive here and running their destructors
+        // during a launch failure is how a clear error becomes a crash report.
+        spdlog::default_logger()->flush();
+        std::_Exit(1);
+    }
+    return r.location;
 }
 
 } // namespace sq

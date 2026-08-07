@@ -2578,6 +2578,7 @@ add_test(NAME shapeshifter_bundle_freshness
                  -DEXPECTED_PROJECT=${SHAPESHIFTER_DIR}/Shapeshifter.xcodeproj
                  -P ${CMAKE_SOURCE_DIR}/cmake/TestBundleFreshness.cmake
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+set_tests_properties(shapeshifter_bundle_freshness PROPERTIES SKIP_RETURN_CODE 77)
 
 #
 # COMPILED FROM THE STAGED TREE, with the include paths derived from the same

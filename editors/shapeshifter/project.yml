@@ -61,6 +61,10 @@ targets:
       - name: Copy staged shaders into Resources
         script: |
           set -euo pipefail
+          # `build/` is hardcoded, and matches scripts/build.sh, which the
+          # prebuild phase above invokes and which hardcodes the same directory.
+          # They cannot disagree in practice; configuring CMake elsewhere makes
+          # this phase fail loudly below rather than bundle a stale tree.
           STAGED="$SRCROOT/../../build/shaders_staged"
           DEST="$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Resources/shaders"
           if [ ! -f "$STAGED/MANIFEST" ]; then

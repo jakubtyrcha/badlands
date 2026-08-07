@@ -7,19 +7,41 @@
 # copy_if_different rather than a wholesale copy_directory: an unchanged file
 # keeps its timestamp, so nothing downstream of the staged tree rebuilds for a
 # shader that did not actually change.
-set(EXPECTED "")
-file(GLOB_RECURSE EDITOR_FILES RELATIVE ${EDITOR_SHADERS} ${EDITOR_SHADERS}/*)
-foreach(rel ${EDITOR_FILES})
-    execute_process(COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    ${EDITOR_SHADERS}/${rel} ${STAGED}/${rel})
-    list(APPEND EXPECTED ${rel})
-endforeach()
-file(GLOB COMMON_FILES RELATIVE ${COMMON_SLANG} ${COMMON_SLANG}/*)
-foreach(rel ${COMMON_FILES})
-    execute_process(COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    ${COMMON_SLANG}/${rel} ${STAGED}/common/${rel})
-    list(APPEND EXPECTED common/${rel})
-endforeach()
+#
+# EVERY file, not just *.slang and *.h. Whatever lands here is bundled and is
+# readable by the compiler at run time, so restricting the copy by extension
+# would only mean shipping files the hash below does not cover. The one
+# exclusion is dotfiles: .DS_Store appearing because someone opened the folder
+# in Finder must not restage, rehash and relink the editor.
+function(stage_tree src dest_prefix out_expected)
+    set(expected "")
+    # GLOB_RECURSE, and recursive for BOTH trees: plain GLOB is non-recursive
+    # and, unlike GLOB_RECURSE, lists directories -- `cmake -E copy_if_different`
+    # on a directory fails, and the directory name would still be recorded as
+    # expected, so the prune below would keep it forever.
+    file(GLOB_RECURSE files RELATIVE ${src} ${src}/*)
+    foreach(rel ${files})
+        get_filename_component(name ${rel} NAME)
+        if(name MATCHES "^\\.")
+            continue()
+        endif()
+        execute_process(COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        ${src}/${rel} ${STAGED}/${dest_prefix}${rel}
+                        RESULT_VARIABLE rc)
+        # CHECKED. A failed copy used to be silent, which meant the file simply
+        # never reached the staged tree, was never hashed, and the app failed to
+        # resolve it at run time with nothing anywhere saying why.
+        if(NOT rc EQUAL 0)
+            message(FATAL_ERROR "staging failed to copy ${src}/${rel} (${rc})")
+        endif()
+        list(APPEND expected ${dest_prefix}${rel})
+    endforeach()
+    set(${out_expected} "${expected}" PARENT_SCOPE)
+endfunction()
+
+stage_tree(${EDITOR_SHADERS} "" EDITOR_EXPECTED)
+stage_tree(${COMMON_SLANG} "common/" COMMON_EXPECTED)
+set(EXPECTED ${EDITOR_EXPECTED} ${COMMON_EXPECTED})
 
 # PRUNE, because copy_if_different only ever adds. A shader deleted from the
 # repo would otherwise sit in the staged tree forever: hashed, bundled, and
@@ -41,7 +63,14 @@ endforeach()
 #
 # GLOBbed here rather than handed in as a list: the covered set is DERIVED, so a
 # newly added shader is hashed without anyone remembering to register it.
-file(GLOB_RECURSE STAGED_FILES ${STAGED}/*.slang ${STAGED}/*.h)
+#
+# EVERY staged file, not *.slang and *.h. Restricting it by extension meant a
+# `.slangh`, a data file, anything else shipped INSIDE the bundle while
+# contributing nothing to the hash -- measured: the file was staged, bundled and
+# tracked edits, and the manifest never moved. "The bundle matches the binary"
+# has to mean the whole bundle.
+file(GLOB_RECURSE STAGED_FILES ${STAGED}/*)
+list(REMOVE_ITEM STAGED_FILES ${STAGED}/MANIFEST) # written below, from this hash
 list(SORT STAGED_FILES)
 set(ACC "")
 foreach(f ${STAGED_FILES})

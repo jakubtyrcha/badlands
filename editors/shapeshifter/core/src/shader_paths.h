@@ -36,12 +36,30 @@ struct ShaderLocation {
     const char* tier = "";
 };
 
-// Null after logging exactly why: which tiers were considered, the absolute
-// path each was looked for at, and -- on a hash mismatch -- both hashes.
-//
-// The MISMATCH case is the one worth stating. A tier whose MANIFEST disagrees
-// with the hash baked into this binary is refused rather than used, so a stale
-// pairing becomes a sentence instead of a black viewport.
+// What resolution decided, separated from what the app does about it.
+enum class ShaderTierProblem {
+    None,
+    // A bundle tier EXISTS and its MANIFEST disagrees with this binary. Fatal:
+    // the app is mispaired with its own resources, and rendering from the
+    // staged tree instead would hide that on exactly the machine that can
+    // still rebuild. Falling through is what made a stale .app invisible.
+    BundleMismatch,
+    // Nothing resolved anywhere.
+    NoUsableTier,
+};
+
+struct ShaderResolution {
+    std::optional<ShaderLocation> location;
+    ShaderTierProblem problem = ShaderTierProblem::None;
+};
+
+// The POLICY-FREE half: decides, logs, and returns. Never exits, so the tests
+// can drive every failure without taking the process with them.
+ShaderResolution ResolveShaderTiers();
+
+// What the app calls. Same decision, plus the consequence: a BundleMismatch
+// EXITS rather than limping on, because a binary running against shaders it was
+// not built with has no correct behaviour left to offer.
 std::optional<ShaderLocation> ResolveShaderLocation();
 
 // The hash this binary was built against. Exposed for tests and for the

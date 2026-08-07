@@ -37,13 +37,33 @@ set(SHAPESHIFTER_SHADER_GEN_DIR ${CMAKE_BINARY_DIR}/gen/shapeshifter)
 # CONFIGURE_DEPENDS covers files that did not exist when this was configured:
 # adding a shader re-runs configure, which puts it in the DEPENDS list below.
 # Content changes to files ALREADY in that list are covered by the list itself.
+#
+# EVERY file, matching what the staging script copies and hashes. Listing
+# *.slang and *.h here meant a shader asset with any other extension did not
+# even TRIGGER a restage -- so it reached the bundle only when some unrelated
+# shader edit happened to run the script, and then rode along unhashed.
 file(GLOB_RECURSE SHAPESHIFTER_SHADER_FILES CONFIGURE_DEPENDS
-    ${SHAPESHIFTER_SHADER_SRC}/*.slang
-    ${SHAPESHIFTER_SHADER_SRC}/*.h
-    ${BADLANDS_COMMON_SLANG_SRC}/*.slang
-    ${BADLANDS_COMMON_SLANG_SRC}/*.h)
+    ${SHAPESHIFTER_SHADER_SRC}/*
+    ${BADLANDS_COMMON_SLANG_SRC}/*)
+# Dotfiles are not inputs. A .DS_Store from opening the folder in Finder must
+# not restage, rehash and relink the editor; the staging script skips them too.
+list(FILTER SHAPESHIFTER_SHADER_FILES EXCLUDE REGEX "/\\.[^/]*$")
 
 file(MAKE_DIRECTORY ${SHAPESHIFTER_SHADER_GEN_DIR})
+
+# The input LIST, written to a file and depended on.
+#
+# Without this, DELETING a shader does not restage. add_custom_command decides
+# to re-run by comparing timestamps against its DEPENDS, and a deleted file
+# simply leaves that list -- every remaining input is still older than the
+# outputs, so the command is "up to date" and the removed shader survives in the
+# staged tree, and therefore in the bundle, until something unrelated forces a
+# run. Measured. configure_file rewrites only when the content differs, so this
+# file's timestamp moves exactly when the set of inputs changes.
+set(SHAPESHIFTER_SHADER_LIST ${SHAPESHIFTER_SHADER_GEN_DIR}/shader_inputs.txt)
+string(REPLACE ";" "\n" SHAPESHIFTER_SHADER_LIST_TEXT "${SHAPESHIFTER_SHADER_FILES}")
+file(CONFIGURE OUTPUT ${SHAPESHIFTER_SHADER_LIST}
+     CONTENT "${SHAPESHIFTER_SHADER_LIST_TEXT}\n" @ONLY)
 
 add_custom_command(
     OUTPUT ${SHAPESHIFTER_SHADER_GEN_DIR}/shader_manifest.h
@@ -55,6 +75,7 @@ add_custom_command(
             -DGEN_HEADER=${SHAPESHIFTER_SHADER_GEN_DIR}/shader_manifest.h
             -P ${CMAKE_SOURCE_DIR}/cmake/StageShapeshifterShaders.cmake
     DEPENDS ${SHAPESHIFTER_SHADER_FILES}
+            ${SHAPESHIFTER_SHADER_LIST} # so a DELETION restages; see above
             ${CMAKE_SOURCE_DIR}/cmake/StageShapeshifterShaders.cmake
     COMMENT "shapeshifter: staging and hashing the shader tree"
     VERBATIM)
