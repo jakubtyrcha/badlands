@@ -277,6 +277,7 @@ class ValidationSwapchain final : public ISwapchain {
   uint32_t GetWidth() const override { return inner_->GetWidth(); }
   uint32_t GetHeight() const override { return inner_->GetHeight(); }
   Format GetFormat() const override { return inner_->GetFormat(); }
+  ColorSpace GetColorSpace() const override { return inner_->GetColorSpace(); }
 
   ISwapchain* Inner() override { return inner_.get(); }
 

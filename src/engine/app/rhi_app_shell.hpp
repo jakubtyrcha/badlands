@@ -48,6 +48,21 @@ struct AppShellDesc {
   // CAMetalLayer accepts BGRA8Unorm and not RGBA8Unorm; the channel order is
   // the hardware's business, so a shader is unchanged either way.
   rhi::Format present_format = rhi::Format::BGRA8Unorm;
+
+  // What to present in when the display is SDR, or when HDR was not asked for
+  // or is not available. Defaults to Srgb -- untagged, which is exactly what
+  // every caller written before this field got, so adding it changed nobody.
+  rhi::ColorSpace color_space = rhi::ColorSpace::Srgb;
+
+  // Ask for an extended-range surface when the DISPLAY reports HDR. Granted,
+  // the shell presents RGBA16Float tagged ExtendedLinearDisplayP3 instead of
+  // the two fields above.
+  //
+  // TWO FIELDS RATHER THAN ONE, because they answer different questions: "what
+  // gamut do I author in" and "do I want headroom". An app can want P3 without
+  // wanting EDR -- object_viewer wants both, rhi_lab wants neither -- and a
+  // single flag would force them to move together.
+  bool prefer_hdr = false;
   bool vsync = true;
 };
 
@@ -126,6 +141,17 @@ class AppShell {
   // PIXELS. What the swapchain and any targets are currently sized for.
   uint32_t Width() const { return applied_width_; }
   uint32_t Height() const { return applied_height_; }
+
+  // What is ACTUALLY being presented. Every pipeline whose colour attachment is
+  // the backbuffer must take its format from here rather than from a constant:
+  // the shell may pick RGBA16Float over the requested format on an HDR display,
+  // and the swapchain may drop back off it again if the layer refuses to tag.
+  // A hardcoded BGRA8Unorm beside either of those is a pipeline built for an
+  // attachment that no longer exists.
+  rhi::Format SurfaceFormat() const;
+  // The value shaders take as their output mode. See the static_asserts beside
+  // rhi::ColorSpace -- the enum and the shader constant are the same number.
+  rhi::ColorSpace SurfaceColorSpace() const;
 
   rhi::ISwapchain* Swapchain() { return swapchain_.get(); }
   SDL_Window* Window() { return window_; }

@@ -11,6 +11,8 @@
 #include "sdf_scene.h"
 #include "ground_grid.h"
 
+import output_transform;  // EncodeOutput: the one place a colour reaches the surface
+
 ConstantBuffer<GroundGridUniforms> uniforms;
 
 // Same fullscreen-triangle trick as raymarch.slang.
@@ -93,7 +95,11 @@ GroundOut fs_main(GroundVarying in) {
     const bool reject_depth = !(clip.w > 0.0) || !(depth >= 0.0) || !(depth <= 1.0);
 
     GroundOut out;
-    out.color = rgba;
+    // PREMULTIPLIED (ground_grid_shade returns coverage already multiplied
+    // through, which is why this pass blends One/OneMinusSrcAlpha). The
+    // primaries matrix is linear, so applying it to premultiplied channels is
+    // the same as applying it before the multiply.
+    out.color = EncodeOutput(rgba.rgb, rgba.a, kOutputExtendedLinearP3);
     // Reversed-Z: the far value is 0, not 1. Moot in practice -- a rejected
     // fragment is discarded below and never writes depth -- but a value that
     // says "far" while meaning "nearest possible" is a trap for the next reader.

@@ -246,12 +246,19 @@ endif()
 if(APPLE)
     # ARC only for the Metal backend — the rest of the project is MRR, and a
     # backend this size is far safer with automatic lifetimes.
-    target_sources(badlands_rhi PRIVATE src/engine/rhi/metal/metal_rhi.mm)
-    set_source_files_properties(src/engine/rhi/metal/metal_rhi.mm
+    target_sources(badlands_rhi PRIVATE
+        src/engine/rhi/metal/metal_rhi.mm
+        src/engine/rhi/metal/metal_color_space.mm)
+    set_source_files_properties(
+        src/engine/rhi/metal/metal_rhi.mm
+        src/engine/rhi/metal/metal_color_space.mm
         PROPERTIES COMPILE_FLAGS "-fobjc-arc")
     target_compile_definitions(badlands_rhi PUBLIC BADLANDS_RHI_METAL)
+    # QuartzCore: CAMetalLayer, which the swapchain drives directly.
+    # CoreGraphics: the kCGColorSpace* name constants the layer is tagged with.
     target_link_libraries(badlands_rhi PUBLIC
-        "-framework Metal" "-framework Foundation")
+        "-framework Metal" "-framework Foundation"
+        "-framework QuartzCore" "-framework CoreGraphics")
 endif()
 
 # badlands_slang: Slang -> (target source + engine reflection). Sits ABOVE the
@@ -765,13 +772,20 @@ target_link_libraries(badlands_patch_lib PUBLIC badlands_mapgen_lib)
 # this: stage 3 proper (badlands_mapview_view below) links only
 # badlands_patch_lib, so it can see the PatchSource interface but never a
 # concrete provider.
+#
+# patch_export is NOT a provider -- it is a pure function of a PatchData. It
+# sits here beside patch_io because both SERIALIZE the contract (one to rasters,
+# one to images), and because the tool that wants it already links this target.
+# Keeping it out of badlands_patch_lib also keeps image encoders off stage 3,
+# which has no use for them.
 add_library(badlands_patch_providers STATIC
     src/mapgen/patch_io.cpp
     src/mapgen/synthetic_patch_source.cpp
     src/mapgen/file_patch_source.cpp
     src/mapgen/coarse_world_patch_source.cpp
     src/mapgen/cubic_sample.cpp
-    src/mapgen/relief_filter.cpp)
+    src/mapgen/relief_filter.cpp
+    src/mapgen/patch_export.cpp)
 target_link_libraries(badlands_patch_providers PUBLIC badlands_patch_lib)
 
 # badlands_mapview_view: everything the map tool needs to fetch a patch and
@@ -827,6 +841,20 @@ endif()
 add_executable(badlands_mapview
     src/executables/mapview/main_mapview.cpp)
 target_link_libraries(badlands_mapview PRIVATE badlands_mapview_view badlands_patch_providers)
+
+# badlands_patch_export: the map tool's OFFLINE half -- cuts windows out of a
+# coarse world through the same Fetch mapview uses and writes them as images.
+# Headless and GPU-free: it links the providers plus the `assets` crate for the
+# PNG write, and nothing else. The PNG dependency stops HERE, which is what
+# keeps it out of src/mapgen/ (see patch_export.hpp).
+add_executable(badlands_patch_export
+    src/executables/patch_export/main.cpp)
+target_link_libraries(badlands_patch_export PRIVATE badlands_patch_providers assets)
+target_include_directories(badlands_patch_export PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/crates/assets/include)
+if(APPLE)
+    target_link_options(badlands_patch_export PRIVATE "-Wl,-ld_new")
+endif()
 
 # badlands_terrain_cluster_tests: Catch2 invariants for the terrain cluster-LOD
 # DAG build (error monotonicity, sphere nesting, crack-free seams, grid
@@ -1469,6 +1497,56 @@ endif()
 add_test(NAME badlands_render_graph_tests COMMAND badlands_render_graph_tests
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# badlands_plane_mesh_tests: the debug plane's geometry, pure CPU, no device.
+# Winding, tangent orthonormality and the primitive-count refusal are all
+# invisible in a rendered image until they empty the frame — a reversed winding
+# renders nothing under backface culling and reads as a missing draw call.
+add_executable(badlands_plane_mesh_tests
+    src/engine/tests/plane_mesh_tests.cpp
+    src/executables/object_viewer/plane_mesh.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_plane_mesh_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party/glm
+    ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
+)
+target_compile_features(badlands_plane_mesh_tests PRIVATE cxx_std_23)
+if(APPLE)
+    target_link_options(badlands_plane_mesh_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_plane_mesh_tests COMMAND badlands_plane_mesh_tests
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_debug_view_tests: what sits behind the two debug windows. The widgets
+# are not testable; the debug-view table and the sun-angle mapping are, and both
+# are pure CPU. The load-bearing case asserts every entry the UI can select is
+# also reachable from --debug-view — a UI-only mode is a mode no ctest covers.
+#
+# Links the RHI only for resolve_pass.hpp's types; the functions under test
+# touch no device.
+if(BADLANDS_HAVE_SLANG AND APPLE)
+    add_executable(badlands_debug_view_tests
+        src/engine/tests/debug_view_tests.cpp
+        src/executables/object_viewer/resolve_pass.cpp
+        src/executables/object_viewer/material_pack.cpp
+        third_party/catch2/extras/catch_amalgamated.cpp
+    )
+    target_include_directories(badlands_debug_view_tests PRIVATE
+        ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+        ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/third_party/glm
+        ${CMAKE_SOURCE_DIR}/src/crates/assets/include
+    )
+    target_link_libraries(badlands_debug_view_tests PRIVATE
+        badlands_render_graph badlands_slang assets
+        nlohmann_json::nlohmann_json)
+    target_link_options(badlands_debug_view_tests PRIVATE "-Wl,-ld_new")
+    add_test(NAME badlands_debug_view_tests COMMAND badlands_debug_view_tests
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+endif()
+
 # badlands_rhi_metal_tests: the SAME conformance list against the real backend,
 # plus readback-based correctness Null cannot assert. Needs a Metal device.
 if(APPLE)
@@ -1591,11 +1669,16 @@ if(APPLE)
     add_executable(badlands_object_viewer
         src/executables/object_viewer/main.cpp
         src/executables/object_viewer/line_pass.cpp
+        src/executables/object_viewer/output_pass.cpp
+        src/executables/object_viewer/plane_mesh.cpp
+        src/executables/object_viewer/material_pack.cpp
+        src/executables/object_viewer/resolve_pass.cpp
+        src/executables/object_viewer/visbuffer_pass.cpp
         src/engine/rendering/debug_line_buffer.cpp
         src/engine/rendering/debug_line_expand.cpp)
     target_link_libraries(badlands_object_viewer PRIVATE
         badlands_render_graph badlands_rhi_app badlands_slang
-        badlands_imgui_rhi assets)
+        badlands_imgui_rhi assets nlohmann_json::nlohmann_json)
     target_sources(badlands_object_viewer PRIVATE
         ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp)
     target_include_directories(badlands_object_viewer PRIVATE
@@ -1625,6 +1708,131 @@ if(APPLE)
                      --width 64 --height 64
                      --out ${CMAKE_BINARY_DIR}/object_viewer_lines.png
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+    # THE TWO-SINK TEST: the whole HDR/LDR rule in one check, and the only one
+    # that can fail for the right reason on a machine with no HDR display. The
+    # same frame goes into an 8-bit Display-P3 sink and a float extended-linear
+    # one and every texel must agree through the transform.
+    #
+    # ON THE RESOLVED PLANE, not the line scene. The two sinks are comparable
+    # only where NEITHER is tone-mapped and NOTHING overlays: the tone curve is
+    # deliberately absent on the extended-range path, and the overlay composite
+    # is deliberately linear there, so a lit scene or an antialias fringe makes
+    # them differ correctly. A debug view over the plane is neither, and gives
+    # far richer content than a single red segment. The run REFUSES either
+    # unsuitable combination rather than failing on a difference that is right.
+    add_test(NAME object_viewer_two_sink
+             COMMAND badlands_object_viewer --self-test-output --scene plane
+                     --debug-view triangle-id --width 128 --height 96
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+    # ...and the refusals themselves, so the guards cannot rot into no-ops.
+    add_test(NAME object_viewer_two_sink_refuses_tonemapped
+             COMMAND badlands_object_viewer --self-test-output --scene plane
+                     --debug-view lit --width 64 --height 64
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    set_tests_properties(object_viewer_two_sink_refuses_tonemapped
+                         PROPERTIES WILL_FAIL TRUE)
+    add_test(NAME object_viewer_two_sink_refuses_overlay
+             COMMAND badlands_object_viewer --self-test-output --scene lines
+                     --width 64 --height 64
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    set_tests_properties(object_viewer_two_sink_refuses_overlay
+                         PROPERTIES WILL_FAIL TRUE)
+
+    # The VISIBILITY BUFFER, asserted with no resolve at all: the R32Uint target
+    # is read back and every covered texel compared against a CPU ray/plane
+    # intersection. A stage checkable only through the next stage is not a
+    # stage — and this way a wrong resolve in 4d cannot be mistaken for a wrong
+    # raster here. Also asserts reversed-Z as an ordering between two GPU
+    # depths, which needs no tolerance.
+    add_test(NAME object_viewer_visbuffer
+             COMMAND badlands_object_viewer --self-test-visbuffer
+                     --width 256 --height 192
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+    # ONE PER DEBUG VIEW, each against a CPU evaluation of the same rule. The
+    # pack is SYNTHETIC (constant textures), so no assertion depends on a
+    # shipped data file and the mip level cannot affect nine of the ten — which
+    # confines mip prediction to the gradient test below, where it belongs.
+    foreach(view lit triangle-id barycentric depth albedo normal
+                 roughness metallic displacement ao)
+        string(REPLACE "-" "_" view_name "${view}")
+        add_test(NAME object_viewer_view_${view_name}
+                 COMMAND badlands_object_viewer --headless --debug-view ${view}
+                         --width 256 --height 192
+                         --out ${CMAKE_BINARY_DIR}/ov_view_${view_name}.png
+                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    endforeach()
+
+    # The near plane, which was this stage's highest-risk case: the resolve
+    # refetches the ORIGINAL, unclipped vertices, so a triangle with a vertex
+    # behind the eye divides by a non-positive w. The run REFUSES unless
+    # straddling triangles actually cover pixels, so it cannot pass vacuously.
+    add_test(NAME object_viewer_near_plane
+             COMMAND badlands_object_viewer --headless --debug-view barycentric
+                     --near-plane-camera --width 256 --height 192
+                     --out ${CMAKE_BINARY_DIR}/ov_near_plane.png
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+    # DOES HDR SURVIVE TO THE SURFACE? The point of the float scene target, and
+    # invisible in every other assertion — an 8-bit scene clamps the lit result
+    # inside the resolve and the frame still looks plausible. Two-sided: bright
+    # must exceed 1, and the same scene under a dim sun must not.
+    add_test(NAME object_viewer_hdr
+             COMMAND badlands_object_viewer --self-test-hdr
+                     --width 128 --height 96
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+    # Do consecutive frames write their uniforms to DISTINCT bytes? The GPU
+    # read/write race this guards is invisible in an image until frames overlap,
+    # and then it shows as intermittent smearing rather than as a failure — so
+    # it is asserted structurally, as rhi_lab and imgui_impl_rhi already do.
+    add_test(NAME object_viewer_frame_ring
+             COMMAND badlands_object_viewer --self-test-frame-ring
+                     --width 64 --height 64
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+    # The near-plane camera through the VISBUFFER entry point as well as the
+    # resolve's — the flag used to be accepted and ignored here.
+    add_test(NAME object_viewer_visbuffer_near_plane
+             COMMAND badlands_object_viewer --self-test-visbuffer
+                     --near-plane-camera --width 128 --height 96
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+    # Contradictory flags must be REFUSED, not resolved by argument order.
+    # --debug-view used to write opt.scene as it parsed, so a later --scene
+    # silently discarded it and the run asserted a different scene's oracle.
+    foreach(order "--debug-view;normal;--scene;lines" "--scene;lines;--debug-view;normal")
+        string(REPLACE ";" "" order_name "${order}")
+        string(REPLACE "-" "" order_name "${order_name}")
+        add_test(NAME object_viewer_refuses_${order_name}
+                 COMMAND badlands_object_viewer --headless ${order}
+                         --out ${CMAKE_BINARY_DIR}/ov_conflict.png
+                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+        set_tests_properties(object_viewer_refuses_${order_name}
+                             PROPERTIES WILL_FAIL TRUE)
+    endforeach()
+
+    # Are the analytic UV gradients selecting mips? TWO-SIDED against a
+    # checkerboard: the far band must be smooth (or mip 0 is being sampled
+    # everywhere) and the near band sharp (or an over-high mip is). Either
+    # assertion alone is satisfiable by the opposite bug.
+    add_test(NAME object_viewer_gradients
+             COMMAND badlands_object_viewer --self-test-gradients
+                     --width 256 --height 192
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+    # Each output mode asserted on its own, because the two-sink test compares
+    # the modes to EACH OTHER and would pass if both were wrong the same way.
+    # These pin the absolute values against the CPU transform.
+    foreach(present srgb p3 edr)
+        add_test(NAME object_viewer_present_${present}
+                 COMMAND badlands_object_viewer --headless --scene lines
+                         --present ${present} --width 64 --height 64
+                         --out ${CMAKE_BINARY_DIR}/object_viewer_${present}.png
+                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    endforeach()
 
     foreach(bad_args "--width;0" "--height;4294967297" "--frames;-1" "--nope")
         string(REPLACE ";" "_" bad_name "${bad_args}")
@@ -2020,6 +2228,21 @@ target_include_directories(badlands_relief_tests PRIVATE
 target_link_libraries(badlands_relief_tests PRIVATE badlands_patch_providers)
 add_test(NAME badlands_relief_tests COMMAND badlands_relief_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# badlands_patch_export_tests: the image ENCODINGS of PatchData (patch_export.hpp)
+# -- height with the watermap in the blue channel, the biome palette, the
+# hillshade. It links badlands_patch_providers and NOTHING else on purpose: the
+# encoders return pixel buffers and never touch the `assets` crate or the engine,
+# so this target is also the test that the split held.
+add_executable(badlands_patch_export_tests
+    src/mapgen/patch_export_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_patch_export_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_link_libraries(badlands_patch_export_tests PRIVATE badlands_patch_providers)
+add_test(NAME badlands_patch_export_tests COMMAND badlands_patch_export_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 # badlands_lake_surface_tests: pure-CPU tests for the per-lake water surface and
 # its buried skirt -- the overlap that keeps a later wave displacement from
 # opening a gap at the shoreline. Builds PatchData fixtures now, so it links
@@ -2198,7 +2421,10 @@ target_compile_options(shapeshifter_core PRIVATE -iquote${SHAPESHIFTER_DIR}/core
 # bundle has no such cwd, and the failure is silent and total: no compiler, no
 # pipelines, no renderer, a window that clears and draws nothing.
 target_compile_definitions(shapeshifter_core PRIVATE
-    SHAPESHIFTER_SHADER_DIR="${SHAPESHIFTER_DIR}/shaders")
+    SHAPESHIFTER_SHADER_DIR="${SHAPESHIFTER_DIR}/shaders"
+    # The engine's shared Slang modules, baked absolute for the same reason.
+    # output_transform lives there, and the editor presents through it.
+    BADLANDS_ENGINE_SLANG_DIR="${CMAKE_SOURCE_DIR}/shaders/slang/common")
 
 # DCSDD reconstruction is expensive numerical code (dense per-cell least-squares
 # solves x hundreds of cells x outer iterations). Unoptimized it runs ~43x slower
@@ -2307,6 +2533,11 @@ foreach(shader debug_lines mesh raymarch ground_grid)
                          ${SHAPESHIFTER_DIR}/shaders/slang/shapeshifter/${shader}.slang
                          -target metal -entry ${entry}
                          -I ${SHAPESHIFTER_DIR}/shaders
+                         # output_transform, which every fragment presents
+                         # through. Must match the editor's runtime search
+                         # paths (editor.cpp), or this compiles what the app
+                         # cannot.
+                         -I ${CMAKE_SOURCE_DIR}/shaders/slang/common
                          -o ${CMAKE_CURRENT_BINARY_DIR}/shapeshifter_${shader}_${entry}.metal
                  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     endforeach()

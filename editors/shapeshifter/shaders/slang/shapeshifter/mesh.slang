@@ -11,6 +11,8 @@
 #define SDF_SLANG 1
 #include "shared_types.h"
 
+import output_transform;  // EncodeOutput: the one place a colour reaches the surface
+
 StructuredBuffer<MeshVertex> vertices;
 ConstantBuffer<LineUniforms> line_uniforms;
 
@@ -33,5 +35,5 @@ MeshVarying vs_main(uint vid : SV_VertexID) {
 [shader("fragment")]
 float4 fs_main(MeshVarying in) : SV_Target {
     const float3 n = normalize(in.normal.xyz);
-    return float4(0.5 * (n + 1.0), 1.0);
+    return EncodeOutput(0.5 * (n + 1.0), 1.0, kOutputExtendedLinearP3);
 }

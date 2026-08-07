@@ -173,7 +173,11 @@ void Editor::attachLayer(void* caMetalLayer) {
     // compiler, no pipelines, no renderer, a window that clears and draws
     // nothing with no error anywhere.
     const std::string shaders = SHAPESHIFTER_SHADER_DIR;
-    const std::string search[] = {shaders + "/slang/shapeshifter", shaders};
+    // The engine's common modules ride along: every fragment here presents
+    // through output_transform, which is shared rather than transcribed so the
+    // editor and the engine cannot disagree about what an EDR surface wants.
+    const std::string search[] = {shaders + "/slang/shapeshifter", shaders,
+                                  BADLANDS_ENGINE_SLANG_DIR};
     impl_->compiler = badlands::slang::CreateSlangCompiler(search);
     if (!impl_->compiler) {
         spdlog::error("shapeshifter: no Slang compiler; the viewport will be blank");

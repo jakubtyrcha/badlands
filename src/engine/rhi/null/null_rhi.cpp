@@ -284,6 +284,12 @@ class NullSwapchain final : public ISwapchain {
   uint32_t GetWidth() const override { return desc_.width; }
   uint32_t GetHeight() const override { return desc_.height; }
   Format GetFormat() const override { return desc_.format; }
+  // Reported back unchanged, because Null has no layer to tag and therefore no
+  // way for tagging to fail. That is not a divergence from Metal (rule 6):
+  // Metal only rewrites these when it has a real window, and a Null swapchain
+  // never does. What both backends guarantee is the same -- these report what
+  // is actually presented -- and for Null that is always what was asked for.
+  ColorSpace GetColorSpace() const override { return desc_.color_space; }
 
   void SetFault(SwapchainFault f) { fault_ = f; }
   uint64_t PresentCount() const { return presented_; }
@@ -754,6 +760,11 @@ class NullDevice final : public IRhiDevice {
   }
 
   SwapchainPtr CreateSwapchain(const SwapchainDesc& d) override {
+    // The same shared refusal Metal applies, so a desc that is unconstructible
+    // on one backend is unconstructible on the other (rule 13). Null could
+    // "support" anything precisely because it presents nothing -- which is how
+    // a test would come to prove a combination that fails on real hardware.
+    if (!ValidateSwapchainDesc(d)) return nullptr;
     return std::make_unique<NullSwapchain>(*this, d, frames_in_flight_);
   }
 

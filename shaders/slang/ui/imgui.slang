@@ -60,5 +60,11 @@ VOut vs_imgui(uint vid : SV_VertexID) {
 
 [shader("fragment")]
 float4 fs_imgui(VOut i) : SV_Target {
-    return i.color * tex.Sample(samp, i.uv);
+    let c = i.color * tex.Sample(samp, i.uv);
+    // PREMULTIPLIED, because this draws into the UI overlay rather than onto
+    // the surface. The overlay is composited with "over" in encoded space, and
+    // premultiplied accumulation is what lets overlapping translucent panels
+    // and antialiased glyphs blend correctly among themselves first. Over an
+    // opaque background the composited RGB is identical either way.
+    return float4(c.rgb * c.a, c.a);
 }

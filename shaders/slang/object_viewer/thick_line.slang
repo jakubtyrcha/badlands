@@ -64,5 +64,11 @@ float4 fs_lines(VOut i) : SV_Target {
     // which is what makes the quad's corners invisible rather than square.
     float alpha = 1.0 - smoothstep(half_w, half_w + 1.0, d);
     if (alpha < 0.01) { discard; }
-    return float4(i.color, alpha);
+    // PREMULTIPLIED. This draws into the UI overlay, not straight onto a
+    // surface, and an overlay that will be composited with "over" has to
+    // accumulate premultiplied -- otherwise two overlapping translucent lines
+    // double-count their colour. Over an opaque background the result is
+    // identical to the non-premultiplied form, which is why the existing pixel
+    // assertions are unchanged.
+    return float4(i.color * alpha, alpha);
 }

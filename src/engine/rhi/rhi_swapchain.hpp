@@ -34,6 +34,36 @@ struct AcquiredFrame {
   ITextureView* view = nullptr;  // non-null exactly when status == Ok
 };
 
+// How the compositor must interpret what is presented.
+//
+// This is NOT decoration on top of the format. The format says how many bits a
+// channel has; this says what those bits MEAN -- which primaries they are in and
+// whether they carry a transfer curve. A surface whose values leave [0,1] has no
+// defined meaning at all without it, which is why ValidateSwapchainDesc refuses
+// that combination rather than presenting something the compositor must guess at.
+enum class ColorSpace : uint8_t {
+  // Untagged. Values are sRGB-encoded and in sRGB primaries -- what every
+  // existing call site has always meant, so it stays the default.
+  Srgb,
+  // Display P3 primaries, sRGB transfer curve. P3 deliberately reuses that
+  // curve, so an 8-bit surface changes gamut without changing encoding.
+  DisplayP3,
+  // Display P3 primaries, LINEAR, unbounded. The EDR path: values above 1.0
+  // reach the compositor as headroom instead of clipping at SDR white.
+  ExtendedLinearDisplayP3,
+};
+
+const char* ToString(ColorSpace s);
+
+// The shader-side output mode IS this enum, passed through as a uint --
+// "which colour space am I writing for" is one question, so it must not become
+// two values that can disagree (rule 5). shaders/slang/common/output_transform.slang
+// mirrors these numbers; the asserts make a reorder a compile error here rather
+// than a wrong image there.
+static_assert(uint8_t(ColorSpace::Srgb) == 0);
+static_assert(uint8_t(ColorSpace::DisplayP3) == 1);
+static_assert(uint8_t(ColorSpace::ExtendedLinearDisplayP3) == 2);
+
 struct SwapchainDesc {
   // Platform handle: a CAMetalLayer* or NSWindow* on macOS, an HWND on
   // Windows. Null asks for a headless swapchain, which is what makes the
@@ -47,9 +77,23 @@ struct SwapchainDesc {
   uint32_t height = 0;
 
   Format format = Format::BGRA8Unorm;
+  // Default Srgb, so every call site written before this existed keeps its
+  // exact behaviour: untagged, which is what they already got.
+  ColorSpace color_space = ColorSpace::Srgb;
   bool vsync = true;
   std::string label;
 };
+
+// Refuses a desc that cannot be presented meaningfully. Shared rather than
+// per-backend so Metal and Null cannot disagree about what is constructible
+// (rule 13), and returns false AFTER logging what it refused and why.
+//
+// The one refusal today: an extended-range surface on a real window with no
+// colour space. Linear values into an untagged layer have no defined transfer,
+// so the compositor applies whatever it assumes -- an image that is wrong in a
+// way that looks like a grading choice. Headless is exempt: nothing is
+// presented, so there is no transfer to define.
+bool ValidateSwapchainDesc(const SwapchainDesc& desc);
 
 class ISwapchain {
  public:
@@ -85,7 +129,14 @@ class ISwapchain {
 
   virtual uint32_t GetWidth() const = 0;
   virtual uint32_t GetHeight() const = 0;
+
+  // What the swapchain ACTUALLY presents, which is not always what was asked
+  // for: tagging a layer can fail at runtime, and the recovery is to drop to an
+  // 8-bit format rather than present untagged linear. A caller that built
+  // pipelines against the requested format would then be one silent mismatch
+  // away from a validation failure, so it must read both back from here.
   virtual Format GetFormat() const = 0;
+  virtual ColorSpace GetColorSpace() const = 0;
 };
 
 using SwapchainPtr = std::unique_ptr<ISwapchain>;

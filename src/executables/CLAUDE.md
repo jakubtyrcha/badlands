@@ -9,8 +9,17 @@ Each app owns an `AppView` and builds its scene from the world itself; the app s
 | `badlands_ai_sandbox` | the AI harness, driven by a `--mode` |
 | `badlands_viewer` | model/LOD viewer, plus the character/skeleton viewer (`--character`) |
 | `badlands_mapview` | the map tool (see `src/mapgen/CLAUDE.md`) |
+| `badlands_patch_export` | the map tool's headless half: coarse-world windows → height/biome/hillshade PNGs |
 | `badlands_rhi_lab` | the RHI/Slang/visibility-buffer MVP — PNG by default, `--window` for a live camera |
 | `badlands_object_viewer` | the RHI + render-graph successor to `badlands_viewer` |
+
+## `badlands_patch_export` has no `AppView`, and no GPU at all
+It links `badlands_patch_providers` plus the `assets` crate for the PNG write —
+no engine, no SDL, no Dawn. It lives here because it is an app with CLI flags,
+not because it renders. It is the offline half of the map tool: the same
+`CoarseWorldPatchSource::Fetch` mapview uses, written to images instead of a
+swapchain, so a stage-2 change can be judged without a display. See
+`patch_export/README.md`.
 
 ## The RHI apps are not `AppView`s, and they share a shell
 `badlands_rhi_lab` and `badlands_object_viewer` build on `badlands_rhi` (+
@@ -43,9 +52,35 @@ The headless run **verifies its own pixels and exits non-zero on mismatch** — 
 is the assertion, since there is no test framework around it. Writing a PNG and exiting 0
 would pass just as well against a graph that recorded no pass at all.
 
-- **`--scene clear|lines|grid`, and each scene carries its OWN assertion.** "Every texel is
-  the clear colour" and "a segment covers these texels" are different claims; a run that
-  could not say which it checked would be checking neither.
+- **`--scene clear|lines|grid|plane`, and each scene carries its OWN assertion.** "Every
+  texel is the clear colour" and "a segment covers these texels" are different claims; a run
+  that could not say which it checked would be checking neither.
+- **THREE targets, and the split is the design.** `scene` is RGBA16Float and LINEAR, so
+  lighting keeps its headroom; `ui` is RGBA8Unorm, ENCODED and PREMULTIPLIED, because that
+  is the space UI blending is authored for; one output pass tonemaps, composites and
+  converts. Drawing ImGui straight into a linear surface lands a 50%-alpha panel at encoded
+  0.735 instead of 0.5. The engine reached the same arrangement in `common/ui_composite.wesl`.
+- **The overlay composite is LINEAR on an extended-range surface and ENCODED on an 8-bit
+  one.** Encoding clamps, so the encoded form destroyed the scene's headroom at ANY
+  non-zero alpha — a 1/255 glyph fringe drew a dark ring around every window on an HDR
+  display. The two agree at alpha 0 and 1 and differ only in between, which is why
+  `--self-test-output` refuses a scene with an overlay.
+- **The tone curve is a fit to the display's range, so the EDR path has none.** Reinhard
+  maps every input into [0,1) by construction. `AppliesTonemap` is shared by the shader and
+  the CPU oracles so they cannot disagree about it.
+- **`--present srgb|p3|edr`** picks the surface's colour space (`edr` also makes the sink
+  `RGBA16Float`, which is how the extended-range path is reachable with no HDR display).
+  Windowed asks for P3 and upgrades to EDR when the display reports HDR.
+- **`--debug-view <name>` covers all ten views the `Graphics debug` window offers**, from one
+  table — a test iterates the enum, so a UI-only mode with no headless assertion cannot exist.
+- **The headless view oracles use a SYNTHETIC constant pack, not a shipped one.** Constant
+  textures make the mip level irrelevant, which confines mip prediction to
+  `--self-test-gradients` (two-sided against a checkerboard). An explicit `--pack` is
+  honoured and the exact comparisons are skipped, with the reason logged.
+- **`--self-test-visbuffer` asserts the R32Uint target directly, with no resolve**;
+  `--self-test-output` renders the same frame into an 8-bit and a float sink and requires
+  them to agree; `--near-plane-camera` REFUSES unless straddling triangles actually cover
+  pixels, so it cannot pass vacuously.
 - **The debug UI is Dear ImGui through `imgui_impl_rhi`, not `imgui_impl_metal`.** One
   backend serves Metal, DX12 and Null, and it keeps the RHI seam sealed — a native encoder
   handed out of the RHI is a compile error on purpose. ImGui is added to the graph LAST, so

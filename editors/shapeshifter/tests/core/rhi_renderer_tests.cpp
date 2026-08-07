@@ -24,7 +24,9 @@ namespace {
 std::unique_ptr<badlands::slang::SlangCompiler> MakeCompiler() {
   const std::string paths[] = {
       "editors/shapeshifter/shaders/slang/shapeshifter",
-      "editors/shapeshifter/shaders"};
+      "editors/shapeshifter/shaders",
+      // output_transform, which every fragment here presents through.
+      "shaders/slang/common"};
   return badlands::slang::CreateSlangCompiler(paths);
 }
 

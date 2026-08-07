@@ -422,15 +422,40 @@ void RhiRenderer::RenderFrame(const SceneDocument& doc, int32_t selected_id,
     }
 
     if (!swapchain_) {
-        swapchain_ = device_->CreateSwapchain({.native_window = layer_,
-                                               .width = width_px_,
-                                               .height = height_px_,
-                                               .format = color_format_,
-                                               .vsync = true,
-                                               .label = "shapeshifter"});
+        swapchain_ = device_->CreateSwapchain(
+            {.native_window = layer_,
+             .width = width_px_,
+             .height = height_px_,
+             .format = color_format_,
+             // EDR, and REQUIRED rather than preferred: color_format_ is
+             // RGBA16Float, and ValidateSwapchainDesc refuses an extended-range
+             // format on a real layer with no colour space -- linear values in
+             // an untagged surface have no defined transfer. The shaders encode
+             // for exactly this space through output_transform.
+             .color_space = badlands::rhi::ColorSpace::ExtendedLinearDisplayP3,
+             .vsync = true,
+             .label = "shapeshifter"});
         if (!swapchain_) {
             spdlog::error("shapeshifter: could not create the swapchain");
             return;
+        }
+        // READ BACK, because tagging can fail and the swapchain recovers by
+        // abandoning the float format. The pipelines were built at
+        // color_format_ before this swapchain existed, and every fragment
+        // encodes for extended-linear P3 as a compile-time constant -- so a
+        // downgrade is a mismatch nothing here can absorb. Report it rather
+        // than render confidently in the wrong space.
+        if (swapchain_->GetColorSpace() !=
+                badlands::rhi::ColorSpace::ExtendedLinearDisplayP3 ||
+            swapchain_->GetFormat() != color_format_) {
+            spdlog::error(
+                "shapeshifter: asked to present {} / {}, got {} / {}; the "
+                "pipelines and the output encoding are built for the former",
+                badlands::rhi::ToString(color_format_),
+                badlands::rhi::ToString(
+                    badlands::rhi::ColorSpace::ExtendedLinearDisplayP3),
+                badlands::rhi::ToString(swapchain_->GetFormat()),
+                badlands::rhi::ToString(swapchain_->GetColorSpace()));
         }
         pending_resize_ = false; // created at the current size
     }

@@ -10,6 +10,8 @@
 #include "shared_types.h"
 #include "sdf_scene.h"
 
+import output_transform;  // EncodeOutput: the one place a colour reaches the surface
+
 ConstantBuffer<RaymarchUniforms> uniforms;
 StructuredBuffer<SdfNode> nodes;
 
@@ -106,7 +108,7 @@ RaymarchOut fs_main(float4 frag_coord : SV_Position) {
 
     const float4 clip = mul(uniforms.view_proj, float4(p, 1.0));
 
-    out.color = float4(0.5 * (n + 1.0), 1.0);
+    out.color = EncodeOutput(0.5 * (n + 1.0), 1.0, kOutputExtendedLinearP3);
     // Reversed-Z, so the near plane is 1.0: clip.z/clip.w can land fractionally
     // ABOVE 1.0 for an oblique hit found at t ~= near (the hit epsilon lets p
     // sit just short of the near plane). The hardware clamps depth writes to
