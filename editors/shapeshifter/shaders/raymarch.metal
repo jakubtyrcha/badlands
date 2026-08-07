@@ -111,11 +111,11 @@ fragment RaymarchOut raymarch_fragment(
 
     RaymarchOut out;
     out.color = float4(0.5 * (n + 1.0), 1.0);
-    // clip.z / clip.w can land fractionally below 0.0 for an oblique hit
-    // found at t ~= near (the hit epsilon's tolerance lets p sit just short
-    // of the near plane); the hardware clamps depth writes to [0,1], so this
-    // is silently harmless. Only reachable with the camera nearly touching a
-    // surface.
+    // Reversed-Z, so the near plane is 1.0: clip.z / clip.w can land
+    // fractionally ABOVE 1.0 for an oblique hit found at t ~= near (the hit
+    // epsilon's tolerance lets p sit just short of the near plane). The
+    // hardware clamps depth writes to [0,1], so this is silently harmless.
+    // Only reachable with the camera nearly touching a surface.
     out.depth = clip.z / clip.w;
     return out;
 }

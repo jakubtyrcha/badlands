@@ -1,12 +1,24 @@
 #pragma once
 
 // SDF scene representation, CSG evaluation, and ray-generation -- the single
-// source of truth shared by the CPU (DCSDD sampling, core/src/sdf.cpp) and
-// the GPU raymarch shader (shaders/raymarch.metal).
-// Dual-compile: this header is included from both plain C++ (core/) and MSL
-// (shaders/*.metal). MSL has neither <simd/simd.h> nor <cfloat>/std::, so
-// every type and math call below is selected via __METAL_VERSION__, the same
-// idiom shared_types.h uses for its own typedefs.
+// source of truth shared by the CPU (picking, DCSDD sampling, core/src/sdf.cpp)
+// and the GPU raymarch shader.
+//
+// TRIPLE-COMPILE: plain C++ (core/), MSL (shaders/*.metal) and Slang
+// (shaders/slang/shapeshifter/*.slang, which define SDF_SLANG before including
+// this). None of them share a standard library -- MSL has no <simd/simd.h> or
+// <cfloat>, Slang has neither plus no `sizeof` and no raw pointers -- so every
+// type and math call is selected in the shim block below, the same idiom
+// shared_types.h uses for its own typedefs.
+//
+// WHY A THIRD ARM RATHER THAN A SECOND FILE. Only the shim block is
+// language-specific; the ~450 lines of SDF math below are already written
+// against it and are language-neutral as a result. Porting the GPU side to
+// Slang by transcription would have copied those 450 lines to drift on their
+// own, to catch a class of error the compiler catches here for 43 lines. The
+// picking/rendering agreement this preserves is no longer REQUIRED -- see
+// core/src/picking.h -- it is simply free, and stays free until the raymarch
+// pass is replaced, at which point this arm is deleted rather than reconciled.
 
 #include "shared_types.h" // sq_float4, sq_float4x4
 
@@ -15,7 +27,16 @@
 // float2) from shared STRUCTS, where MSL's 16-byte float3 would silently
 // desync from the host layout. Nothing below is ever a struct field; the 2D
 // types exist because most of the shape SDFs work in a (radial, axial) plane.
-#ifdef __METAL_VERSION__
+#if defined(SDF_SLANG)
+// ground_grid.h typedefs sq_float2 too, and the ground-grid shader includes
+// both headers. C++ and MSL accept an identical typedef twice; Slang reports it
+// as an AMBIGUOUS REFERENCE at every use site, so the two agree on one guard.
+#ifndef SQ_FLOAT2_DEFINED
+#define SQ_FLOAT2_DEFINED
+typedef float2 sq_float2;
+#endif
+typedef float3 sq_float3;
+#elif defined(__METAL_VERSION__)
 typedef metal::float2 sq_float2;
 typedef metal::float3 sq_float3;
 #else
@@ -29,7 +50,7 @@ typedef simd_float3 sq_float3;
 // <cfloat> define FLT_MAX with this exact literal) so the two branches agree
 // bit-for-bit once rounded to float32; the C++ branch uses the real FLT_MAX
 // so it is exact by construction, not just "close".
-#ifdef __METAL_VERSION__
+#if defined(SDF_SLANG) || defined(__METAL_VERSION__)
 #define SDF_FLT_MAX 3.402823466e+38f
 #else
 #define SDF_FLT_MAX FLT_MAX
@@ -39,7 +60,11 @@ typedef simd_float3 sq_float3;
 // arbitrary size (the raymarch shader's node-array binding -- `constant` is
 // for small fixed-size setFragmentBytes data, not this); plain C++ has no
 // address spaces, so a packed node array is just `const T*` there.
-#ifdef __METAL_VERSION__
+#if defined(SDF_SLANG)
+// Slang has no raw buffer pointers; a StructuredBuffer indexes identically at
+// the call site (`nodes[i]`), which is all sdf_fold below asks of it.
+#define SDF_NODE_PTR StructuredBuffer<SdfNode>
+#elif defined(__METAL_VERSION__)
 #define SDF_NODE_PTR device const SdfNode*
 #else
 #define SDF_NODE_PTR const SdfNode*
@@ -50,7 +75,42 @@ typedef simd_float3 sq_float3;
 // free functions per __METAL_VERSION__, so the actual SDF/ray-gen code below
 // reads the same in both languages. Kept to exactly what this file needs.
 
-#ifdef __METAL_VERSION__
+#if defined(SDF_SLANG)
+// Slang's builtins are unprefixed and match one-for-one, so this arm is a
+// straight renaming -- which is the whole reason the SDF bodies below could be
+// shared with a third language at all rather than transcribed into one.
+inline float sdf_abs(float v) { return abs(v); }
+inline sq_float3 sdf_abs(sq_float3 v) { return abs(v); }
+inline sq_float2 sdf_min(sq_float2 a, sq_float2 b) { return min(a, b); }
+inline sq_float2 sdf_max(sq_float2 a, sq_float2 b) { return max(a, b); }
+inline sq_float3 sdf_min(sq_float3 a, sq_float3 b) { return min(a, b); }
+inline sq_float3 sdf_max(sq_float3 a, sq_float3 b) { return max(a, b); }
+inline float sdf_min(float a, float b) { return min(a, b); }
+inline float sdf_max(float a, float b) { return max(a, b); }
+inline float sdf_length(sq_float2 v) { return length(v); }
+inline float sdf_length(sq_float3 v) { return length(v); }
+inline float sdf_dot(sq_float2 a, sq_float2 b) { return dot(a, b); }
+inline sq_float3 sdf_cross(sq_float3 a, sq_float3 b) { return cross(a, b); }
+inline sq_float3 sdf_normalize(sq_float3 v) { return normalize(v); }
+inline float sdf_reduce_max(sq_float3 v) { return max(v.x, max(v.y, v.z)); }
+inline float sdf_reduce_min(sq_float3 v) { return min(v.x, min(v.y, v.z)); }
+inline float sdf_sqrt(float v) { return sqrt(v); }
+inline float sdf_floor(float v) { return floor(v); }
+inline float sdf_cos(float v) { return cos(v); }
+inline float sdf_sin(float v) { return sin(v); }
+inline float sdf_atan2(float y, float x) { return atan2(y, x); }
+inline sq_float2 sdf_make2(float x, float y) { return sq_float2(x, y); }
+inline sq_float3 sdf_make3(float x, float y, float z) { return sq_float3(x, y, z); }
+inline sq_float4 sdf_make4(float x, float y, float z, float w) { return sq_float4(x, y, z, w); }
+inline sq_float4 sdf_transform(sq_float4x4 m, sq_float4 v) { return mul(m, v); }
+// THE ONE PLACE THE THREE LANGUAGES DISAGREE SEMANTICALLY. simd and MSL expose
+// a matrix's columns directly; Slang indexes BY ROW, so m[i] there is row i and
+// reading it as a column silently yields the transpose. Gathering the column
+// component-wise is what keeps sdf_ray_for_pixel's eye recovery correct.
+inline sq_float4 sdf_column(sq_float4x4 m, int i) {
+    return sq_float4(m[0][i], m[1][i], m[2][i], m[3][i]);
+}
+#elif defined(__METAL_VERSION__)
 inline float sdf_abs(float v) { return metal::abs(v); }
 inline sq_float3 sdf_abs(sq_float3 v) { return metal::abs(v); }
 inline sq_float2 sdf_min(sq_float2 a, sq_float2 b) { return metal::min(a, b); }
@@ -75,6 +135,7 @@ inline sq_float2 sdf_make2(float x, float y) { return sq_float2(x, y); }
 inline sq_float3 sdf_make3(float x, float y, float z) { return sq_float3(x, y, z); }
 inline sq_float4 sdf_make4(float x, float y, float z, float w) { return sq_float4(x, y, z, w); }
 inline sq_float4 sdf_transform(sq_float4x4 m, sq_float4 v) { return m * v; }
+inline sq_float4 sdf_column(sq_float4x4 m, int i) { return m.columns[i]; }
 #else
 inline float sdf_abs(float v) { return std::fabs(v); }
 inline sq_float3 sdf_abs(sq_float3 v) { return simd_abs(v); }
@@ -100,6 +161,7 @@ inline sq_float2 sdf_make2(float x, float y) { return simd_make_float2(x, y); }
 inline sq_float3 sdf_make3(float x, float y, float z) { return simd_make_float3(x, y, z); }
 inline sq_float4 sdf_make4(float x, float y, float z, float w) { return simd_make_float4(x, y, z, w); }
 inline sq_float4 sdf_transform(sq_float4x4 m, sq_float4 v) { return simd_mul(m, v); }
+inline sq_float4 sdf_column(sq_float4x4 m, int i) { return m.columns[i]; }
 #endif
 
 // Language-independent, so written once rather than dispatched.
@@ -152,7 +214,7 @@ typedef struct {
 // Compiled under both __METAL_VERSION__ (a future raymarch .metal TU) and
 // plain C++ (core/tests), via the dual-compile typedefs above -- so this one
 // assert covers both sides, matching shared_types.h's MeshVertex precedent.
-static_assert(sizeof(SdfNode) == 64, "SdfNode must be 64 bytes");
+SDF_STATIC_ASSERT(sizeof(SdfNode) == 64, "SdfNode must be 64 bytes");
 
 // Shape ids, as they ride in pos_shape.w. #defines rather than an enum because
 // this header compiles as MSL, which cannot include the interop header where
@@ -550,11 +612,21 @@ struct SdfRay {
 // viewport size and the inverse view-projection matrix (compute via
 // simd_inverse/metal::inverse on the caller's side; not recomputed here).
 //
-// direction: unprojects the pixel at Metal clip z=0 (near) and z=1 (far),
+// direction: unprojects the pixel at clip z=1 (near) and z=0 (far),
 // perspective-divides both to world space, and normalizes (far - near).
 //
+// THOSE TWO CONSTANTS ARE REVERSED-Z (see camera.cpp), and they are
+// load-bearing: swapping them negates the ray, which aims every trace behind
+// the camera and renders nothing at all. tests/core/sdf_scene_tests.cpp pins
+// this against Camera::ray_through_view_point, which is how the flip to
+// reversed-Z was caught.
+//
+// The eye recovery below needs no such change: it depends only on P's 4th
+// column being (0, 0, c, 0) for some nonzero c, and on row 3 being (0,0,-1,0).
+// Reversed-Z changes c's value and sign, both of which cancel.
+//
 // origin: the eye (center of projection), *not* the near-plane point --
-// Camera::kNear is 0.1, so the near point sits a non-negligible distance
+// Camera::kNear is 0.05, so the near point sits a non-negligible distance
 // from eye along the ray and would not agree with
 // Camera::ray_through_view_point's origin to tight tolerance. Recovered
 // algebraically from inv_view_proj alone (no separate eye/near/far input):
@@ -563,7 +635,7 @@ struct SdfRay {
 //   inverse(V) * (0,0,0,1) == inv_view_proj * (P * (0,0,0,1))
 // and P * (0,0,0,1) is exactly P's 4th column, (0, 0, c, 0) for some nonzero
 // constant c (the only nonzero component is z) -- so the right-hand side is
-// c * inv_view_proj.columns[2]. Dividing that column's xyz by its own w
+// c * sdf_column(inv_view_proj, 2). Dividing that column's xyz by its own w
 // cancels the unknown c and yields eye exactly. (Verified numerically
 // against this project's pinned camera literals before writing this code;
 // see the R0 report.)
@@ -572,8 +644,8 @@ inline SdfRay sdf_ray_for_pixel(float px, float py, float viewport_w, float view
     const float ndc_x = 2.0f * px / viewport_w - 1.0f;
     const float ndc_y = 1.0f - 2.0f * py / viewport_h;
 
-    const sq_float4 clip_near = sdf_make4(ndc_x, ndc_y, 0.0f, 1.0f);
-    const sq_float4 clip_far = sdf_make4(ndc_x, ndc_y, 1.0f, 1.0f);
+    const sq_float4 clip_near = sdf_make4(ndc_x, ndc_y, 1.0f, 1.0f);
+    const sq_float4 clip_far = sdf_make4(ndc_x, ndc_y, 0.0f, 1.0f);
 
     const sq_float4 world_near_h = sdf_transform(inv_view_proj, clip_near);
     const sq_float4 world_far_h = sdf_transform(inv_view_proj, clip_far);
@@ -584,7 +656,7 @@ inline SdfRay sdf_ray_for_pixel(float px, float py, float viewport_w, float view
     SdfRay ray;
     ray.dir = sdf_normalize(world_far - world_near);
 
-    const sq_float4 col2 = inv_view_proj.columns[2];
+    const sq_float4 col2 = sdf_column(inv_view_proj, 2);
     ray.origin = col2.xyz / col2.w;
 
     return ray;

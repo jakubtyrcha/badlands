@@ -23,6 +23,13 @@ git submodule update --init --recursive
 git lfs pull                           # fetch the ~35 MB of LFS binaries
 ```
 
+You also need the **Slang shader compiler**, which is gitignored rather than
+vendored. It is a hard prerequisite — CMake refuses to configure without it:
+
+```sh
+scripts/fetch_slang.sh                 # ~57 MB, pinned version, checksum verified
+```
+
 ## Git LFS
 
 Binary assets live in git LFS. `.gitattributes` tracks `*.bin`, `*.jpg`, `*.jpeg`,

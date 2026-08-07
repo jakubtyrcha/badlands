@@ -632,6 +632,11 @@ class NullCommandEncoder final : public ICommandEncoder {
       c.first_color_load = desc.color_attachments[0].load_op;
       c.first_color_store = desc.color_attachments[0].store_op;
     }
+    if (c.has_depth) {
+      c.depth_load = desc.depth_attachment.load_op;
+      c.depth_store = desc.depth_attachment.store_op;
+      c.depth_read_only = desc.depth_attachment.read_only;
+    }
     log_->Record(std::move(c));
     render_passes_.push_back(
         std::make_unique<NullRenderPass>(log_, desc.label));

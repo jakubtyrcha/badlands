@@ -33,6 +33,13 @@ TexturePtr MakeTarget(IRhiDevice& d, const char* label = "target") {
                           .label = label});
 }
 
+TexturePtr MakeDepth(IRhiDevice& d, const char* label = "depth") {
+  return d.CreateTexture({.width = 16, .height = 16,
+                          .format = Format::Depth32Float,
+                          .usage = TextureUsage::DepthStencil,
+                          .label = label});
+}
+
 // Runs a graph inside a validation scope and returns what the decorator saw.
 // Empty means clean. REQUIREs that a report exists at all -- nullopt would mean
 // nothing was checked, which a caller could otherwise read as success.
@@ -150,10 +157,50 @@ TEST_CASE("graph: a pass with no callback is refused", "[graph]") {
   CHECK_FALSE(g.Compile());
 }
 
-TEST_CASE("graph: a raster pass with no colour target is refused", "[graph]") {
+TEST_CASE("graph: a raster pass with neither colour nor depth is refused",
+          "[graph]") {
+  // Colour alone is no longer the test: a depth-only shadow pass renders
+  // somewhere, it just renders depth. Declaring NEITHER is still nowhere.
   auto d = MakeDevice();
   RenderGraph g(*d);
   g.AddRasterPass("nowhere").Execute([](const RasterContext&) {});
+  CHECK_FALSE(g.Compile());
+}
+
+TEST_CASE("graph: depth-testing what nothing has written is refused",
+          "[graph]") {
+  // Same defect as reading an unwritten texture, wearing a different
+  // attachment: the pass tests against whatever the memory held. It has to be
+  // refused for the same reason, which is why DepthReadOnly counts as a read.
+  auto d = MakeDevice();
+  RenderGraph g(*d);
+  auto target = MakeTarget(*d);
+  auto out = g.ImportTexture(target.get(), ResourceState::Undefined, "out");
+  auto depth = g.CreateTexture({.width = 16, .height = 16,
+                                .format = Format::Depth32Float,
+                                .usage = TextureUsage::DepthStencil,
+                                .label = "depth"});
+  g.AddRasterPass("overlay")
+      .ColorTarget(out)
+      .DepthReadOnly(depth)
+      .Execute([](const RasterContext&) {});
+  CHECK_FALSE(g.Compile());
+}
+
+TEST_CASE("graph: a colour texture declared as depth is refused", "[graph]") {
+  // The backend would refuse the render pass anyway; refusing here is what
+  // names the pass and the resource instead of failing at record time.
+  auto d = MakeDevice();
+  RenderGraph g(*d);
+  auto target = MakeTarget(*d);
+  auto out = g.ImportTexture(target.get(), ResourceState::Undefined, "out");
+  auto not_depth = MakeTarget(*d, "not_depth");
+  auto wrong = g.ImportTexture(not_depth.get(), ResourceState::Undefined,
+                               "wrong");
+  g.AddRasterPass("mistake")
+      .ColorTarget(out)
+      .DepthTarget(wrong)
+      .Execute([](const RasterContext&) {});
   CHECK_FALSE(g.Compile());
 }
 
@@ -372,4 +419,194 @@ TEST_CASE("graph: a compiled graph can be executed more than once", "[graph]") {
       CHECK(n == first_transitions);
     }
   }
+}
+
+// --- Depth, which is what the editor's frame is shaped like -----------------
+
+TEST_CASE("graph: depth written then depth-tested declares DepthWrite then "
+          "DepthRead", "[graph]") {
+  // Shapeshifter's frame in miniature, and the reason depth reached the graph
+  // at all: geometry writes the buffer, then an overlay tests against it
+  // without writing. The two need DIFFERENT states, and a graph that emitted
+  // DepthWrite for both would render correctly on Metal and corrupt on DX12.
+  auto d = MakeDevice();
+  RenderGraph g(*d);
+  auto backbuffer = MakeTarget(*d, "backbuffer");
+  auto depth_tex = MakeDepth(*d);
+  auto out = g.ImportTexture(backbuffer.get(), ResourceState::Undefined, "out");
+  auto depth = g.ImportTexture(depth_tex.get(), ResourceState::Undefined,
+                               "depth");
+
+  int ran = 0;
+  g.AddRasterPass("geometry")
+      .ColorTarget(out)
+      .DepthTarget(depth, LoadOp::Clear, StoreOp::Store, 0.0f)
+      .Execute([&](const RasterContext& ctx) {
+        ++ran;
+        CHECK(ctx.width == 16);
+        CHECK(ctx.height == 16);
+      });
+  g.AddRasterPass("overlay")
+      .ColorTarget(out, LoadOp::Load)
+      .DepthReadOnly(depth)
+      .Execute([&](const RasterContext&) { ++ran; });
+  REQUIRE(g.Compile());
+
+  auto* log = null::GetCommandLog(*d);
+  REQUIRE(log != nullptr);
+  log->Clear();
+  const std::string violations = RunUnderValidation(*d, g);
+  INFO(violations);
+  CHECK(violations.empty());
+  CHECK(ran == 2);
+  // Both passes began, and the depth resource really did move between states
+  // rather than being declared once and left there.
+  CHECK(log->Count(null::RecordedCommand::Kind::BeginRenderPass) == 2);
+  CHECK(log->Count(null::RecordedCommand::Kind::Transition) >= 3);
+}
+
+TEST_CASE("graph: a depth-only pass renders, and sizes itself from depth",
+          "[graph]") {
+  // A shadow pass has no colour attachment to take an extent from. Falling back
+  // to the depth attachment is what keeps the viewport matching what the pass
+  // renders into -- the same guarantee the colour path already gives.
+  auto d = MakeDevice();
+  RenderGraph g(*d);
+  auto depth_tex = MakeDepth(*d, "shadow");
+  auto depth = g.ImportTexture(depth_tex.get(), ResourceState::Undefined,
+                               "shadow");
+
+  bool ran = false;
+  g.AddRasterPass("shadow")
+      .DepthTarget(depth)
+      .Execute([&](const RasterContext& ctx) {
+        ran = true;
+        CHECK(ctx.width == 16);
+        CHECK(ctx.height == 16);
+      });
+  REQUIRE(g.Compile());
+
+  const std::string violations = RunUnderValidation(*d, g);
+  INFO(violations);
+  CHECK(violations.empty());
+  CHECK(ran);
+}
+
+TEST_CASE("graph: a transient depth texture is created at Compile", "[graph]") {
+  // The editor owns no depth texture of its own once ported -- the graph makes
+  // it. Sizing and lifetime therefore have to work for a depth format, not just
+  // for colour.
+  auto d = MakeDevice();
+  RenderGraph g(*d);
+  auto backbuffer = MakeTarget(*d, "backbuffer");
+  auto out = g.ImportTexture(backbuffer.get(), ResourceState::Undefined, "out");
+  auto depth = g.CreateTexture({.width = 16, .height = 16,
+                                .format = Format::Depth32Float,
+                                .usage = TextureUsage::DepthStencil,
+                                .label = "transient_depth"});
+
+  bool ran = false;
+  g.AddRasterPass("geometry")
+      .ColorTarget(out)
+      .DepthTarget(depth)
+      .Execute([&](const RasterContext&) { ran = true; });
+  REQUIRE(g.Compile());
+
+  const std::string violations = RunUnderValidation(*d, g);
+  INFO(violations);
+  CHECK(violations.empty());
+  CHECK(ran);
+}
+
+// --- The three the first draft of depth got wrong ---------------------------
+
+TEST_CASE("graph: a TRANSIENT colour texture declared as depth is refused",
+          "[graph]") {
+  // The imported case was covered and the transient one was not, which is
+  // backwards: transients are created AFTER validation runs, so asking the
+  // texture for its format read a null pointer and the check quietly did not
+  // run -- for the graph-owned depth buffer that is the common case.
+  auto d = MakeDevice();
+  RenderGraph g(*d);
+  auto target = MakeTarget(*d);
+  auto out = g.ImportTexture(target.get(), ResourceState::Undefined, "out");
+  auto wrong = g.CreateTexture({.width = 16, .height = 16,
+                                .format = Format::RGBA8Unorm,  // not depth
+                                .usage = TextureUsage::RenderTarget,
+                                .label = "not_depth_transient"});
+  g.AddRasterPass("mistake")
+      .ColorTarget(out)
+      .DepthTarget(wrong)
+      .Execute([](const RasterContext&) {});
+  CHECK_FALSE(g.Compile());
+}
+
+TEST_CASE("graph: a read-only depth pass STORES depth, so the next pass can "
+          "still read it", "[graph]") {
+  // Discard does not mean "I changed nothing" -- it means the contents are
+  // undefined afterwards. Two overlays sharing one depth buffer is the exact
+  // shape DepthReadOnly exists for, and discarding in the first makes the
+  // second test against garbage. Metal renders that plausibly, which is why the
+  // op is recorded and asserted rather than eyeballed.
+  auto d = MakeDevice();
+  RenderGraph g(*d);
+  auto backbuffer = MakeTarget(*d, "backbuffer");
+  auto depth_tex = MakeDepth(*d);
+  auto out = g.ImportTexture(backbuffer.get(), ResourceState::Undefined, "out");
+  auto depth = g.ImportTexture(depth_tex.get(), ResourceState::Undefined,
+                               "depth");
+
+  g.AddRasterPass("geometry")
+      .ColorTarget(out)
+      .DepthTarget(depth)
+      .Execute([](const RasterContext&) {});
+  g.AddRasterPass("overlay_a")
+      .ColorTarget(out, LoadOp::Load)
+      .DepthReadOnly(depth)
+      .Execute([](const RasterContext&) {});
+  g.AddRasterPass("overlay_b")
+      .ColorTarget(out, LoadOp::Load)
+      .DepthReadOnly(depth)
+      .Execute([](const RasterContext&) {});
+  REQUIRE(g.Compile());
+
+  auto* log = null::GetCommandLog(*d);
+  REQUIRE(log != nullptr);
+  log->Clear();
+  const std::string violations = RunUnderValidation(*d, g);
+  INFO(violations);
+  CHECK(violations.empty());
+
+  REQUIRE(log->Count(null::RecordedCommand::Kind::BeginRenderPass) == 3);
+  for (size_t i = 0; i < 3; ++i) {
+    const auto* rp = log->Find(null::RecordedCommand::Kind::BeginRenderPass, i);
+    REQUIRE(rp != nullptr);
+    CAPTURE(i, rp->label);
+    CHECK(rp->has_depth);
+    // NOT Discard, in any of the three: the geometry pass has depth to keep,
+    // and each overlay has to leave it intact for the one after it.
+    CHECK(rp->depth_store == StoreOp::Store);
+  }
+  // The overlays load what geometry wrote, and declare themselves read-only.
+  for (size_t i = 1; i < 3; ++i) {
+    const auto* rp = log->Find(null::RecordedCommand::Kind::BeginRenderPass, i);
+    CAPTURE(i);
+    CHECK(rp->depth_load == LoadOp::Load);
+    CHECK(rp->depth_read_only);
+  }
+}
+
+TEST_CASE("graph: a pass whose only depth is read-only renders nowhere",
+          "[graph]") {
+  // No colour to draw into and no depth to update. "Has a depth target" was too
+  // weak a test for renders-somewhere; it has to be depth the pass WRITES.
+  auto d = MakeDevice();
+  RenderGraph g(*d);
+  auto depth_tex = MakeDepth(*d);
+  auto depth = g.ImportTexture(depth_tex.get(), ResourceState::Undefined,
+                               "depth");
+  g.AddRasterPass("nowhere")
+      .DepthReadOnly(depth)
+      .Execute([](const RasterContext&) {});
+  CHECK_FALSE(g.Compile());
 }

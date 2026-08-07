@@ -18,6 +18,8 @@ Each app owns an `AppView` and builds its scene from the world itself; the app s
 not temporary: `SdlViewerApp` is Dawn all the way through (`RenderContext` hands views a
 `wgpu::Device`), so the RHI-era app shell is a separate decision.
 
+The Slang SDK both need is a required prerequisite — `scripts/fetch_slang.sh`.
+
 - **The window, swapchain, resize coalescing and frame pacing live in
   `engine/app/rhi_app_shell.hpp` (`badlands_rhi_app`), shared by both.** Everything in
   it was learned the hard way once — macOS focus-on-show, click-through, pixels vs
@@ -50,7 +52,6 @@ would pass just as well against a graph that recorded no pass at all.
   the debug UI always sits on top.
 - **ImGui gets first refusal on input** (`io.WantCaptureMouse`/`WantCaptureKeyboard`) via
   the shell's `OnEvent` hook, so a drag inside a panel does not also move the camera.
-Skipped by the build when the Slang SDK is absent (`tools/slang_probe/README.md`).
 ```sh
 ./build/badlands_rhi_lab --out /tmp/lab.png              # materials + lighting
 ./build/badlands_rhi_lab --out /tmp/vis.png --debug-vis  # the visibility buffer

@@ -92,7 +92,11 @@ fragment GroundOut ground_grid_fragment(GroundVarying in [[stage_in]],
 
     GroundOut out;
     out.color = rgba;
-    out.depth = reject_depth ? 1.0 : depth;
+    // Reversed-Z: the far value is 0, not 1. Moot in practice -- a rejected
+    // fragment is discarded below and never writes depth -- but a value that
+    // says "far" while meaning "nearest possible" is a trap for the next
+    // reader.
+    out.depth = reject_depth ? 0.0 : depth;
 
     if (degenerate || reject_t || reject_depth || !(rgba.w > 0.0)) {
         discard_fragment();

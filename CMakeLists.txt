@@ -257,28 +257,48 @@ endif()
 # badlands_slang: Slang -> (target source + engine reflection). Sits ABOVE the
 # RHI; the RHI never invokes a compiler, so the dependency runs one way.
 #
-# The SDK is gitignored (see tools/slang_probe/README.md for how to fetch it),
-# so this target and its tests are SKIPPED when it is absent rather than
-# breaking the build for a fresh clone.
+# The SDK is gitignored (third_party/toolchains/), and REQUIRED: fetch it with
+# scripts/fetch_slang.sh, which pins a version and verifies its checksum.
+#
+# It used to be optional, skipping when absent -- right while this was a probe
+# nothing depended on, wrong now. The editor is a Slang consumer that cannot
+# skip: editors/shapeshifter is an Xcode project, and an .app target has no
+# equivalent of "configured out". Failing here with the command to run beats
+# failing later at a link error that reads like a code fault.
+#
+# That makes this the point where the repo's platform contract becomes
+# load-bearing, so it is stated rather than implied: macOS on Apple silicon is
+# the only host this configures on today. Dawn is fetched for macOS/Metal only
+# (cmake/FetchDawn.cmake), the RHI ships a Metal backend and a Null one, and
+# scripts/fetch_slang.sh pins a single macOS-arm64 asset. A non-Apple host used
+# to get as far as configuring the CPU-only test targets; it no longer does, and
+# the message says why instead of sending someone to a script that will refuse.
 set(BADLANDS_SLANG_ROOT "${CMAKE_SOURCE_DIR}/third_party/toolchains/slang"
     CACHE PATH "Prebuilt Slang SDK root")
-if(EXISTS "${BADLANDS_SLANG_ROOT}/include/slang.h")
-    message(STATUS "badlands_slang: enabled (${BADLANDS_SLANG_ROOT})")
-    add_library(badlands_slang STATIC src/engine/slang/slang_compiler.cpp)
-    target_include_directories(badlands_slang PUBLIC
-        ${CMAKE_SOURCE_DIR}/src
-        ${BADLANDS_SLANG_ROOT}/include
-        ${CMAKE_SOURCE_DIR}/third_party/spdlog/include)
-    target_link_libraries(badlands_slang PUBLIC
-        badlands_rhi "${BADLANDS_SLANG_ROOT}/lib/libslang.dylib")
-    set_target_properties(badlands_slang PROPERTIES
-        BUILD_RPATH "${BADLANDS_SLANG_ROOT}/lib"
-        INSTALL_RPATH "${BADLANDS_SLANG_ROOT}/lib")
-    set(BADLANDS_HAVE_SLANG ON)
-else()
-    message(STATUS "badlands_slang: skipped (no SDK at ${BADLANDS_SLANG_ROOT})")
-    set(BADLANDS_HAVE_SLANG OFF)
+if(NOT EXISTS "${BADLANDS_SLANG_ROOT}/include/slang.h")
+    if(APPLE AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
+        message(FATAL_ERROR
+            "Slang SDK not found at ${BADLANDS_SLANG_ROOT}.\n"
+            "  Run: scripts/fetch_slang.sh")
+    else()
+        message(FATAL_ERROR
+            "This project builds on macOS / Apple silicon only.\n"
+            "  Host is ${CMAKE_SYSTEM_NAME}/${CMAKE_SYSTEM_PROCESSOR}, and the pinned Slang SDK\n"
+            "  (scripts/fetch_slang.sh) has no asset for it. Dawn is fetched for\n"
+            "  macOS/Metal only too -- porting is a real piece of work, not a flag.")
+    endif()
 endif()
+message(STATUS "badlands_slang: ${BADLANDS_SLANG_ROOT}")
+add_library(badlands_slang STATIC src/engine/slang/slang_compiler.cpp)
+target_include_directories(badlands_slang PUBLIC
+    ${CMAKE_SOURCE_DIR}/src
+    ${BADLANDS_SLANG_ROOT}/include
+    ${CMAKE_SOURCE_DIR}/third_party/spdlog/include)
+target_link_libraries(badlands_slang PUBLIC
+    badlands_rhi "${BADLANDS_SLANG_ROOT}/lib/libslang.dylib")
+set_target_properties(badlands_slang PROPERTIES
+    BUILD_RPATH "${BADLANDS_SLANG_ROOT}/lib"
+    INSTALL_RPATH "${BADLANDS_SLANG_ROOT}/lib")
 
 # badlands_engine: the ported-from-sampo rendering engine (Stage 1) plus the
 # game-agnostic app framework (Stage 2 S2.A1: SdlViewerApp/AppView). No game
@@ -1475,7 +1495,7 @@ endif()
 # badlands_rhi_lab: the MVP that proves the RHI + Slang + visibility-buffer
 # stack end to end. Headless — the MVP RHI has no swapchain — so it renders a
 # frame and writes a PNG.
-if(BADLANDS_HAVE_SLANG AND APPLE)
+if(APPLE)
     # Compiles the cluster DAG build + its deps directly, the same way
     # badlands_terrain_cluster_tests does — the lab wants the real Nanite-style
     # DAG but none of the renderer it is replacing.
@@ -1554,12 +1574,13 @@ endif()
 # the render graph. Windowed and headless run the SAME graph — only the imported
 # output texture differs — so the headless test exercises the real path.
 #
-# BOTH halves of the guard: it links badlands_slang and badlands_imgui_rhi, and
-# neither target EXISTS when the Slang SDK is absent. CMake does not refuse the
-# link at generate time — an unknown plain name becomes a raw -l flag — so the
-# target gets created anyway and fails to COMPILE on a missing <imgui.h>, taking
-# the whole default build down with it on a fresh clone.
-if(BADLANDS_HAVE_SLANG AND APPLE)
+# The guard is APPLE only. It used to also test BADLANDS_HAVE_SLANG, because
+# badlands_slang and badlands_imgui_rhi did not EXIST without the SDK and CMake
+# turns an unknown plain link name into a raw -l flag rather than refusing at
+# generate time — so the target got built and failed on a missing <imgui.h>.
+# The SDK is a required prerequisite now (scripts/fetch_slang.sh, and configure
+# refuses without it), so those targets always exist and the variable is gone.
+if(APPLE)
     add_executable(badlands_object_viewer
         src/executables/object_viewer/main.cpp
         src/executables/object_viewer/line_pass.cpp
@@ -1639,7 +1660,7 @@ endif()
 # badlands_imgui_rhi: the Dear ImGui renderer backend against the RHI, replacing
 # imgui_impl_wgpu_custom. Needs Slang (its shader) and the graph (it adds a
 # pass); the imgui SOURCES come from the same FetchContent the engine uses.
-if(BADLANDS_HAVE_SLANG AND APPLE)
+if(APPLE)
     add_library(badlands_imgui_rhi STATIC
         src/engine/ui/imgui_impl_rhi.cpp
         ${imgui_SOURCE_DIR}/imgui.cpp
@@ -1670,23 +1691,21 @@ if(BADLANDS_HAVE_SLANG AND APPLE)
 endif()
 
 # badlands_slang_tests: compile, cache, hot-reload and reflection, against
-# test-local fixtures. Skipped along with badlands_slang when the SDK is absent.
-if(BADLANDS_HAVE_SLANG)
-    add_executable(badlands_slang_tests
-        src/engine/tests/slang_compiler_tests.cpp
-        third_party/catch2/extras/catch_amalgamated.cpp
-    )
-    target_include_directories(badlands_slang_tests PRIVATE
-        ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
-        ${CMAKE_SOURCE_DIR}/src/engine/tests
-    )
-    target_link_libraries(badlands_slang_tests PRIVATE badlands_slang)
-    if(APPLE)
-        target_link_options(badlands_slang_tests PRIVATE "-Wl,-ld_new")
-    endif()
-    add_test(NAME badlands_slang_tests COMMAND badlands_slang_tests
-             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+# test-local fixtures.
+add_executable(badlands_slang_tests
+    src/engine/tests/slang_compiler_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_slang_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${CMAKE_SOURCE_DIR}/src/engine/tests
+)
+target_link_libraries(badlands_slang_tests PRIVATE badlands_slang)
+if(APPLE)
+    target_link_options(badlands_slang_tests PRIVATE "-Wl,-ld_new")
 endif()
+add_test(NAME badlands_slang_tests COMMAND badlands_slang_tests
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_splat_tests: the Dreams-style splat chain, proven by reading pixels.
 # Slang for three of the four passes and hand-written MSL for the atomic one --
@@ -1694,7 +1713,7 @@ endif()
 # on a 64-bit type. It needs BOTH a Slang SDK and a Metal device, so it cannot
 # live in badlands_slang_tests (no device) or badlands_rhi_metal_tests (no
 # compiler).
-if(BADLANDS_HAVE_SLANG AND APPLE)
+if(APPLE)
     add_executable(badlands_splat_tests
         src/engine/tests/splat_tests.cpp
         third_party/catch2/extras/catch_amalgamated.cpp
@@ -2180,6 +2199,15 @@ target_link_libraries(shapeshifter_core PUBLIC
     "-framework Metal" "-framework Foundation"
     "-framework QuartzCore" "-framework CoreGraphics")
 
+# Match the app's deployment target (editors/shapeshifter/project.yml says
+# macOS 15.0). Without this the archive builds at the SDK default and the link
+# warns that it was "built for newer 'macOS' version (26.0) than being linked
+# (15.0)" -- which is not cosmetic: the app would declare a 15.0 minimum while
+# carrying objects free to use APIs that do not exist there. Only this target
+# is constrained; the rest of the repo has no such contract to honour.
+target_compile_options(shapeshifter_core PUBLIC -mmacosx-version-min=15.0)
+target_link_options(shapeshifter_core PUBLIC -mmacosx-version-min=15.0)
+
 # shapeshifter_core_tests: the editor core's own suite, moved across as-is.
 # It is still on doctest rather than this repo's Catch2 — porting 15 files is
 # mechanical but it does not belong in a commit whose claim is "only paths and
@@ -2215,4 +2243,26 @@ if(APPLE)
 endif()
 add_test(NAME shapeshifter_core_tests COMMAND shapeshifter_core_tests
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# The editor's Slang entry points, compiled as a test rather than by a target.
+#
+# THIS IS WHAT KEEPS THE SLANG ARM OF sdf_scene.h HONEST. That header now
+# compiles as C++, MSL and Slang; the first two are exercised by
+# shapeshifter_core and by the Xcode app respectively, and without these the
+# third would be exercised by nothing until the renderer port lands -- an arm
+# that only rots. Slang is a required prerequisite, so these always run.
+#
+# One test per entry point, not one per file: a shader whose vertex stage
+# compiles and whose fragment stage does not should say which.
+foreach(shader debug_lines mesh raymarch ground_grid)
+    foreach(entry vs_main fs_main)
+        add_test(NAME shapeshifter_slang_${shader}_${entry}
+                 COMMAND ${BADLANDS_SLANG_ROOT}/bin/slangc
+                         ${SHAPESHIFTER_DIR}/shaders/slang/shapeshifter/${shader}.slang
+                         -target metal -entry ${entry}
+                         -I ${SHAPESHIFTER_DIR}/shaders
+                         -o ${CMAKE_CURRENT_BINARY_DIR}/shapeshifter_${shader}_${entry}.metal
+                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    endforeach()
+endforeach()
 

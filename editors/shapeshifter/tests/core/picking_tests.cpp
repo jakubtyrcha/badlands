@@ -48,6 +48,65 @@ void check_float3_traced(const simd_float3 actual, const simd_float3 expected) {
     CHECK(actual.z == doctest::Approx(expected.z).epsilon(kTraceTol));
 }
 
+// unit_node with the dial set. Node::shape_param defaults to 0, which is NOT
+// every shape's spec default (the capsule's is 1, the prism's 6) -- so every
+// case that does not say otherwise is at param 0, and anything wanting an
+// endpoint has to ask for it.
+Node unit_node(Shape shape, float param) {
+    Node node = unit_node(shape);
+    node.shape_param = param;
+    return node;
+}
+
+struct ShapeCase {
+    Shape shape;
+    const char* name;
+};
+
+constexpr std::array<ShapeCase, kShapeCount> kAllShapes = {{
+    {Shape::Cube, "Cube"},         {Shape::Sphere, "Sphere"},
+    {Shape::Cone, "Cone"},         {Shape::Capsule, "Capsule"},
+    {Shape::Octahedron, "Octahedron"}, {Shape::Pyramid, "Pyramid"},
+    {Shape::Prism, "Prism"},       {Shape::Vesica, "Vesica"},
+}};
+
+// |sdf| at an accepted hit is under kTraceHitEps (1e-5) by construction; the
+// margin here absorbs the float error in mapping the local hit back to world.
+constexpr float kSurfaceTol = 1e-4f;
+// sdf_tests pins "no shape escapes its own bounding box" field-side; this is
+// the ray-side corollary, so it need only absorb the trace's own slack.
+constexpr float kBoxTol = 1e-3f;
+
+// Everything raycast_node promises, checked against the node's OWN field rather
+// than a closed form -- which is what lets it run for the shapes that have no
+// closed form to check against, and what makes it survive a shape's formula
+// being retuned.
+//
+// `entering` distinguishes the two normal conventions: local_normal points
+// OUTWARD on an exit hit as well as an entry one, so it opposes the ray on the
+// way in and follows it on the way out.
+void check_hit_invariants(const Node& node, const Ray& ray, const RayHit& hit, bool entering) {
+    const SdfNode sn = local_sdf_node(node);
+    const simd_float3 dir = simd_normalize(ray.dir);
+
+    // On the surface.
+    CHECK(std::fabs(sdf_eval_node(sn, hit.point)) < kSurfaceTol);
+
+    // In front of the origin, and `t` really is the distance along the
+    // normalized ray to the point reported.
+    CHECK(hit.t > 0.0f);
+    check_float3_traced(hit.point, ray.origin + hit.t * dir);
+
+    // Inside the box the node's half-extents describe.
+    CHECK(std::fabs(hit.point.x) <= 0.5f + kBoxTol);
+    CHECK(std::fabs(hit.point.y) <= 0.5f + kBoxTol);
+    CHECK(std::fabs(hit.point.z) <= 0.5f + kBoxTol);
+
+    // Unit, and oriented outward.
+    CHECK(simd_length(hit.normal) == doctest::Approx(1.0f).epsilon(kTraceTol));
+    CHECK(simd_dot(hit.normal, dir) * (entering ? 1.0f : -1.0f) < 0.0f);
+}
+
 } // namespace
 
 // --- raycast_node: the sphere trace that replaced the analytic primitives ----
@@ -171,6 +230,175 @@ TEST_CASE("raycast_node: a non-unit ray direction still reports t as a world dis
     REQUIRE(scaled.has_value());
     CHECK(scaled->t == doctest::Approx(unit->t).epsilon(kTraceTol));
     check_float3_traced(scaled->point, unit->point);
+}
+
+// --- ray vs the underlying primitives, for all eight shapes -----------------
+//
+// The cases above cover the two shapes that had hand-written intersectors
+// before the switch to tracing. The six added since have never been traced in a
+// test at all: sdf_tests.cpp pins their FIELDS (zero set inside the box,
+// 1-Lipschitz, numpy-pinned samples), which is a different claim from "a ray
+// finds that surface where the primitive puts it".
+//
+// Deliberately not exact. The trace stops within kTraceHitEps of the surface
+// and the normal is a tetrahedron-offset finite difference, so these assert a
+// hit is ON the primitive to a stated tolerance rather than at a pinned float.
+// The editor does not need better: a click selects a node, and a snapped spawn
+// places the new node's CENTRE on the hit.
+
+TEST_CASE("raycast_node: every shape is hit from all six axis directions") {
+    const std::array<simd_float3, 6> dirs = {{
+        {0.0f, 0.0f, -1.0f}, {0.0f, 0.0f, 1.0f}, {-1.0f, 0.0f, 0.0f},
+        {1.0f, 0.0f, 0.0f}, {0.0f, -1.0f, 0.0f}, {0.0f, 1.0f, 0.0f},
+    }};
+    for (const ShapeCase& sc : kAllShapes) {
+        CAPTURE(sc.name);
+        const Node node = unit_node(sc.shape);
+        for (size_t i = 0; i < dirs.size(); ++i) {
+            CAPTURE(i);
+            // Origin 2 units out along the opposite axis, aimed straight in.
+            const Ray ray{-2.0f * dirs[i], dirs[i]};
+            const auto hit = raycast_node(node, ray);
+            REQUIRE(hit.has_value());
+            check_hit_invariants(node, ray, *hit, true);
+        }
+    }
+}
+
+TEST_CASE("raycast_node: every shape's hit lands where its own primitive says") {
+    // Cone and pyramid share a slant normal: both taper from a half-size of 0.5
+    // at y = -0.5 to a point at y = +0.5, so the face direction is (-0.5, 1)
+    // and its outward perpendicular is (1, 0.5) normalized. That also puts the
+    // half-size at y = 0 at exactly 0.25, which is where the two slant cases
+    // below are aimed.
+    const simd_float3 taper_n = simd_normalize(simd_float3{1.0f, 0.5f, 0.0f});
+    // The regular polygon's `r` is its CIRCUMRADIUS (pinned in sdf_tests), so
+    // the face opposite the +z vertex sits at the apothem, r*cos(pi/3) = 0.25.
+    constexpr float kPrismApothem = 0.25f;
+    // Octahedron face plane |x|+|y|+|z| = 0.5, met by a ray from (2,2,2) aimed
+    // at the origin: the sum falls as 6 - sqrt(3)t, so t = 5.5/sqrt(3) and the
+    // hit is at 1/6 on each axis -- inside the face triangle, not on an edge.
+    const float oct_t = 5.5f / std::sqrt(3.0f);
+    const float inv_sqrt3 = 1.0f / std::sqrt(3.0f);
+
+    struct Pin {
+        Shape shape;
+        const char* what;
+        simd_float3 origin;
+        simd_float3 dir;
+        float t;
+        simd_float3 point;
+        bool pin_normal;   // false where the hit is an edge or a vertex
+        simd_float3 normal;
+    };
+
+    const std::array<Pin, 14> pins = {{
+        {Shape::Cube, "face at +z", {0, 0, 2}, {0, 0, -1},
+         1.5f, {0, 0, 0.5f}, true, {0, 0, 1}},
+        {Shape::Sphere, "radius 0.5 from +z", {0, 0, 2}, {0, 0, -1},
+         1.5f, {0, 0, 0.5f}, true, {0, 0, 1}},
+
+        // Sharp cone at param 0: base radius 0.5 at y = -0.5, apex at y = +0.5.
+        {Shape::Cone, "base cap", {0, -2, 0}, {0, 1, 0},
+         1.5f, {0, -0.5f, 0}, true, {0, -1, 0}},
+        {Shape::Cone, "slant at y = 0", {2, 0, 0}, {-1, 0, 0},
+         1.75f, {0.25f, 0, 0}, true, taper_n},
+
+        // Param 0 is a FLAT-capped cylinder, not a capsule -- the spec default
+        // of 1 is what makes it look like its name, and unit_node does not
+        // apply spec defaults.
+        {Shape::Capsule, "flat top cap", {0, 2, 0}, {0, -1, 0},
+         1.5f, {0, 0.5f, 0}, true, {0, 1, 0}},
+        {Shape::Capsule, "cylinder wall", {2, 0, 0}, {-1, 0, 0},
+         1.5f, {0.5f, 0, 0}, true, {1, 0, 0}},
+
+        {Shape::Octahedron, "face centre", {2, 2, 2}, {-1, -1, -1},
+         oct_t, {1.0f / 6.0f, 1.0f / 6.0f, 1.0f / 6.0f}, true,
+         {inv_sqrt3, inv_sqrt3, inv_sqrt3}},
+        // Vertices sit at s = 0.5 on each axis. No normal pinned: four faces
+        // meet here, so the finite difference is averaging an ambiguity.
+        {Shape::Octahedron, "+y vertex", {0, 2, 0}, {0, -1, 0},
+         1.5f, {0, 0.5f, 0}, false, {0, 0, 0}},
+
+        // Square frustum at param 0: base half-size 0.5 at y = -0.5, apex above.
+        {Shape::Pyramid, "base cap", {0, -2, 0}, {0, 1, 0},
+         1.5f, {0, -0.5f, 0}, true, {0, -1, 0}},
+        {Shape::Pyramid, "slant at y = 0", {2, 0, 0}, {-1, 0, 0},
+         1.75f, {0.25f, 0, 0}, true, taper_n},
+
+        // Param 0 floors the side count at 3, so this is a triangular prism.
+        {Shape::Prism, "+z vertex edge", {0, 0, 2}, {0, 0, -1},
+         1.5f, {0, 0, 0.5f}, false, {0, 0, 0}},
+        {Shape::Prism, "face opposite that vertex", {0, 0, -2}, {0, 0, 1},
+         2.0f - kPrismApothem, {0, 0, -kPrismApothem}, true, {0, 0, -1}},
+        {Shape::Prism, "top cap", {0, 2, 0}, {0, -1, 0},
+         1.5f, {0, 0.5f, 0}, true, {0, 1, 0}},
+
+        // w == h.y in a cube box, which sdf_sd_vesica documents as EXACTLY a
+        // sphere of radius h -- so the default vesica is a ball, and that is
+        // the fact worth pinning here.
+        {Shape::Vesica, "sphere of radius 0.5", {0, 0, 2}, {0, 0, -1},
+         1.5f, {0, 0, 0.5f}, true, {0, 0, 1}},
+    }};
+
+    for (const Pin& p : pins) {
+        CAPTURE(p.what);
+        const Node node = unit_node(p.shape);
+        const Ray ray{p.origin, p.dir};
+        const auto hit = raycast_node(node, ray);
+        REQUIRE(hit.has_value());
+        CHECK(hit->t == doctest::Approx(p.t).epsilon(kTraceTol));
+        check_float3_traced(hit->point, p.point);
+        check_hit_invariants(node, ray, *hit, true);
+        if (p.pin_normal) {
+            check_float3_traced(hit->normal, p.normal);
+        }
+    }
+}
+
+TEST_CASE("raycast_node: a ray clear of the box misses every shape") {
+    for (const ShapeCase& sc : kAllShapes) {
+        CAPTURE(sc.name);
+        // No shape escapes its own bounding box (pinned in sdf_tests), so a ray
+        // held a whole box-width off every axis of travel cannot reach one.
+        CHECK_FALSE(raycast_node(unit_node(sc.shape),
+                                 Ray{{1.5f, 1.5f, 2.0f}, {0.0f, 0.0f, -1.0f}}).has_value());
+    }
+}
+
+TEST_CASE("raycast_node: an origin inside any shape returns its exit surface") {
+    // Dollying in is unclamped, so the eye really does end up inside geometry.
+    // Every shape contains its own centre, so this is well defined for all of
+    // them -- and whatever comes back must be in FRONT of the ray.
+    for (const ShapeCase& sc : kAllShapes) {
+        CAPTURE(sc.name);
+        const Node node = unit_node(sc.shape);
+        const Ray ray{{0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}};
+        const auto hit = raycast_node(node, ray);
+        REQUIRE(hit.has_value());
+        check_hit_invariants(node, ray, *hit, false);
+    }
+}
+
+TEST_CASE("raycast_node: both ends of every dial are still traceable") {
+    // The dial reshapes the primitive -- a cone becomes a cylinder, a cube
+    // becomes a ball, a prism goes from a triangle to a 12-gon -- so the closed
+    // forms above stop applying and the invariants are what carries over.
+    for (const ShapeCase& sc : kAllShapes) {
+        CAPTURE(sc.name);
+        const ShapeParamSpec spec = shape_param_spec(sc.shape);
+        if (!spec.has_param) {
+            continue;   // the sphere, which has nothing left to vary
+        }
+        for (const float param : {spec.min_value, spec.default_value, spec.max_value}) {
+            CAPTURE(param);
+            const Node node = unit_node(sc.shape, param);
+            const Ray ray{{2.0f, 0.0f, 0.0f}, {-1.0f, 0.0f, 0.0f}};
+            const auto hit = raycast_node(node, ray);
+            REQUIRE(hit.has_value());
+            check_hit_invariants(node, ray, *hit, true);
+        }
+    }
 }
 
 // --- raycast_scene ---------------------------------------------------------

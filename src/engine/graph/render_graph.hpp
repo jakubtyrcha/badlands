@@ -53,9 +53,11 @@ struct ResourceHandle {
 // subset a pass can legitimately declare -- there is no "CopySrc" here because
 // the graph does not record copies.
 enum class Access : uint8_t {
-  Read,          // sampled or read-only storage
-  Write,         // read-write storage
-  ColorTarget,   // written as a colour attachment
+  Read,           // sampled or read-only storage
+  Write,          // read-write storage
+  ColorTarget,    // written as a colour attachment
+  DepthTarget,    // written as a depth attachment
+  DepthReadOnly,  // tested as a depth attachment, never written
 };
 
 const char* ToString(Access a);
@@ -84,6 +86,22 @@ class RasterPassBuilder {
                                  rhi::LoadOp load = rhi::LoadOp::Clear,
                                  rhi::StoreOp store = rhi::StoreOp::Store,
                                  const float clear[4] = nullptr);
+  // The depth attachment, written: depth-tested geometry that also updates the
+  // buffer. `clear` applies only with LoadOp::Clear and defaults to the
+  // REVERSED-Z far value -- 0, not 1 -- matching rhi::DepthAttachment and the
+  // project-wide invariant.
+  RasterPassBuilder& DepthTarget(ResourceHandle target,
+                                 rhi::LoadOp load = rhi::LoadOp::Clear,
+                                 rhi::StoreOp store = rhi::StoreOp::Store,
+                                 float clear = 0.0f);
+  // The depth attachment, tested but never written -- an overlay that must sit
+  // behind the geometry already drawn without occluding the next overlay.
+  //
+  // A SEPARATE METHOD rather than a flag on DepthTarget: read-only depth never
+  // clears and never stores, so a shared signature would carry two parameters
+  // it must ignore, and the flag would silently pick which barrier is emitted.
+  // That is the ambiguity rhi's rule 5 exists to prevent.
+  RasterPassBuilder& DepthReadOnly(ResourceHandle target);
   // Declares that this pass reads or writes `handle`. This is what the
   // transition is derived from, so declaring a binding and declaring a barrier
   // are the SAME act and cannot drift apart.
@@ -189,10 +207,22 @@ class RenderGraph {
     float clear[4] = {0, 0, 0, 1};
   };
 
+  // Separate from Attachment because a depth clear is one float, not four, and
+  // read_only has no colour equivalent. An invalid `target` means the pass has
+  // no depth at all, which is what every existing pass declares by omission.
+  struct DepthSlot {
+    ResourceHandle target;
+    rhi::LoadOp load = rhi::LoadOp::Clear;
+    rhi::StoreOp store = rhi::StoreOp::Store;
+    float clear = 0.0f;   // reversed-Z far
+    bool read_only = false;
+  };
+
   struct Pass {
     std::string name;
     bool raster = false;
     std::vector<Attachment> colors;
+    DepthSlot depth;
     std::vector<std::pair<ResourceHandle, Access>> accesses;
     std::function<void(const RasterContext&)> raster_fn;
     std::function<void(const ComputeContext&)> compute_fn;

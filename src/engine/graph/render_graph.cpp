@@ -13,6 +13,8 @@ const char* ToString(Access a) {
     case Access::Read: return "Read";
     case Access::Write: return "Write";
     case Access::ColorTarget: return "ColorTarget";
+    case Access::DepthTarget: return "DepthTarget";
+    case Access::DepthReadOnly: return "DepthReadOnly";
   }
   return "?";
 }
@@ -24,8 +26,17 @@ ResourceState StateFor(Access a) {
     case Access::Read: return ResourceState::ShaderRead;
     case Access::Write: return ResourceState::ShaderWrite;
     case Access::ColorTarget: return ResourceState::RenderTarget;
+    case Access::DepthTarget: return ResourceState::DepthWrite;
+    case Access::DepthReadOnly: return ResourceState::DepthRead;
   }
   return ResourceState::Undefined;
+}
+
+// Consumes without producing. DepthReadOnly belongs here for exactly the reason
+// Read does: depth-testing against a buffer no pass has written tests against
+// undefined contents, which is the same defect wearing a different attachment.
+bool IsConsumeOnly(Access a) {
+  return a == Access::Read || a == Access::DepthReadOnly;
 }
 
 }  // namespace
@@ -48,6 +59,35 @@ RasterPassBuilder& RasterPassBuilder::ColorTarget(ResourceHandle target,
   // An attachment IS a write. Declaring it twice -- once as a target and once
   // as a barrier -- is how the two drift apart.
   graph_->Declare(pass_, target, Access::ColorTarget);
+  return *this;
+}
+
+RasterPassBuilder& RasterPassBuilder::DepthTarget(ResourceHandle target,
+                                                  LoadOp load, StoreOp store,
+                                                  float clear) {
+  graph_->passes_[pass_].depth = {.target = target,
+                                  .load = load,
+                                  .store = store,
+                                  .clear = clear,
+                                  .read_only = false};
+  graph_->Declare(pass_, target, Access::DepthTarget);
+  return *this;
+}
+
+RasterPassBuilder& RasterPassBuilder::DepthReadOnly(ResourceHandle target) {
+  // Load, STORE, never clear. Storing looks redundant for a pass that writes no
+  // depth, and the first draft discarded on exactly that reasoning -- which was
+  // wrong. StoreOp::Discard does not mean "I changed nothing"; it means the
+  // attachment's contents are UNDEFINED afterwards. On a shared depth buffer
+  // that destroys what the geometry pass wrote, so a SECOND read-only overlay --
+  // the case this method exists for -- loads garbage and occludes at random.
+  // Clearing would lose it the other way, and is equally wrong here.
+  graph_->passes_[pass_].depth = {.target = target,
+                                  .load = LoadOp::Load,
+                                  .store = StoreOp::Store,
+                                  .clear = 0.0f,
+                                  .read_only = true};
+  graph_->Declare(pass_, target, Access::DepthReadOnly);
   return *this;
 }
 
@@ -177,10 +217,17 @@ bool RenderGraph::Compile() {
                     pass.name);
       return false;
     }
-    if (pass.raster && pass.colors.empty()) {
+    // Depth alone is enough -- a shadow pass renders somewhere, it just renders
+    // depth -- but only if it WRITES that depth. A pass whose sole declaration
+    // is DepthReadOnly has no colour to draw into and no depth to update, so it
+    // renders nowhere in exactly the sense this guard rejects.
+    const bool writes_depth =
+        pass.depth.target.IsValid() && !pass.depth.read_only;
+    if (pass.raster && pass.colors.empty() && !writes_depth) {
       spdlog::error(
-          "graph: raster pass '{}' declares no colour target -- a pass that "
-          "renders nowhere is a mistake, not an optimisation",
+          "graph: raster pass '{}' declares no colour target and no depth it "
+          "writes -- a pass that renders nowhere is a mistake, not an "
+          "optimisation",
           pass.name);
       return false;
     }
@@ -196,19 +243,41 @@ bool RenderGraph::Compile() {
       // renders whatever the memory happened to hold, which is usually the
       // previous frame and occasionally garbage. "Not yet" is the load-bearing
       // word -- a pass that writes it LATER does not help this pass.
-      if (access == Access::Read && !produced[h.id]) {
+      if (IsConsumeOnly(access) && !produced[h.id]) {
         spdlog::error(
-            "graph: pass '{}' reads '{}', which nothing has written by this "
-            "point in the order and which was not imported -- it would read "
-            "undefined contents",
-            pass.name, resources_[h.id].name);
+            "graph: pass '{}' reads '{}' as {}, which nothing has written by "
+            "this point in the order and which was not imported -- it would "
+            "read undefined contents",
+            pass.name, resources_[h.id].name, ToString(access));
         return false;
+      }
+      // A depth attachment that is not a depth texture produces a render pass
+      // the backend will refuse, so it is refused here instead -- at the point
+      // that names the pass and the resource.
+      //
+      // The format comes from the DESC for a transient, not the texture: they
+      // are created further down, once the declarations are known good, so
+      // asking the texture here reads a null pointer's format for every
+      // graph-owned depth buffer -- which is the common case, and was skipping
+      // the check for exactly the callers it was written for.
+      if (access == Access::DepthTarget || access == Access::DepthReadOnly) {
+        const Resource& dr = resources_[h.id];
+        const rhi::Format declared = dr.transient ? dr.desc.format
+                                     : dr.texture ? dr.texture->GetFormat()
+                                                  : rhi::Format::Undefined;
+        if (!rhi::IsDepthFormat(declared)) {
+          spdlog::error(
+              "graph: pass '{}' declares '{}' as a depth attachment, but its "
+              "format is not a depth format",
+              pass.name, resources_[h.id].name);
+          return false;
+        }
       }
     }
     // Marked only AFTER this pass's own reads are checked, so a pass that both
     // reads and writes one resource still has to have it produced beforehand.
     for (const auto& [h, access] : pass.accesses) {
-      if (access != Access::Read) produced[h.id] = true;
+      if (!IsConsumeOnly(access)) produced[h.id] = true;
     }
     order_.push_back(uint32_t(p));
   }
@@ -276,15 +345,31 @@ void RenderGraph::Execute(ICommandEncoder& encoder) {
              .store_op = a.store,
              .clear_color = {a.clear[0], a.clear[1], a.clear[2], a.clear[3]}});
       }
+      if (pass.depth.target.IsValid()) {
+        Resource& d = resources_[pass.depth.target.id];
+        if (d.texture) {
+          desc.depth_attachment = {.view = d.texture->GetDefaultView(),
+                                   .load_op = pass.depth.load,
+                                   .store_op = pass.depth.store,
+                                   .clear_depth = pass.depth.clear,
+                                   .read_only = pass.depth.read_only};
+        }
+      }
       auto* rp = encoder.BeginRenderPass(desc);
       if (!rp) {
         spdlog::error("graph: pass '{}' could not begin", pass.name);
         continue;
       }
-      const Resource& first = resources_[pass.colors.front().target.id];
-      RasterContext ctx{.pass = rp,
-                        .width = first.texture ? first.texture->GetWidth() : 0,
-                        .height = first.texture ? first.texture->GetHeight() : 0};
+      // Extent comes from whichever attachment the pass actually has. A
+      // depth-only pass has no colours to ask, and its viewport still has to
+      // match what it renders into.
+      const Resource& extent_from =
+          pass.colors.empty() ? resources_[pass.depth.target.id]
+                              : resources_[pass.colors.front().target.id];
+      RasterContext ctx{
+          .pass = rp,
+          .width = extent_from.texture ? extent_from.texture->GetWidth() : 0,
+          .height = extent_from.texture ? extent_from.texture->GetHeight() : 0};
       // The viewport is set HERE rather than left to the callback: a pass whose
       // viewport does not match its attachment is always a bug, and every
       // caller writing the same two lines is how one of them gets it wrong.

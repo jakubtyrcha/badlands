@@ -75,6 +75,13 @@ struct RecordedCommand {
   bool has_depth = false;
   LoadOp first_color_load = LoadOp::Clear;
   StoreOp first_color_store = StoreOp::Store;
+  // Depth gets the same treatment as colour, for a sharper reason: a read-only
+  // depth pass that DISCARDS leaves the buffer undefined for whatever reads it
+  // next. Metal renders that plausibly, so it is invisible without recording
+  // the op and asserting on it.
+  LoadOp depth_load = LoadOp::Clear;
+  StoreOp depth_store = StoreOp::Store;
+  bool depth_read_only = false;
 };
 
 // Everything a test wants to inspect after recording.
