@@ -726,7 +726,8 @@ add_library(badlands_patch_providers STATIC
     src/mapgen/file_patch_source.cpp
     src/mapgen/coarse_world_patch_source.cpp
     src/mapgen/cubic_sample.cpp
-    src/mapgen/relief_filter.cpp)
+    src/mapgen/relief_filter.cpp
+    src/mapgen/patch_export.cpp)
 target_link_libraries(badlands_patch_providers PUBLIC badlands_patch_lib)
 
 # badlands_mapview_view: everything the map tool needs to fetch a patch and
@@ -1964,6 +1965,21 @@ target_include_directories(badlands_relief_tests PRIVATE
 )
 target_link_libraries(badlands_relief_tests PRIVATE badlands_patch_providers)
 add_test(NAME badlands_relief_tests COMMAND badlands_relief_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_patch_export_tests: the image ENCODINGS of PatchData (patch_export.hpp)
+# -- height with the watermap in the blue channel, the biome palette, the
+# hillshade. It links badlands_patch_providers and NOTHING else on purpose: the
+# encoders return pixel buffers and never touch the `assets` crate or the engine,
+# so this target is also the test that the split held.
+add_executable(badlands_patch_export_tests
+    src/mapgen/patch_export_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_patch_export_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_link_libraries(badlands_patch_export_tests PRIVATE badlands_patch_providers)
+add_test(NAME badlands_patch_export_tests COMMAND badlands_patch_export_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_lake_surface_tests: pure-CPU tests for the per-lake water surface and
 # its buried skirt -- the overlap that keeps a later wave displacement from
