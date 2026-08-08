@@ -66,6 +66,26 @@ struct Contact {
     simd_float3 normal = {0, 1, 0};
 };
 
+// EXACT, component for component -- no tolerance anywhere below.
+//
+// These exist for the history's "did this interaction actually change
+// anything", and an approximate answer there is the wrong kind of wrong: a
+// gesture that moved a node by a float's last bit still moved it, and one that
+// ended exactly where it began must leave no undo entry at all.
+inline bool vec_equal(simd_float3 a, simd_float3 b) { return simd_all(a == b); }
+inline bool vec_equal(simd_float4 a, simd_float4 b) { return simd_all(a == b); }
+
+inline bool operator==(const ParentRef& a, const ParentRef& b) {
+    return a.kind == b.kind && a.node == b.node && a.attachment == b.attachment;
+}
+inline bool operator!=(const ParentRef& a, const ParentRef& b) { return !(a == b); }
+
+inline bool operator==(const Contact& a, const Contact& b) {
+    return a.valid == b.valid && a.surface == b.surface && vec_equal(a.point, b.point) &&
+           vec_equal(a.normal, b.normal);
+}
+inline bool operator!=(const Contact& a, const Contact& b) { return !(a == b); }
+
 struct Node {
     int32_t id = kInvalidNode;
     std::string name;
@@ -103,11 +123,49 @@ struct Node {
     float shape_param = 0.0f;
 };
 
+inline bool operator==(const Node& a, const Node& b) {
+    return a.id == b.id && a.name == b.name && a.kind == b.kind && a.parent == b.parent &&
+           a.contact == b.contact && vec_equal(a.local_position, b.local_position) &&
+           vec_equal(a.local_rotation.vector, b.local_rotation.vector) &&
+           vec_equal(a.scale, b.scale) && a.shape == b.shape && a.op == b.op &&
+           a.shape_param == b.shape_param;
+}
+inline bool operator!=(const Node& a, const Node& b) { return !(a == b); }
+
+// The document state a Delta cannot reach by touching nodes alone. Without it a
+// spawn after an undo reuses an id, and the auto-names restart.
+struct Counters {
+    int32_t next_id = 1;
+    std::array<int32_t, kShapeCount> shape_counts{};
+    int32_t group_count = 0;
+};
+
+inline bool operator==(const Counters& a, const Counters& b) {
+    return a.next_id == b.next_id && a.shape_counts == b.shape_counts &&
+           a.group_count == b.group_count;
+}
+inline bool operator!=(const Counters& a, const Counters& b) { return !(a == b); }
+
 class SceneDocument {
 public:
     Node* find(int32_t id);
     const Node* find(int32_t id) const;
     const std::vector<Node>& nodes() const { return nodes_; }
+
+    // Id and name allocation state. Carried by a Delta because it is document
+    // state like any node: without it, a spawn after an undo reuses an id.
+    Counters counters() const;
+    void set_counters(const Counters& counters);
+
+    // Inserts at `index`, clamped to the end. NODE ORDER IS SEMANTIC -- sdf_fold
+    // reduces in vector order and a Subtract carves everything before it -- so
+    // replaying a removal in reverse has to put the node back where it was, not
+    // merely back.
+    Node& insert(Node node, size_t index);
+    // Erases by id with NO orphan handling at all, because a replay is
+    // reproducing a state that already accounted for it. remove_node is the
+    // editing operation; this is the mechanical one.
+    void erase(int32_t id);
 
     // WHERE A NODE IS. The only way to ask, and deliberately the only way:
     // consumers that compose placement out of a Node's own fields are what make

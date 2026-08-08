@@ -236,6 +236,29 @@ Node& SceneDocument::add(Node node) {
     return nodes_.back();
 }
 
+Counters SceneDocument::counters() const {
+    Counters c;
+    c.next_id = next_id_;
+    c.shape_counts = shape_counts_;
+    c.group_count = group_count_;
+    return c;
+}
+
+void SceneDocument::set_counters(const Counters& counters) {
+    next_id_ = counters.next_id;
+    shape_counts_ = counters.shape_counts;
+    group_count_ = counters.group_count;
+}
+
+Node& SceneDocument::insert(Node node, size_t index) {
+    const size_t at = std::min(index, nodes_.size());
+    return *nodes_.insert(nodes_.begin() + static_cast<ptrdiff_t>(at), std::move(node));
+}
+
+void SceneDocument::erase(int32_t id) {
+    std::erase_if(nodes_, [id](const Node& node) { return node.id == id; });
+}
+
 Node SceneDocument::make_node(Shape shape, Op op) {
     Node node;
     node.id = next_id_++;
