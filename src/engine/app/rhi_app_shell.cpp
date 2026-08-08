@@ -2,11 +2,10 @@
 
 #include <algorithm>
 
-#include <SDL3/SDL_metal.h>
 #include <spdlog/spdlog.h>
 
+#include "engine/app/platform_surface.hpp"
 #include "engine/app/surface_size.hpp"
-#include "engine/rhi/metal/metal_rhi.hpp"
 
 namespace badlands::rhi_app {
 
@@ -32,12 +31,11 @@ std::unique_ptr<AppShell> AppShell::Create(IRhiDevice& device,
     return nullptr;
   }
 
-  SDL_MetalView view = SDL_Metal_CreateView(shell->window_);
-  if (!view) {
-    spdlog::error("rhi_app: SDL_Metal_CreateView failed: {}", SDL_GetError());
-    return nullptr;
-  }
-  shell->metal_view_ = view;
+  // THE ONLY PER-OS STEP in this file. Everything below -- the resize
+  // coalescing, the focus dance, the pacing -- is the same on both targets,
+  // which is why the seam is three functions rather than a framework.
+  shell->surface_ = CreateNativeSurface(shell->window_);
+  if (!shell->surface_.Valid()) return nullptr;  // it logged why
 
   // PIXELS, not points. On a HiDPI display these differ by the backing scale,
   // and using points renders at half resolution into a full-size drawable --
@@ -67,7 +65,7 @@ std::unique_ptr<AppShell> AppShell::Create(IRhiDevice& device,
   }
 
   shell->swapchain_ = device.CreateSwapchain(
-      {.native_window = SDL_Metal_GetLayer(view),
+      {.native_window = shell->surface_.handle,
        .width = shell->applied_width_,
        .height = shell->applied_height_,
        .format = format,
@@ -99,15 +97,62 @@ ColorSpace AppShell::SurfaceColorSpace() const {
 }
 
 AppShell::~AppShell() {
-  // Order matters: the swapchain holds the layer the view owns.
+  // Order matters: the swapchain holds the layer the native surface owns.
   swapchain_.reset();
-  if (metal_view_) SDL_Metal_DestroyView(SDL_MetalView(metal_view_));
+  DestroyNativeSurface(surface_);
   if (window_) SDL_DestroyWindow(window_);
   SDL_Quit();
 }
 
 void AppShell::RequestResizePoints(uint32_t width, uint32_t height) {
   if (window_) SDL_SetWindowSize(window_, int(width), int(height));
+}
+
+FrameOutcome RunOneFrame(IRhiDevice& device, ISwapchain& swapchain,
+                         const AppShellCallbacks& cb, FrameInfo& info,
+                         const std::function<bool(FrameInfo&)>& apply_resize) {
+  FrameOutcome outcome;
+
+  // Paced HERE, at the top of the frame, not at Acquire. Blocking at acquire
+  // would stall the CPU after input has been sampled and the whole update has
+  // run, which is the difference between one frame of latency and three.
+  device.BeginFrame();
+  if (cb.OnFrameBegin) cb.OnFrameBegin(device.CurrentFrame());
+
+  // RESIZE RULE 1: applied at exactly one point, after the pacing wait and
+  // before any acquire or encoding. Nothing is recreated mid-frame.
+  const bool ready = !apply_resize || apply_resize(info);
+
+  AcquiredFrame frame;  // defaults to Skip
+  if (ready) frame = swapchain.Acquire();
+  if (frame.status == AcquireStatus::Ok) {
+    if (cb.OnRender && cb.OnRender(frame.view, info)) {
+      swapchain.Present();
+      outcome.presented = true;
+    } else {
+      // NOT a skipped frame -- the run ends. The drawable stays acquired and
+      // every later Acquire would be refused, so continuing means a black
+      // window for the rest of the process. See AppShellCallbacks::OnRender.
+      spdlog::error("rhi_app: frame {} could not be recorded, stopping",
+                    info.index);
+      outcome.aborted = true;
+    }
+  } else if (frame.status == AcquireStatus::Lost) {
+    spdlog::warn("rhi_app: surface lost, recreating");
+    swapchain.Resize(0, 0);
+    swapchain.Resize(info.width, info.height);
+  }
+  // Skip needs no handling at all: EndFrame retires a frame that submitted
+  // nothing, which is what keeps a minimized window from exhausting the pacing
+  // budget.
+  //
+  // And the abort is REPORTED rather than thrown from here, so this always
+  // runs: a break between BeginFrame and EndFrame takes a semaphore count that
+  // is never returned, and the destructor then trips libdispatch's "deallocated
+  // while in use" trap -- a crash that points nowhere near its cause.
+  device.EndFrame();
+  if (!ready) outcome.aborted = true;
+  return outcome;
 }
 
 RunStats AppShell::Run(const AppShellCallbacks& cb, uint64_t max_frames) {
@@ -119,16 +164,46 @@ RunStats AppShell::Run(const AppShellCallbacks& cb, uint64_t max_frames) {
   uint32_t pending_h = applied_height_;
   SurfaceSizeTracker surface{applied_width_, applied_height_};
 
+  // Built ONCE, not per frame: it captures by reference and runs inside the
+  // frame, between the pacing wait and the acquire.
+  //
+  // Gated on what was last applied TO THE SWAPCHAIN, not on the targets: the
+  // targets are deliberately not rebuilt at zero size, so gating on them made a
+  // minimize-then-restore-to-the-same-size never tell the swapchain to come
+  // back from 0x0.
+  const std::function<bool(FrameInfo&)> apply_resize =
+      [&](FrameInfo& info) -> bool {
+    if (const auto action = surface.Update(pending_w, pending_h);
+        action.resize_swapchain) {
+      swapchain_->Resize(pending_w, pending_h);
+      if (action.rebuild_targets) {
+        applied_width_ = pending_w;
+        applied_height_ = pending_h;
+        if (cb.OnResize && !cb.OnResize(applied_width_, applied_height_)) {
+          spdlog::error("rhi_app: could not rebuild for {}x{}, stopping",
+                        pending_w, pending_h);
+          return false;
+        }
+      }
+    }
+    // RESIZE RULE 2: the size is captured once and used for everything.
+    info.width = applied_width_;
+    info.height = applied_height_;
+    return true;
+  };
+
   bool raised_on_show = false;
   running_ = true;
   uint64_t last_ticks = SDL_GetPerformanceCounter();
   const double tick_freq = double(SDL_GetPerformanceFrequency());
 
   while (running_) {
-    // Metal hands back autoreleased objects every frame -- nextDrawable and
-    // each command buffer. Without a pool per frame they accumulate for the
-    // life of the run and it looks like a GPU memory leak.
-    metal::AutoreleasePoolScope pool;
+    // Empty on Windows, an autorelease pool on macOS: Metal hands back
+    // autoreleased objects every frame -- nextDrawable and each command buffer
+    // -- and without a pool per frame they accumulate for the life of the run
+    // and look exactly like a GPU memory leak. The emptiness of the other arm
+    // is what keeps this loop free of #if.
+    PlatformFrameScope frame_scope;
 
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
@@ -181,57 +256,11 @@ RunStats AppShell::Run(const AppShellCallbacks& cb, uint64_t max_frames) {
     // Paced HERE, at the top of the frame, not at Acquire. Blocking at acquire
     // would stall the CPU after input has been sampled and the whole update has
     // run, which is the difference between one frame of latency and three.
-    device_->BeginFrame();
     ++stats.frames_begun;
-    if (cb.OnFrameBegin) cb.OnFrameBegin(device_->CurrentFrame());
-
-    // RESIZE RULE 1: applied at exactly one point, after the pacing wait and
-    // before any acquire or encoding. Nothing is recreated mid-frame.
-    //
-    // Gated on what was last applied TO THE SWAPCHAIN, not on the targets: the
-    // targets are deliberately not rebuilt at zero size, so gating on them made
-    // a minimize-then-restore-to-the-same-size never tell the swapchain to come
-    // back from 0x0.
-    bool fatal = false;
-    if (const auto action = surface.Update(pending_w, pending_h);
-        action.resize_swapchain) {
-      swapchain_->Resize(pending_w, pending_h);
-      if (action.rebuild_targets) {
-        applied_width_ = pending_w;
-        applied_height_ = pending_h;
-        if (cb.OnResize && !cb.OnResize(applied_width_, applied_height_)) {
-          fatal = true;
-        }
-      }
-    }
-    // RESIZE RULE 2: the size is captured once and used for everything.
-    info.width = applied_width_;
-    info.height = applied_height_;
-
-    AcquiredFrame frame;  // defaults to Skip
-    if (!fatal) frame = swapchain_->Acquire();
-    if (frame.status == AcquireStatus::Ok) {
-      if (cb.OnRender && cb.OnRender(frame.view, info)) {
-        swapchain_->Present();
-        ++stats.frames_presented;
-      }
-    } else if (frame.status == AcquireStatus::Lost) {
-      spdlog::warn("rhi_app: surface lost, recreating");
-      swapchain_->Resize(0, 0);
-      swapchain_->Resize(applied_width_, applied_height_);
-    }
-    // Skip needs no handling at all: EndFrame retires a frame that submitted
-    // nothing, which is what keeps a minimized window from exhausting the
-    // pacing budget.
-    device_->EndFrame();
-
-    // Left HERE rather than at the failure itself. A break between BeginFrame
-    // and EndFrame takes a semaphore count that is never returned, and the
-    // destructor then trips libdispatch's "deallocated while in use" trap -- a
-    // crash that points nowhere near the failure that caused it.
-    if (fatal) {
-      spdlog::error("rhi_app: could not rebuild for {}x{}, stopping", pending_w,
-                    pending_h);
+    const FrameOutcome outcome =
+        RunOneFrame(*device_, *swapchain_, cb, info, apply_resize);
+    if (outcome.presented) ++stats.frames_presented;
+    if (outcome.aborted) {
       stats.aborted = true;
       break;
     }
@@ -243,6 +272,10 @@ RunStats AppShell::Run(const AppShellCallbacks& cb, uint64_t max_frames) {
   SDL_GetWindowSizeInPixels(window_, &final_pw, &final_ph);
   stats.final_width = uint32_t(std::max(0, final_pw));
   stats.final_height = uint32_t(std::max(0, final_ph));
+  if (swapchain_) {
+    stats.final_swapchain_width = swapchain_->GetWidth();
+    stats.final_swapchain_height = swapchain_->GetHeight();
+  }
   return stats;
 }
 

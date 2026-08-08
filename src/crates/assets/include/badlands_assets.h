@@ -7,6 +7,7 @@
 #ifndef BADLANDS_ASSETS_H
 #define BADLANDS_ASSETS_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -139,10 +140,11 @@ void badlands_string_free(char* s);
 // padding) to a PNG file at `path`. Used by the app's `--screenshot` mode
 // to dump a rendered frame for visual verification.
 //
-// Failures (null input, unwritable path, encode error, or an internal
-// panic) are logged to stderr; there is no success/failure return value
-// across the C ABI.
-void badlands_write_png(const char* path, const uint8_t* rgba, uint32_t width,
+// Returns true on success. Failures (null input, unwritable path, encode
+// error, or an internal panic) are logged to stderr and reported here -- a
+// caller that assumes success writes "wrote out.png" for a file that does not
+// exist, which is exactly what --screenshot did.
+bool badlands_write_png(const char* path, const uint8_t* rgba, uint32_t width,
                         uint32_t height);
 
 // Write a 16-bit single-channel image (tightly packed, `width * height` uint16

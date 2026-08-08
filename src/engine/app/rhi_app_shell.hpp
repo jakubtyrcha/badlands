@@ -24,9 +24,10 @@
 // A second copy of that list is a second copy of every one of those bugs, fixed
 // in one place and not the other.
 //
-// PLATFORM: Metal only for now, because acquiring a native surface is
-// per-platform (SDL_Metal_CreateView here, an HWND + swapchain for DX12). The
-// loop above it is not, so DX12 adds an arm rather than a second shell.
+// PLATFORM: the per-OS parts live in platform_surface.hpp -- the native
+// surface, the per-frame scope, and the backend choice. Nothing in this file is
+// Metal-specific any more, which is what makes "DX12 adds an arm rather than a
+// second shell" a fact rather than an intention.
 
 #include <cstdint>
 #include <functional>
@@ -35,6 +36,7 @@
 
 #include <SDL3/SDL.h>
 
+#include "engine/app/platform_surface.hpp"
 #include "engine/rhi/rhi_device.hpp"
 
 namespace badlands::rhi_app {
@@ -99,8 +101,15 @@ struct AppShellCallbacks {
   // than in OnRender, because a skipped frame still consumes its slot.
   std::function<void(uint64_t frame_index)> OnFrameBegin;
 
-  // Record into the acquired backbuffer. Return false to skip presenting, for
-  // a frame whose setup failed; the frame still ends, so pacing stays sound.
+  // Record into the acquired backbuffer. Returning false ABORTS THE RUN.
+  //
+  // It used to mean "skip presenting this frame", and that could not work: a
+  // swapchain refuses every later Acquire while a drawable is still acquired,
+  // and only Present clears it. So one refused frame left the surface wedged
+  // for the life of the process -- a black window spamming "acquired twice
+  // without a Present" -- while the loop kept counting frames and the process
+  // still exited 0. Nothing legitimately skips here anyway: a minimized window
+  // is already handled by Acquire returning Skip, before this is called.
   std::function<bool(rhi::ITextureView* target, const FrameInfo&)> OnRender;
 };
 
@@ -111,8 +120,37 @@ struct RunStats {
   uint64_t frames_presented = 0;
   uint32_t final_width = 0;   // PIXELS
   uint32_t final_height = 0;
+  // What the SWAPCHAIN ended up sized for. Reported here rather than fetched
+  // afterwards because the shell is gone by then -- an app that reached for it
+  // after the run read freed memory and got 0x0, which its own assertion then
+  // blamed on the resize.
+  uint32_t final_swapchain_width = 0;
+  uint32_t final_swapchain_height = 0;
   bool aborted = false;  // a callback asked to stop, or a rebuild failed
 };
+
+// What one frame did.
+struct FrameOutcome {
+  bool presented = false;
+  bool aborted = false;  // a rebuild failed, or OnRender refused
+};
+
+// ONE FRAME, WITH NO WINDOW IN IT: pace, begin, apply any resize, acquire,
+// record, present, end.
+//
+// EXTRACTED SO THE LOOP CAN BE TESTED. AppShell needs SDL and a real window, so
+// the only way to check the claims that matter here -- that a refused render
+// does not strand an acquired drawable, that a Skipped acquire still ends its
+// frame -- was to open a window and look at it. Both are checkable against the
+// Null backend, which has the same swapchain state machine and can be told to
+// Skip or Lose on demand.
+//
+// `apply_resize` runs between the pacing wait and the acquire (RESIZE RULE 1)
+// and returns false if the rebuild failed. It is built once by the caller, not
+// per frame.
+FrameOutcome RunOneFrame(rhi::IRhiDevice& device, rhi::ISwapchain& swapchain,
+                         const AppShellCallbacks& callbacks, FrameInfo& info,
+                         const std::function<bool(FrameInfo&)>& apply_resize);
 
 class AppShell {
  public:
@@ -161,7 +199,7 @@ class AppShell {
 
   rhi::IRhiDevice* device_ = nullptr;
   SDL_Window* window_ = nullptr;
-  void* metal_view_ = nullptr;  // SDL_MetalView; opaque so this header is plain
+  NativeSurface surface_;
   rhi::SwapchainPtr swapchain_;
 
   uint32_t applied_width_ = 0;

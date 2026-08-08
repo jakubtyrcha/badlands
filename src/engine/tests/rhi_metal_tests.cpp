@@ -442,6 +442,22 @@ TEST_CASE("metal: CreateView after Destroy is refused", "[rhi][metal]") {
   auto d = MakeMetal();
   rhitest::CheckCreateViewAfterDestroyIsRefused(*d);
 }
+TEST_CASE("metal: a texture readback completes", "[rhi][metal]") {
+  auto d = MakeMetal();
+  rhitest::CheckReadbackCompletes(*d);
+}
+TEST_CASE("metal: a readback notifies exactly once", "[rhi][metal]") {
+  auto d = MakeMetal();
+  rhitest::CheckReadbackNotifiesExactlyOnce(*d);
+}
+TEST_CASE("metal: a readback of a multi-subresource view is refused", "[rhi][metal]") {
+  auto d = MakeMetal();
+  rhitest::CheckReadbackRefusesMultiSubresourceView(*d);
+}
+TEST_CASE("metal: a readback of an uncopyable source is refused", "[rhi][metal]") {
+  auto d = MakeMetal();
+  rhitest::CheckReadbackRefusesUncopyableSource(*d);
+}
 TEST_CASE("metal: cube textures and their views", "[rhi][metal]") {
   auto d = MakeMetal();
   rhitest::CheckCubeTexturesAndTheirViews(*d);
@@ -468,6 +484,116 @@ TEST_CASE("metal: texture write bounds are refused", "[rhi][metal]") {
 // to line up. Nothing on the Null backend can tell whether they do: it records
 // the write and never places a texel anywhere. Without this, the whole
 // translation could be off by a face and both suites would stay green.
+// The half of the readback contract Null CANNOT assert: that the bytes are the
+// texture's bytes. Null stores no texels, so its Data() is defined-size zeros
+// and the shared conformance list checks only the completion protocol.
+//
+// Also the case that catches a readback wired to the wrong subresource: every
+// (face, mip) carries a distinct value, so a copy that ignored either index
+// returns a neighbour's bytes rather than failing.
+TEST_CASE("metal: a readback returns the texture's own texels",
+          "[rhi][metal][gpu]") {
+  auto device = MakeMetal(/*validation=*/false);
+  REQUIRE(device);
+
+  constexpr uint32_t kSize = 4;
+  auto cube = device->CreateTexture({.width = kSize, .height = kSize,
+                                     .array_layers = 6,
+                                     .mip_levels = 2,
+                                     .format = Format::RGBA8Unorm,
+                                     .usage = TextureUsage::CopyDst |
+                                              TextureUsage::CopySrc,
+                                     .dimension = TextureDimension::Cube,
+                                     .label = "rb_cube"});
+  REQUIRE(cube);
+  auto value_for = [](uint32_t face, uint32_t mip) -> uint8_t {
+    return uint8_t(16 + face * 16 + mip * 8);
+  };
+  for (uint32_t face = 0; face < 6; ++face) {
+    for (uint32_t mip = 0; mip < 2; ++mip) {
+      const uint32_t dim = kSize >> mip;
+      std::vector<uint8_t> texels(size_t(dim) * dim * 4, value_for(face, mip));
+      cube->Write(mip, face, {texels.data(), texels.size()});
+    }
+  }
+
+  for (uint32_t face = 0; face < 6; ++face) {
+    for (uint32_t mip = 0; mip < 2; ++mip) {
+      device->BeginFrame();
+      auto encoder = device->CreateCommandEncoder("rb");
+      encoder->Transition(cube.get(), ResourceState::CopySrc);
+      auto* view = cube->CreateView({.base_mip = mip, .mip_count = 1,
+                                     .base_layer = face, .layer_count = 1});
+      REQUIRE(view);
+      auto rb = device->ReadTexture(*encoder, view);
+      REQUIRE(rb);
+      encoder->Finish();
+      device->Submit(*encoder);
+      REQUIRE(rb->Wait());
+
+      const uint32_t dim = kSize >> mip;
+      CHECK(rb->GetWidth() == dim);
+      CHECK(rb->GetHeight() == dim);
+      auto data = rb->Data();
+      REQUIRE(data.size() == size_t(dim) * dim * 4);
+      INFO("face " << face << " mip " << mip << " read " << int(data[0])
+                   << ", expected " << int(value_for(face, mip)));
+      CHECK(data[0] == value_for(face, mip));
+      CHECK(data[data.size() - 1] == value_for(face, mip));
+      device->EndFrame();
+    }
+  }
+}
+
+// The readback must observe the GPU, not just the CPU-visible buffer. A render
+// pass writes the texture on the GPU timeline; without a real completion the
+// staging bytes would be whatever they were before the copy landed.
+TEST_CASE("metal: a readback waits for GPU work, not just for the copy call",
+          "[rhi][metal][gpu]") {
+  auto device = MakeMetal(/*validation=*/false);
+  REQUIRE(device);
+
+  constexpr uint32_t kW = 32, kH = 32;
+  auto color = device->CreateTexture({.width = kW, .height = kH,
+                                      .format = Format::RGBA8Unorm,
+                                      .usage = TextureUsage::RenderTarget |
+                                               TextureUsage::CopySrc,
+                                      .label = "rb_target"});
+  REQUIRE(color);
+
+  device->BeginFrame();
+  auto encoder = device->CreateCommandEncoder("rb_render");
+  const float clear[4] = {0.25f, 0.5f, 0.75f, 1.0f};
+  encoder->Transition(color.get(), ResourceState::RenderTarget);
+  auto* pass = encoder->BeginRenderPass(
+      {.color_attachments = {{.view = color->GetDefaultView(),
+                              .load_op = LoadOp::Clear,
+                              .store_op = StoreOp::Store,
+                              .clear_color = {clear[0], clear[1], clear[2],
+                                              clear[3]}}},
+       .label = "rb_clear"});
+  REQUIRE(pass);
+  pass->End();
+  encoder->Transition(color.get(), ResourceState::CopySrc);
+  auto* rb_view = color->CreateView({.mip_count = 1, .layer_count = 1});
+  REQUIRE(rb_view);
+  auto rb = device->ReadTexture(*encoder, rb_view);
+  REQUIRE(rb);
+  encoder->Finish();
+  device->Submit(*encoder);
+
+  REQUIRE(rb->Wait());
+  auto data = rb->Data();
+  REQUIRE(data.size() == size_t(kW) * kH * 4);
+  INFO("first texel " << int(data[0]) << "," << int(data[1]) << ","
+                      << int(data[2]));
+  CHECK(data[0] == Catch::Approx(64).margin(2));
+  CHECK(data[1] == Catch::Approx(128).margin(2));
+  CHECK(data[2] == Catch::Approx(191).margin(2));
+  CHECK(data[3] == 255);
+  device->EndFrame();
+}
+
 TEST_CASE("metal: cube faces and mips are addressed independently",
           "[rhi][metal][gpu]") {
   auto device = MakeMetal(/*validation=*/false);

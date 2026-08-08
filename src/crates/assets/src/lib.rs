@@ -407,10 +407,10 @@ pub unsafe extern "C" fn badlands_image_free(image: BadlandsImage) {
 /// `--screenshot` mode (src/main.cpp) to dump a rendered frame for visual
 /// verification.
 ///
-/// Failures (null input, non-UTF8/unwritable path, encode error, or an
-/// internal panic) are logged to stderr; there is no success/failure signal
-/// across the C ABI (the caller has nothing actionable to do beyond
-/// checking whether the file exists afterward).
+/// Returns true on success. Failures (null input, non-UTF8/unwritable path,
+/// encode error, or an internal panic) are logged to stderr AND reported here:
+/// the caller was previously left to stat the file, and the one caller that
+/// mattered did not -- it reported a screenshot written when nothing had been.
 ///
 /// # Safety
 /// `path` must be a valid NUL-terminated C string. `rgba` must point at at
@@ -422,7 +422,7 @@ pub unsafe extern "C" fn badlands_write_png(
     rgba: *const u8,
     width: u32,
     height: u32,
-) {
+) -> bool {
     let result = panic::catch_unwind(|| {
         if path.is_null() || rgba.is_null() {
             return Err("null path or pixel buffer".to_string());
@@ -437,9 +437,15 @@ pub unsafe extern "C" fn badlands_write_png(
     });
 
     match result {
-        Ok(Ok(())) => {}
-        Ok(Err(msg)) => eprintln!("badlands_write_png: failed: {msg}"),
-        Err(_) => eprintln!("badlands_write_png: panicked"),
+        Ok(Ok(())) => true,
+        Ok(Err(msg)) => {
+            eprintln!("badlands_write_png: failed: {msg}");
+            false
+        }
+        Err(_) => {
+            eprintln!("badlands_write_png: panicked");
+            false
+        }
     }
 }
 

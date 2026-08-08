@@ -128,9 +128,36 @@ class IRhiDevice {
   virtual std::unique_ptr<ICommandEncoder> CreateCommandEncoder(
       const std::string& label = {}) = 0;
   virtual void Submit(ICommandEncoder& encoder) = 0;
-  // Blocks until all submitted work has completed. Tests and readback want
-  // this; Metal and DX12 are both synchronous here, unlike Dawn.
+  // Blocks until all submitted work has completed.
+  //
+  // A SLEDGEHAMMER, and increasingly the wrong one: it stalls every submission
+  // to synchronise whichever one the caller cared about. ReadTexture below
+  // waits on exactly its own copy instead, and can notify rather than block.
   virtual void WaitIdle() = 0;
+
+  // Records a copy of the subresource `src` names into staging memory and
+  // returns the completion that says it has landed. The copy goes into
+  // `encoder`, so it is ordered against everything else recorded there and
+  // costs no extra submission.
+  //
+  // TAKES A VIEW, which is the same currency a shader binding takes
+  // (BindingEntry::texture_view). One abstraction names a subresource in this
+  // RHI, and it is this one: the thing you bind is the thing you read back. A
+  // (texture, mip, layer) triple here would be a second spelling of
+  // TextureViewDesc, with its own bounds checks to keep in agreement -- and
+  // ResolveViewDesc has already validated this range at CreateView.
+  //
+  // Returns null (after logging) if the texture lacks TextureUsage::CopySrc, or
+  // if `src` covers more than ONE subresource -- a readback produces one tightly
+  // packed image, so a multi-mip or multi-layer view has no single answer.
+  // Creation-time refusals (rule 13): a readback that cannot be encoded must not
+  // exist rather than fail later.
+  //
+  // MUST be called before the encoder is submitted: Metal asserts if a
+  // completion handler is attached after commit, so the backend hangs one at
+  // this point rather than at Submit.
+  virtual TextureReadbackPtr ReadTexture(ICommandEncoder& encoder,
+                                         ITextureView* src) = 0;
 
   // Submissions that have not yet retired. The retirement signal a frame model
   // will be built on, and the only way to observe that submissions are being

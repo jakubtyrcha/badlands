@@ -395,6 +395,117 @@ std::optional<ResolvedBindingTable> ResolveBindingTable(
   return out;
 }
 
+void RecordReadbackCopy(ICommandEncoder& encoder, ITextureView* src,
+                        IBuffer* staging) {
+  if (!src || !staging) return;
+  // STATED, not assumed. Without these the validation layer reports the copy's
+  // source as whatever the last pass left it in -- and on DX12 the copy really
+  // does read a resource still in RENDER_TARGET.
+  encoder.Transition(src->GetTexture(), ResourceState::CopySrc);
+  encoder.Transition(staging, ResourceState::CopyDst);
+  // The view's RESOLVED range says which subresource; ValidateReadbackSource
+  // has already established it is exactly one.
+  const TextureViewDesc& d = src->GetDesc();
+  encoder.CopyTextureToBuffer(src->GetTexture(), d.base_mip, d.base_layer,
+                              staging, 0);
+}
+
+bool ValidateReadbackSource(const ITextureView* src, size_t& out_bytes,
+                            uint32_t& out_width, uint32_t& out_height) {
+  out_bytes = 0;
+  out_width = 0;
+  out_height = 0;
+  if (!src) {
+    spdlog::error("rhi: ReadTexture was given no source view");
+    return false;
+  }
+  const ITexture* tex = src->GetTexture();
+  if (!tex) {
+    spdlog::error("rhi: ReadTexture on '{}': the view has no texture",
+                  src->GetLabel());
+    return false;
+  }
+  if (!Has(tex->GetUsage(), TextureUsage::CopySrc)) {
+    spdlog::error(
+        "rhi: ReadTexture on '{}': the texture lacks TextureUsage::CopySrc, so "
+        "the copy could never be encoded",
+        tex->GetLabel());
+    return false;
+  }
+
+  // ONE SUBRESOURCE. A readback produces one tightly packed image, so a view
+  // spanning several mips or layers has no single answer -- and silently
+  // reading its base would be the accepted-and-ignored trap (rule 4). The
+  // range itself needs no bounds check: ResolveViewDesc validated it at
+  // CreateView, and a resolved desc never carries a 0 count.
+  const TextureViewDesc& d = src->GetDesc();
+  if (d.mip_count != 1 || d.layer_count != 1) {
+    spdlog::error(
+        "rhi: ReadTexture on '{}': a readback names ONE subresource, but this "
+        "view covers {} mip(s) and {} layer(s)",
+        src->GetLabel(), d.mip_count, d.layer_count);
+    return false;
+  }
+
+  const uint32_t texel = FormatByteSize(tex->GetFormat());
+  if (texel == 0) {
+    spdlog::error("rhi: ReadTexture on '{}': format {} has no byte size",
+                  src->GetLabel(), ToString(tex->GetFormat()));
+    return false;
+  }
+  out_width = std::max(1u, tex->GetWidth() >> d.base_mip);
+  out_height = std::max(1u, tex->GetHeight() >> d.base_mip);
+  out_bytes = size_t(out_width) * out_height * texel;
+  return true;
+}
+
+void ReadbackCompletion::Signal() {
+  ReadbackCallback to_run;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (ready_) return;  // idempotent: a second signal must not re-run anything
+    ready_ = true;
+    to_run = std::move(callback_);
+    callback_ = nullptr;
+  }
+  // NOTIFY BEFORE RUNNING, and run OUTSIDE the lock. A callback that blocks --
+  // a PNG encode, say -- would otherwise hold the mutex a waiter needs, so
+  // Wait() would not return until the callback it does not care about is done.
+  cv_.notify_all();
+  if (to_run) to_run();
+}
+
+bool ReadbackCompletion::Wait(std::chrono::milliseconds timeout,
+                              std::string_view label) {
+  std::unique_lock<std::mutex> lock(mutex_);
+  if (cv_.wait_for(lock, timeout, [this] { return ready_; })) return true;
+  spdlog::error(
+      "rhi: readback '{}' did not complete within {} ms -- the GPU may be hung, "
+      "which an unbounded wait would have turned into a process that never "
+      "returns and never says why",
+      label, timeout.count());
+  return false;
+}
+
+void ReadbackCompletion::Register(ReadbackCallback callback) {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!ready_) {
+      callback_ = std::move(callback);
+      return;
+    }
+  }
+  // ALREADY DONE: run it here, on the caller's thread, rather than storing a
+  // callback nothing will ever fire. A backend that only notified from its
+  // completion handler would silently drop this case.
+  if (callback) callback();
+}
+
+bool ReadbackCompletion::IsReady() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return ready_;
+}
+
 std::optional<TextureViewDesc> ResolveViewDesc(const TextureViewDesc& requested,
                                                const TextureDesc& texture,
                                                std::string_view texture_label) {

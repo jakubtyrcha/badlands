@@ -21,22 +21,33 @@ not because it renders. It is the offline half of the map tool: the same
 swapchain, so a stage-2 change can be judged without a display. See
 `patch_export/README.md`.
 
-## The RHI apps are not `AppView`s, and they share a shell
+## The RHI apps are `RhiAppView`s, on their own app layer
 `badlands_rhi_lab` and `badlands_object_viewer` build on `badlands_rhi` (+
 `badlands_slang`, + `badlands_render_graph`), not `badlands_engine`. That is deliberate,
 not temporary: `SdlViewerApp` is Dawn all the way through (`RenderContext` hands views a
-`wgpu::Device`), so the RHI-era app shell is a separate decision.
+`wgpu::Device`), so the RHI era gets its own layer — `engine/app/rhi_app.hpp`
+(`badlands_rhi_app`), with `rhi_app_shell.hpp` as the window/loop primitive beneath it.
 
 The Slang SDK both need is a required prerequisite — `scripts/fetch_slang.sh`.
 
-- **The window, swapchain, resize coalescing and frame pacing live in
-  `engine/app/rhi_app_shell.hpp` (`badlands_rhi_app`), shared by both.** Everything in
-  it was learned the hard way once — macOS focus-on-show, click-through, pixels vs
-  points, coalesced resize, the per-frame autorelease pool — and a second copy is a
-  second copy of every one of those bugs. Add an app by supplying callbacks, not by
-  forking the loop.
+- **`RhiApp` owns SDL, the device, the Slang compiler, the window and swapchain, ImGui
+  in full, argument parsing, frame timing, screenshots and shutdown order.** Everything
+  in the shell under it was learned the hard way once — macOS focus-on-show,
+  click-through, pixels vs points, coalesced resize, the per-frame autorelease pool —
+  and a second copy is a second copy of every one of those bugs. Add an app by writing
+  an `RhiAppView`, not by forking the loop.
+- **It does NOT own the scene.** No scene target and no tonemap: an app renders what it
+  likes into the backbuffer and the layer composites debug UI over it. The one exception
+  is ImGui's own encoded overlay, which cannot be correct anywhere else.
+- **`--frames N`, `--fixed-dt D` and `--screenshot PATH` are the LAYER's flags**, parsed
+  and stripped from argv before the app's own parser runs. An app that also parsed one
+  would have two parsers for it, and the dead one drifts. Apps whose headless path has
+  no loop refuse them rather than ignoring them.
+- **`RhiAppConfig::device` lends an existing device.** An app with both a headless and a
+  windowed path creates one before it knows which; a second device would have it
+  rendering into the other's drawable, which Metal is forgiving enough to draw anyway.
 - **`OnFrameBegin` fires after `BeginFrame`, so a SKIPPED frame still recycles its
-  allocator slot.** Doing that work in `OnRender` leaks slots on a minimized window.
+  allocator slot.** Doing that work in `Render` leaks slots on a minimized window.
 - **`badlands_rhi_app` is separate from `badlands_rhi` because the RHI must never link
   SDL** — it runs headless, and a swapchain is only one of its consumers.
 
@@ -91,7 +102,10 @@ would pass just as well against a graph that recorded no pass at all.
 ./build/badlands_rhi_lab --out /tmp/lab.png              # materials + lighting
 ./build/badlands_rhi_lab --out /tmp/vis.png --debug-vis  # the visibility buffer
 ./build/badlands_rhi_lab --window                        # live: WASD/QE, right-drag to look
+./build/badlands_rhi_lab --window --frames 60 --screenshot /tmp/w.png   # layer flags
 ```
+`--screenshot` works in both modes: the layer reads back the backbuffer when there is a
+window, and names the one-frame PNG when there is not.
 `ctest -L display` runs the windowed resize test; it is out of the default suite
 because it needs a real display.
 

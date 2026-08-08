@@ -13,6 +13,7 @@
 // `GetCommandLog()` returning non-null, so a case still exercises the code path
 // on Metal even when it cannot inspect the result.
 
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -108,6 +109,9 @@ class FailAfterNDevice final : public IRhiDevice {
     return inner_.CreateCommandEncoder(l);
   }
   void Submit(ICommandEncoder& e) override { inner_.Submit(e); }
+  TextureReadbackPtr ReadTexture(ICommandEncoder& e, ITextureView* src) override {
+    return inner_.ReadTexture(e, src);
+  }
   void WaitIdle() override { inner_.WaitIdle(); }
   size_t InFlightCount() override { return inner_.InFlightCount(); }
   uint64_t BeginFrame() override { return inner_.BeginFrame(); }
@@ -416,6 +420,230 @@ inline void CheckCubeTexturesAndTheirViews(IRhiDevice& device) {
   CHECK(as_array != sampled);
   CHECK(as_array->GetDesc().dimension == TextureViewDimension::Tex2DArray);
   CHECK(sampled->GetDesc().dimension == TextureViewDimension::Cube);
+}
+
+// --- Async texture readback -------------------------------------------------
+//
+// The shared contract is the COMPLETION PROTOCOL, not the texels. Null has a
+// frame model but no GPU and no texel storage, so what both backends can
+// promise is: not ready before the work is submitted, ready once waited on, and
+// a callback that fires exactly once. The values themselves are asserted in the
+// Metal suite, where there is something to assert.
+//
+// Deliberately NOT asserted: that a readback is un-ready immediately after
+// Submit. Metal usually has not finished; Null completes at once. Requiring
+// either would be requiring a timing difference, which is how rule 6 gets
+// broken by a test rather than by a backend.
+
+// A readback must RECORD the transitions and the copy it is made of.
+//
+// ASSERTED ON THE RECORDED COMMANDS, because nothing else can see them. The
+// copy goes to the encoder BENEATH the validation decorator, so the decorator's
+// copy check never runs on it and "the validation report is clean" passes
+// whether or not anything was recorded at all -- which is exactly how Null came
+// to record NOTHING while Metal recorded a bare copy with no state declared.
+//
+// Null-only, and not for convenience: the command log IS the claim. On Metal
+// the equivalent evidence is the texels, which CheckReadbackCompletes and the
+// Metal value cases already assert.
+inline void CheckReadbackRecordsItsCopy(IRhiDevice& device) {
+  auto* log = null::GetCommandLog(device);
+  REQUIRE(log);  // caller passes a Null device
+
+  auto tex = device.CreateTexture({.width = 4, .height = 4,
+                                   .format = Format::RGBA8Unorm,
+                                   .usage = TextureUsage::RenderTarget |
+                                            TextureUsage::Sampled |
+                                            TextureUsage::CopySrc,
+                                   .label = "readback_copy_src"});
+  REQUIRE(tex);
+  auto* view = tex->CreateView({.mip_count = 1, .layer_count = 1});
+  REQUIRE(view);
+
+  device.BeginFrame();
+  auto encoder = device.CreateCommandEncoder("readback_copy");
+  REQUIRE(encoder);
+  // Left as a render target, which is what a backbuffer capture reads from and
+  // the state a copy must not be issued in.
+  encoder->Transition(tex.get(), ResourceState::RenderTarget);
+  log->Clear();
+
+  auto readback = device.ReadTexture(*encoder, view);
+  REQUIRE(readback);
+
+  // THE COPY ITSELF. Null used to create a readback object and record nothing,
+  // so its "readback" was an empty promise that completed on schedule.
+  CHECK(log->Count(null::RecordedCommand::Kind::CopyTextureToBuffer) == 1);
+
+  // AND THE STATES IT NEEDS. Neither backend declared these: on DX12 that is a
+  // copy reading a resource still in RENDER_TARGET.
+  // Compared as IResource*, which is what the encoder records. ITexture reaches
+  // IResource virtually, so the two pointers are not interchangeable and
+  // comparing the ITexture* silently never matches.
+  const void* src_as_resource = static_cast<const IResource*>(tex.get());
+  bool saw_copy_src = false, saw_copy_dst = false;
+  for (const auto& c : log->All()) {
+    if (c.kind != null::RecordedCommand::Kind::Transition) continue;
+    if (c.state == ResourceState::CopySrc && c.object == src_as_resource) {
+      saw_copy_src = true;
+    }
+    if (c.state == ResourceState::CopyDst) saw_copy_dst = true;
+  }
+  CHECK(saw_copy_src);
+  CHECK(saw_copy_dst);
+
+  encoder->Finish();
+  device.Submit(*encoder);
+  device.EndFrame();
+  device.WaitIdle();
+}
+
+inline void CheckReadbackCompletes(IRhiDevice& device) {
+  auto tex = device.CreateTexture({.width = 4, .height = 4,
+                                   .format = Format::RGBA8Unorm,
+                                   .usage = TextureUsage::Sampled |
+                                            TextureUsage::CopyDst |
+                                            TextureUsage::CopySrc,
+                                   .label = "readback_src"});
+  REQUIRE(tex);
+  std::vector<uint8_t> texels(4 * 4 * 4, 0x5a);
+  tex->Write(0, 0, AsBytes(texels));
+
+  device.BeginFrame();
+  auto encoder = device.CreateCommandEncoder("readback");
+  REQUIRE(encoder);
+  // THE SAME VIEW a shader binding would take. One abstraction names a
+  // subresource in this RHI, and passing the object you would bind is what
+  // makes "read back what the shader sees" a statement rather than a hope.
+  auto* view = tex->CreateView({.mip_count = 1, .layer_count = 1});
+  REQUIRE(view);
+  auto readback = device.ReadTexture(*encoder, view);
+  REQUIRE(readback);
+  CHECK(readback->GetWidth() == 4);
+  CHECK(readback->GetHeight() == 4);
+  CHECK(readback->GetFormat() == Format::RGBA8Unorm);
+
+  // Before anything is submitted there is nothing to be ready for. Both
+  // backends can promise this one.
+  CHECK_FALSE(readback->IsReady());
+
+  encoder->Finish();
+  device.Submit(*encoder);
+
+  // Wait returns true and, having returned, the data has landed. That ordering
+  // is the whole contract -- not "IsReady eventually flips".
+  REQUIRE(readback->Wait());
+  CHECK(readback->IsReady());
+  CHECK(readback->Data().size() == 4 * 4 * 4);
+  device.EndFrame();
+}
+
+inline void CheckReadbackNotifiesExactlyOnce(IRhiDevice& device) {
+  auto tex = device.CreateTexture({.width = 2, .height = 2,
+                                   .format = Format::RGBA8Unorm,
+                                   .usage = TextureUsage::CopyDst |
+                                            TextureUsage::CopySrc,
+                                   .label = "notify_src"});
+  REQUIRE(tex);
+
+  device.BeginFrame();
+  auto encoder = device.CreateCommandEncoder("notify");
+  auto* view = tex->CreateView({.mip_count = 1, .layer_count = 1});
+  REQUIRE(view);
+  auto readback = device.ReadTexture(*encoder, view);
+  REQUIRE(readback);
+
+  std::atomic<int> fired{0};
+  readback->OnComplete([&fired] { ++fired; });
+
+  encoder->Finish();
+  device.Submit(*encoder);
+  REQUIRE(readback->Wait());
+
+  // FIRED BY THE TIME WAIT RETURNS. A callback that arrives later is a
+  // callback a caller cannot rely on: --screenshot waits and then exits, so a
+  // completion delivered after that is a completion delivered never.
+  CHECK(fired.load() == 1);
+
+  // And registering after the fact runs immediately rather than never -- the
+  // case a caller hits when the copy finished while they were doing something
+  // else, and the one that silently does nothing if the backend only ever
+  // notifies from its completion handler.
+  std::atomic<int> late{0};
+  readback->OnComplete([&late] { ++late; });
+  CHECK(late.load() == 1);
+  CHECK(fired.load() == 1);  // and the first one is not called again
+  device.EndFrame();
+}
+
+inline void CheckReadbackRefusesUncopyableSource(IRhiDevice& device) {
+  // No CopySrc: the copy could never be encoded, so the readback must not
+  // exist rather than fail at submit (rule 13).
+  auto tex = device.CreateTexture({.width = 4, .height = 4,
+                                   .format = Format::RGBA8Unorm,
+                                   .usage = TextureUsage::Sampled,
+                                   .label = "not_copyable"});
+  REQUIRE(tex);
+  device.BeginFrame();
+  auto encoder = device.CreateCommandEncoder("refuse");
+
+  auto* view = tex->CreateView({.mip_count = 1, .layer_count = 1});
+  REQUIRE(view);
+  const std::string log = CaptureLog([&] {
+    CHECK(device.ReadTexture(*encoder, view) == nullptr);
+    CHECK(device.ReadTexture(*encoder, nullptr) == nullptr);
+  });
+  INFO(log);
+  CHECK(log.find("not_copyable") != std::string::npos);
+  device.EndFrame();
+}
+
+// A readback produces ONE tightly packed image, so a view spanning several mips
+// or layers has no single answer. Reading its base anyway would be the
+// accepted-and-ignored trap (rule 4) -- the caller would get a correct-looking
+// image of the wrong extent and nothing would say so.
+//
+// This refusal only became expressible once ReadTexture took a VIEW: a
+// (texture, mip, layer) triple cannot describe a multi-subresource request, so
+// there was nothing to refuse.
+inline void CheckReadbackRefusesMultiSubresourceView(IRhiDevice& device) {
+  auto tex = device.CreateTexture({.width = 8, .height = 8,
+                                   .array_layers = 4,
+                                   .mip_levels = 3,
+                                   .format = Format::RGBA8Unorm,
+                                   .usage = TextureUsage::CopySrc |
+                                            TextureUsage::CopyDst,
+                                   .dimension = TextureDimension::Tex2DArray,
+                                   .label = "multi_sub"});
+  REQUIRE(tex);
+  device.BeginFrame();
+  auto encoder = device.CreateCommandEncoder("multi");
+
+  // Whole-resource: three mips and four layers.
+  auto* whole = tex->GetDefaultView();
+  // One layer but every mip.
+  auto* all_mips = tex->CreateView({.base_layer = 1, .layer_count = 1});
+  // One mip but every layer.
+  auto* all_layers = tex->CreateView({.base_mip = 1, .mip_count = 1});
+
+  const std::string log = CaptureLog([&] {
+    CHECK(device.ReadTexture(*encoder, whole) == nullptr);
+    CHECK(device.ReadTexture(*encoder, all_mips) == nullptr);
+    CHECK(device.ReadTexture(*encoder, all_layers) == nullptr);
+  });
+  INFO(log);
+  CHECK(log.find("ONE subresource") != std::string::npos);
+
+  // And the single-subresource view IS accepted, so the refusal is about the
+  // range rather than about the texture.
+  auto* one = tex->CreateView({.base_mip = 2, .mip_count = 1,
+                               .base_layer = 3, .layer_count = 1});
+  REQUIRE(one);
+  auto rb = device.ReadTexture(*encoder, one);
+  REQUIRE(rb);
+  CHECK(rb->GetWidth() == 2);   // 8 >> 2
+  CHECK(rb->GetHeight() == 2);
+  device.EndFrame();
 }
 
 // --- Creation-time refusals -------------------------------------------------

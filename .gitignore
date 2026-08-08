@@ -10,3 +10,10 @@ build/
 .superpowers/
 __pycache__/
 third_party/toolchains/
+
+# The apps' DEFAULT output names, at the repo root. Every ctest entry runs with
+# WORKING_DIRECTORY = the source dir, so a run that does not pass --out writes
+# here -- and one of these was committed as an LFS object once, which a later
+# test run then silently modified.
+/object_viewer.png
+/rhi_lab.png
