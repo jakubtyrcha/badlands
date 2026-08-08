@@ -341,79 +341,141 @@ void SceneDocument::remove_node(int32_t id, OrphanPolicy policy);
 - Name allocation gains a Group counter beside the per-shape ones
   (`shape_counts_`), so a Group is named "Group 1", "Group 2".
 
-## 4. History
+## 4. History — interactions, temporary state, and serialized modifications
+
+*Rewritten after the original draft. The first version had a snapshot per edit
+behind an RAII `Transaction` that core opened itself; what follows is what was
+designed and built instead. The reason the draft was rejected is worth keeping:
+it treated undo granularity as core's business, when granularity is a property
+of the GESTURE, and gestures belong to the app.*
+
+Three layers, and keeping them apart is the whole of it.
+
+- **An interaction is a user gesture** with a begin and an end — drag a handle,
+  turn the dial, click to spawn, press ⌫. It is the undo granularity and the
+  *only* thing that decides it. **The app declares every boundary, uniformly.**
+  `beginDrag`/`endDrag` are about gizmo state and touch history not at all.
+  Boundaries are refcounted, so a nested begin cannot split one gesture in two
+  nor move the baseline past edits the outer one already made.
+- **During an interaction the document is mutated live, and that is TEMPORARY
+  state.** The drag solver writes `local_position` on every mouse-move exactly
+  as before — no allocation, no recording, no per-event cost.
+- **At `endInteraction` the temporary change is DECOMPOSED into a serialized
+  modification**, by diffing the live document against the baseline captured at
+  begin. What lands is the gesture's net result, never the path the cursor took:
+  one `Move` entry for a drag of any length, one `Shape` entry for a dial turn
+  of any sweep.
+
+**Modifications never fan out.** Moving a parent records one node's changed local
+transform; its children move because their world frames are *derived*. The one
+unavoidable exception, named rather than hidden: `attach(preserve_world_pose)`
+and `remove_node(Reparent)` genuinely rewrite the affected children's local
+transforms, because the frame those were expressed in is going away.
+
+### The record: keyframes plus deltas, and no inverse anywhere
+
+An inverse is the unstable part of a command-undo scheme — float drift on replay,
+and a removal's inverse that must restore a node *at its index* along with every
+orphan fixup it triggered. This design computes none.
 
 ```cpp
-struct Snapshot {
-    SceneDocument doc;
-    int32_t selected;
-    std::string label;   // "Move", "Delete" — what the Edit menu shows
+struct Delta {
+    struct Added { Node node; size_t index; };
+    std::vector<Added>   added;
+    std::vector<int32_t> removed;   // by id
+    std::vector<Node>    changed;   // whole-node replace, matched by id
+    Counters counters;
+    bool empty() const;
 };
-```
 
-A vector of these plus a cursor. A committed edit truncates everything past the
-cursor and pushes the new state. Entry 0 is the initial empty document, so undo
-always has somewhere to land.
+Delta decompose(const SceneDocument& baseline, const SceneDocument& current);
+void  apply(SceneDocument& doc, const Delta& delta);
 
-**Snapshots, not commands**, for three reasons: the document is tiny (~100 nodes is
-~15 KB, a 200-entry stack ~3 MB); snapshots are correct by construction with no
-hand-written inverse to get wrong; and the model changes shape twice more in the
-specs that follow, which would mean revisiting every command's inverse.
+struct Snapshot { SceneDocument doc; };
+struct Entry {
+    std::string label;               // "Move", "Delete" — what the Edit menu shows
+    int32_t selected;                // the selection AFTER this entry
+    std::variant<Snapshot, Delta> payload;
+};
 
-```cpp
 class History {
 public:
-    // RAII. The stack holds STATES, not deltas, so `begin` captures a baseline
-    // only to answer "did anything change", and `commit` pushes the document as
-    // it stands AFTER the mutation. A commit whose document is byte-identical to
-    // the baseline is DISCARDED, which is what makes a click-without-drag and a
-    // dial press that turns nothing leave no entry. A Transaction destroyed
-    // without commit() discards likewise.
-    class Transaction { /* ... */ };
-    Transaction begin(std::string_view label);
+    History(const SceneDocument& initial, int32_t selected);
+    void begin_interaction(std::string_view label, const SceneDocument& doc);
+    void end_interaction(const SceneDocument& doc, int32_t selected);
+    bool in_interaction() const;
 
     bool can_undo() const;
     bool can_redo() const;
-    // Return the state to restore, or nullopt. The Editor applies it.
-    std::optional<Snapshot> undo();
-    std::optional<Snapshot> redo();
-
+    std::optional<Entry> undo(SceneDocument& out_doc);
+    std::optional<Entry> redo(SceneDocument& out_doc);
     const std::string& undo_label() const;   // "" when !can_undo()
     const std::string& redo_label() const;
+
+    static constexpr size_t kSnapshotInterval = 64;
+    static constexpr size_t kMaxEntries = 200;
+    void set_snapshot_interval(size_t interval);   // test seam
 };
 ```
 
 Rules:
 
-- **A gesture is one entry.** `beginDrag` opens a transaction, `endDrag` commits.
-  Same shape for the radial dial's press-to-release.
-- **Selection rides in the snapshot; the camera does not.** Undoing a delete
-  returns the node *selected*; nothing ever teleports the view.
+- **Undo restores the nearest preceding Snapshot and replays Deltas forward.**
+  Exact by construction, because it only ever runs the arithmetic that produced
+  the state in the first place.
+- **Two rules pick a payload**, and they are tested apart: a Snapshot every
+  `kSnapshotInterval` entries (64), and a Snapshot whenever a Delta would cost
+  more than one anyway. The second is not a rounding case — spawning into an
+  empty document produces a delta carrying the whole node *plus its index*,
+  against a document that is just the node.
+- **`added` carries an index** because node order is semantic: `sdf_fold` reduces
+  in vector order, so putting a node back at the wrong position silently
+  repaints the scene.
+- **`counters` rides along.** Id and name allocation is document state; without
+  it a spawn after an undo reuses an id.
+- **Equality is exact, with no tolerance.** A gesture that ended precisely where
+  it began must leave no entry at all.
+- **An interaction that changes nothing pushes nothing** — which is what makes a
+  click that merely selects, and a dial press that turns nothing, free.
+- **Entry 0 always carries a Snapshot.** When the 200-entry cap drops the oldest,
+  entry 1 is rebuilt *before* the erase and promoted, because afterwards the
+  chain it would replay from is gone.
+- **Selection rides per entry; the camera does not.** Undoing a delete returns
+  the node *selected*; nothing ever teleports the view.
 - **Not undoable:** selection changes, camera gestures, hover, mode switches,
   gizmo visibility.
-- **Undoable:** spawn, delete, set op, set shape param, every gizmo gesture,
-  attach, detach.
-- **Cap: 200 entries**, oldest dropped.
-- **Any active drag is ended before undo/redo runs.** `Impl::drag` captures
-  `start_pos`, `start_scale` and a `GizmoFrame` that a restored document
-  invalidates.
+- **Any active drag is ended before undo/redo runs**, and any open interaction is
+  closed. `Impl::drag` holds a `GizmoFrame` and `start_*` values belonging to the
+  document about to be discarded; and the app's matching `endInteraction` would
+  otherwise decompose the restored document against a baseline from a timeline
+  that no longer exists, recording the undo itself as an edit.
 - **No `NSUndoManager`.** Core owns the one stack; the menu calls into it. Two
   stacks over one document is a bug factory.
 
-New files: `core/src/frame.h/.cpp` (Frame, `compose`, the similarity decomposition,
-`FrameProvider`) and `core/src/history.h/.cpp`.
+New files: `core/src/frame.h/.cpp` (Frame, `compose`, `relative_to`, the
+similarity decomposition, `FrameProvider`) and `core/src/history.h/.cpp`.
 
 ## 5. Interop and app layer
 
 Additions to `core/include/shapeshifter/ShapeshifterCore.h`:
 
 ```cpp
+// The app declares every boundary; core decides none.
+void beginInteraction(const char* label);
+void endInteraction();
+
 void undo();
 void redo();
 bool canUndo() const;
 bool canRedo() const;
 void undoLabel(char* buf, int32_t bufLen) const;   // NUL-terminated, "" when none
 void redoLabel(char* buf, int32_t bufLen) const;
+
+// Which handle the running drag grabbed, so the app can name the interaction
+// "Move"/"Rotate"/"Scale" without guessing. Safe to call right after a
+// successful beginDrag: that call mutates the document not at all, so opening
+// the interaction after it still brackets every edit.
+GizmoHit activeDragHandle() const;
 ```
 
 Nothing about hierarchy crosses the boundary. `NodeKind`, `ParentRef` and
@@ -434,7 +496,14 @@ App changes:
 - **An Edit menu** in `ShapeshifterApp`, via
   `.commands { CommandGroup(replacing: .undoRedo) { ... } }`, with titles from
   `undoLabel`/`redoLabel` ("Undo Move"). Disabled when `canUndo`/`canRedo` is
-  false.
+  false. The view model moves up from `ContentView` to `ShapeshifterApp`,
+  because a menu is built beside the window rather than inside its content.
+- **Every mutating gesture is bracketed**, with no exceptions: the gizmo drag
+  (opened *after* `beginDrag` confirms a handle, so an off-handle press leaves
+  no entry), the spawn click, the op toggle, the delete key, and the radial
+  dial — which brackets in its own `DragGesture`, and must also close in
+  `onDisappear`, since `onEnded` never arrives when the knob vanishes
+  mid-gesture and an interaction left open would swallow every later edit.
 
 This is the entire approved UI delta. No panel, no hierarchy outliner, no
 attach/detach affordance, no group creation.
