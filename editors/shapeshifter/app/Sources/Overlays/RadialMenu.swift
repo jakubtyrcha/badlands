@@ -157,6 +157,10 @@ struct RadialMenu: View {
                 .onChanged { gesture in
                     let raw = Self.rawDegrees(at: gesture.location)
                     if drag == nil {
+                        // The turn is ONE undo step. Without this bracket every
+                        // mouse-move would be its own entry, and sweeping the
+                        // dial across its range would cost twenty of them.
+                        vm.beginInteraction("Shape")
                         drag = DialDrag(startFraction: fraction, startAngle: raw,
                                         lastRawAngle: raw, unwrappedAngle: raw)
                     } else {
@@ -174,13 +178,32 @@ struct RadialMenu: View {
                     let target = drag.startFraction + CGFloat(swept / 180.0)
                     vm.setSelectedShapeParam(Self.value(atFraction: target, in: spec))
                 }
-                .onEnded { _ in drag = nil }
+                // Guarded on `drag`, exactly like the disappear path below, so
+                // the pair is symmetric. If the knob vanished mid-gesture and
+                // onDisappear already closed the interaction, an unconditional
+                // end here would decrement an OUTER interaction's refcount --
+                // committing it early and splitting one gesture into two undo
+                // entries.
+                .onEnded { _ in
+                    guard drag != nil else { return }
+                    drag = nil
+                    vm.endInteraction()
+                }
         )
         // The knob only exists while the selection has a parameter. If that
         // stops being true mid-gesture — a delete, a selection change — onEnded
         // never arrives, and a surviving `drag` would apply the previous
         // gesture's offset to the next press and jump the value on touch-down.
-        .onDisappear { drag = nil }
+        //
+        // The interaction has to be closed here for the same reason, and it
+        // matters more: an interaction left open would swallow every later edit
+        // into one undo entry that never closes.
+        .onDisappear {
+            if drag != nil {
+                drag = nil
+                vm.endInteraction()
+            }
+        }
     }
 
     private func track(spec: sq.ShapeParamSpec, drag: DialDrag, fraction: CGFloat) -> some View {

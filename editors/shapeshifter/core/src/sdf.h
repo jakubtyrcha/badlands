@@ -16,7 +16,11 @@ struct Node;
 // parameter intact. Callers that have already moved a query point into the
 // node's rigid frame -- picking's trace, the wireframe's profile sampling --
 // evaluate against this, so there is exactly one place that mapping is written.
-SdfNode local_sdf_node(const Node& node);
+//
+// half_extents comes in rather than being read off the node, because a node's
+// WORLD box is its own scale times whatever uniform scale it inherits, and only
+// the document can answer that (SceneDocument::placement().half_extents).
+SdfNode local_sdf_node(const Node& node, simd_float3 half_extents);
 
 // Regular sampling grid: n samples per axis over a cubic domain, sample
 // (0,0,0) at `origin`, `spacing` between adjacent samples along each axis.

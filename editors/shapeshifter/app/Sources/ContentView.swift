@@ -1,7 +1,10 @@
 import SwiftUI
 
 struct ContentView: View {
-    @State private var vm = EditorViewModel()
+    /// Owned by `ShapeshifterApp` rather than here, because `.commands` builds
+    /// the Edit menu beside the window and needs the same view model the
+    /// viewport is driving.
+    let vm: EditorViewModel
 
     var body: some View {
         ZStack(alignment: .topLeading) {

@@ -14,6 +14,26 @@ using namespace sq;
 
 namespace {
 
+// A NodePlacement for a stand-alone Node, built DIRECTLY rather than resolved
+// through a SceneDocument. These cases are about what this consumer does with a
+// placement, not about how one is produced -- so a bug in
+// SceneDocument::placement belongs to hierarchy_tests and must not light this
+// file up as well. Duplicated per file on purpose, like check_float3_approx.
+NodePlacement placement_of(const Node& n) {
+    NodePlacement p;
+    p.frame.position = n.local_position;
+    p.frame.rotation = n.local_rotation;
+    p.half_extents = 0.5f * simd_abs(n.scale);
+    if (n.contact.valid) {
+        p.contact = WorldContact{n.contact.point, n.contact.normal};
+    }
+    return p;
+}
+
+GizmoFrame gizmo_frame_for_node(const Node& node, const Camera& camera, GizmoSlot slot) {
+    return gizmo_frame_for_node(placement_of(node), camera, slot);
+}
+
 // Parameters are `const`: doctest's CHECK() binds the compared sub-expression
 // to a reference, and Clang only allows that for *const* accesses of
 // ext_vector_type components — same pattern as drag_tests.cpp.
@@ -170,11 +190,11 @@ TEST_CASE("gizmo_frame_for_node: snapped Move uses the snap frame; everything el
     const Camera cam = test_camera();
 
     Node node;
-    node.position = {0.5f, 1.0f, -0.25f};
+    node.local_position = {0.5f, 1.0f, -0.25f};
 
     SUBCASE("free Move: origin = position, basis = the node's local axes") {
         const GizmoFrame f = gizmo_frame_for_node(node, cam, GizmoSlot::Placement);
-        check_float3_approx(f.origin, node.position);
+        check_float3_approx(f.origin, node.local_position);
         // Identity rotation, so the local axes are world X/Y/Z. This used to be
         // a camera-facing basis (-camera_forward and its tangent basis), which
         // is exactly the behaviour being reversed here.
@@ -193,17 +213,17 @@ TEST_CASE("gizmo_frame_for_node: snapped Move uses the snap frame; everything el
     }
 
     SUBCASE("snapped Move: origin = snap_point, n = snap_normal, grid = the tangent plane") {
-        node.snapped = true;
-        node.snap_point = {1.0f, 0.0f, 1.0f};
-        node.snap_normal = simd_normalize(simd_float3{0.0f, 1.0f, 0.2f});
+        node.contact.valid = true;
+        node.contact.point = {1.0f, 0.0f, 1.0f};
+        node.contact.normal = simd_normalize(simd_float3{0.0f, 1.0f, 0.2f});
 
         const GizmoFrame f = gizmo_frame_for_node(node, cam, GizmoSlot::Placement);
-        check_float3_approx(f.origin, node.snap_point);
-        check_float3_approx(f.n, node.snap_normal);
-        check_float3_approx(f.grid_normal, node.snap_normal);
+        check_float3_approx(f.origin, node.contact.point);
+        check_float3_approx(f.n, node.contact.normal);
+        check_float3_approx(f.grid_normal, node.contact.normal);
 
         simd_float3 u, v;
-        tangent_basis(node.snap_normal, u, v);
+        tangent_basis(node.contact.normal, u, v);
         check_float3_approx(f.u, u);
         check_float3_approx(f.v, v);
         // Attached: the two planes coincide, so the patch lands on (u, v).
@@ -212,12 +232,12 @@ TEST_CASE("gizmo_frame_for_node: snapped Move uses the snap frame; everything el
     }
 
     SUBCASE("Scale ignores snapping entirely: always the node's centre and own axes") {
-        node.snapped = true;
-        node.snap_point = {1.0f, 0.0f, 1.0f};
-        node.snap_normal = simd_normalize(simd_float3{0.0f, 1.0f, 0.2f});
+        node.contact.valid = true;
+        node.contact.point = {1.0f, 0.0f, 1.0f};
+        node.contact.normal = simd_normalize(simd_float3{0.0f, 1.0f, 0.2f});
 
         const GizmoFrame f = gizmo_frame_for_node(node, cam, GizmoSlot::Shape);
-        check_float3_approx(f.origin, node.position); // NOT snap_point
+        check_float3_approx(f.origin, node.local_position); // NOT snap_point
         check_float3_approx(f.u, simd_float3{1.0f, 0.0f, 0.0f});
         check_float3_approx(f.v, simd_float3{0.0f, 1.0f, 0.0f});
         check_float3_approx(f.n, simd_float3{0.0f, 0.0f, 1.0f});
@@ -225,7 +245,7 @@ TEST_CASE("gizmo_frame_for_node: snapped Move uses the snap frame; everything el
 
     SUBCASE("half_extent = kGizmoScreenFraction * d * 2*tan(fov/2)") {
         const GizmoFrame f = gizmo_frame_for_node(node, cam, GizmoSlot::Placement);
-        const float d = simd_length(node.position - cam.eye);
+        const float d = simd_length(node.local_position - cam.eye);
         const float expected = kGizmoScreenFraction * d * 2.0f * std::tan(cam.fov_y_radians * 0.5f);
         CHECK(f.half_extent == doctest::Approx(expected));
         CHECK(f.half_extent > 0.0f);
@@ -245,16 +265,16 @@ TEST_CASE("gizmo_frame_for_node: the basis does not depend on the camera") {
     b.target = {0.5f, 1.0f, -0.25f};
 
     Node free_node;
-    free_node.position = {0.5f, 1.0f, -0.25f};
+    free_node.local_position = {0.5f, 1.0f, -0.25f};
 
     Node snapped = free_node;
-    snapped.snapped = true;
-    snapped.snap_point = {1.0f, 0.0f, 1.0f};
-    snapped.snap_normal = simd_normalize(simd_float3{0.3f, 1.0f, 0.2f});
+    snapped.contact.valid = true;
+    snapped.contact.point = {1.0f, 0.0f, 1.0f};
+    snapped.contact.normal = simd_normalize(simd_float3{0.3f, 1.0f, 0.2f});
 
     for (const Node& node : {free_node, snapped}) {
         for (const GizmoSlot slot : {GizmoSlot::Placement, GizmoSlot::Shape}) {
-            INFO("snapped: " << node.snapped << ", shape slot: " << (slot == GizmoSlot::Shape));
+            INFO("snapped: " << node.contact.valid << ", shape slot: " << (slot == GizmoSlot::Shape));
             const GizmoFrame fa = gizmo_frame_for_node(node, a, slot);
             const GizmoFrame fb = gizmo_frame_for_node(node, b, slot);
             check_float3_approx(fa.origin, fb.origin);
@@ -271,9 +291,9 @@ TEST_CASE("gizmo_frame_for_node: the node's own axes follow its rotation") {
     const Camera cam = test_camera();
 
     Node node;
-    node.position = {0.0f, 0.0f, 0.0f};
+    node.local_position = {0.0f, 0.0f, 0.0f};
     // A quarter turn about +Y takes local X to world -Z and local Z to world X.
-    node.rotation = simd_quaternion(static_cast<float>(M_PI_2), simd_float3{0.0f, 1.0f, 0.0f});
+    node.local_rotation = simd_quaternion(static_cast<float>(M_PI_2), simd_float3{0.0f, 1.0f, 0.0f});
 
     for (const GizmoSlot slot : {GizmoSlot::Placement, GizmoSlot::Shape}) {
         INFO("shape slot: " << (slot == GizmoSlot::Shape));
@@ -287,11 +307,11 @@ TEST_CASE("gizmo_frame_for_node: the node's own axes follow its rotation") {
     }
 
     SUBCASE("but a snapped Move frame follows the SURFACE, not the node's spin") {
-        node.snapped = true;
-        node.snap_point = {0.0f, 0.0f, 0.0f};
-        node.snap_normal = {0.0f, 1.0f, 0.0f};
+        node.contact.valid = true;
+        node.contact.point = {0.0f, 0.0f, 0.0f};
+        node.contact.normal = {0.0f, 1.0f, 0.0f};
         const GizmoFrame f = gizmo_frame_for_node(node, cam, GizmoSlot::Placement);
-        check_float3_approx(f.n, node.snap_normal);
+        check_float3_approx(f.n, node.contact.normal);
     }
 }
 
@@ -301,14 +321,14 @@ TEST_CASE("gizmos_coalesce: the two anchors merge below the threshold and split 
     const Camera cam = test_camera();
 
     Node node;
-    node.position = {0.0f, 0.0f, 0.0f};
-    node.snapped = true;
-    node.snap_normal = {0.0f, 1.0f, 0.0f};
+    node.local_position = {0.0f, 0.0f, 0.0f};
+    node.contact.valid = true;
+    node.contact.normal = {0.0f, 1.0f, 0.0f};
 
     const auto pair_for = [&](simd_float3 position, simd_float3 snap_point) {
         Node n = node;
-        n.position = position;
-        n.snap_point = snap_point;
+        n.local_position = position;
+        n.contact.point = snap_point;
         return std::pair<GizmoFrame, GizmoFrame>{
             gizmo_frame_for_node(n, cam, GizmoSlot::Placement),
             gizmo_frame_for_node(n, cam, GizmoSlot::Shape)};
@@ -337,7 +357,7 @@ TEST_CASE("gizmos_coalesce: the two anchors merge below the threshold and split 
 
     SUBCASE("a free node is always coalesced: both slots anchor on its centre") {
         Node free_node;
-        free_node.position = {2.0f, -1.0f, 0.5f};
+        free_node.local_position = {2.0f, -1.0f, 0.5f};
         CHECK(gizmos_coalesce(gizmo_frame_for_node(free_node, cam, GizmoSlot::Placement),
                               gizmo_frame_for_node(free_node, cam, GizmoSlot::Shape)));
     }
@@ -661,16 +681,16 @@ TEST_CASE("gizmo_frame_for_node: the scale frame is node-local, not the drag pla
     // the frame a scale gizmo must NOT use — scale handles have to land on
     // scale components, and a tangent basis maps to none of them.
     Node node;
-    node.position = {1.0f, 2.0f, 0.0f};
-    node.snapped = true;
-    node.snap_point = {1.0f, 1.5f, 0.0f};
-    node.snap_normal = simd_normalize(simd_float3{1.0f, 1.0f, 0.0f});
+    node.local_position = {1.0f, 2.0f, 0.0f};
+    node.contact.valid = true;
+    node.contact.point = {1.0f, 1.5f, 0.0f};
+    node.contact.normal = simd_normalize(simd_float3{1.0f, 1.0f, 0.0f});
 
     const GizmoFrame move = gizmo_frame_for_node(node, cam, GizmoSlot::Placement);
     const GizmoFrame scale = gizmo_frame_for_node(node, cam, GizmoSlot::Shape);
 
-    check_float3_approx(move.origin, node.snap_point); // move rides the snap frame
-    check_float3_approx(scale.origin, node.position);  // scale is centred on the node
+    check_float3_approx(move.origin, node.contact.point); // move rides the snap frame
+    check_float3_approx(scale.origin, node.local_position);  // scale is centred on the node
 
     check_float3_approx(scale.u, simd_float3{1.0f, 0.0f, 0.0f});
     check_float3_approx(scale.v, simd_float3{0.0f, 1.0f, 0.0f});
@@ -680,8 +700,8 @@ TEST_CASE("gizmo_frame_for_node: the scale frame is node-local, not the drag pla
 
     SUBCASE("the scale frame ignores the camera entirely for an unsnapped node") {
         Node loose;
-        loose.position = {1.0f, 2.0f, 0.0f};
-        loose.snapped = false;
+        loose.local_position = {1.0f, 2.0f, 0.0f};
+        loose.contact.valid = false;
 
         Camera other = cam;
         other.eye = {5.0f, -4.0f, 2.0f};
@@ -848,7 +868,7 @@ TEST_CASE("pick_gizmos: a coalesced pair resolves by radius band") {
     // three lines. The bands are what keep them apart.
     const Camera cam = test_camera();
     Node node;
-    node.position = {0.0f, 0.0f, 0.0f};
+    node.local_position = {0.0f, 0.0f, 0.0f};
 
     const GizmoFrame placement = gizmo_frame_for_node(node, cam, GizmoSlot::Placement);
     const GizmoFrame shape = gizmo_frame_for_node(node, cam, GizmoSlot::Shape);
@@ -910,10 +930,10 @@ TEST_CASE("pick_gizmos: a coalesced pair resolves by radius band") {
 TEST_CASE("pick_gizmos: a split pair is picked at whichever anchor the ray is near") {
     const Camera cam = test_camera();
     Node node;
-    node.snapped = true;
-    node.snap_point = {0.0f, 0.0f, 0.0f};
-    node.snap_normal = {0.0f, 1.0f, 0.0f};
-    node.position = {0.0f, 2.5f, 0.0f}; // lifted well clear of the surface
+    node.contact.valid = true;
+    node.contact.point = {0.0f, 0.0f, 0.0f};
+    node.contact.normal = {0.0f, 1.0f, 0.0f};
+    node.local_position = {0.0f, 2.5f, 0.0f}; // lifted well clear of the surface
 
     const GizmoFrame placement = gizmo_frame_for_node(node, cam, GizmoSlot::Placement);
     const GizmoFrame shape = gizmo_frame_for_node(node, cam, GizmoSlot::Shape);
@@ -952,10 +972,10 @@ TEST_CASE("pick_gizmos: a split pair does not let the uniform handle swallow the
     cam.aspect = 800.0f / 500.0f;
 
     Node node;
-    node.snapped = true;
-    node.snap_point = {0.0f, 0.0f, 0.0f};
-    node.snap_normal = {0.0f, 1.0f, 0.0f};
-    node.position = {0.0f, 2.0f, 0.0f}; // lifted along the normal, straight at the eye
+    node.contact.valid = true;
+    node.contact.point = {0.0f, 0.0f, 0.0f};
+    node.contact.normal = {0.0f, 1.0f, 0.0f};
+    node.local_position = {0.0f, 2.0f, 0.0f}; // lifted along the normal, straight at the eye
 
     const GizmoFrame placement = gizmo_frame_for_node(node, cam, GizmoSlot::Placement);
     const GizmoFrame shape = gizmo_frame_for_node(node, cam, GizmoSlot::Shape);

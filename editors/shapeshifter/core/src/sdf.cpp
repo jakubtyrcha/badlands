@@ -33,13 +33,13 @@ float sd_ellipsoid(simd_float3 q, simd_float3 radii) {
     return sdf_sd_ellipsoid(q, radii);
 }
 
-SdfNode local_sdf_node(const Node& node) {
-    const simd_float3 half = node.scale * 0.5f;
+SdfNode local_sdf_node(const Node& node, simd_float3 half_extents) {
     SdfNode sn;
     sn.pos_shape = sdf_make4(0.0f, 0.0f, 0.0f,
                              static_cast<float>(static_cast<int32_t>(node.shape)));
-    sn.half_extents_op = sdf_make4(half.x, half.y, half.z, 0.0f); // op is not read by sdf_eval_node
-    sn.inv_rotation = sdf_make4(0.0f, 0.0f, 0.0f, 1.0f);          // identity
+    sn.half_extents_op =
+        sdf_make4(half_extents.x, half_extents.y, half_extents.z, 0.0f); // op is not read by sdf_eval_node
+    sn.inv_rotation = sdf_make4(0.0f, 0.0f, 0.0f, 1.0f);                 // identity
     sn.params = sdf_make4(node.shape_param, 0.0f, 0.0f, 0.0f);
     return sn;
 }
@@ -52,16 +52,29 @@ void pack_scene(const SceneDocument& doc, std::vector<SdfNode>& out) {
     out.reserve(count); // no-op once out's capacity already covers count
     for (size_t i = 0; i < count; ++i) {
         const Node& node = nodes[i];
-        const simd_float3 half = node.scale * 0.5f;
+        // A Group carries a frame, not geometry. Skipped rather than packed
+        // with a zero extent, because sdf_eval_node floors half-extents at
+        // SDF_MIN_HALF_EXTENT -- so a "zero-size" node would render as a speck
+        // and, if it were a Subtract, quietly punch a hole.
+        if (node.kind != NodeKind::Shape) {
+            continue;
+        }
+        // WHERE the node is comes from the document, never from the node's own
+        // fields. Frame is position + rotation + one uniform scalar by
+        // construction, so what lands in an SdfNode below is representable no
+        // matter how deep the parent chain gets -- a matrix would have let
+        // shear through, and SdfNode has nowhere to put it.
+        const NodePlacement placement = doc.placement(node.id);
+        const simd_float3 half = placement.half_extents;
         // Conjugate, not a general inverse: that identity holds only for a
-        // UNIT quaternion, which Node::rotation is expected to be. The drag
-        // that writes it normalizes on every update (editor.cpp), so the
-        // precondition is maintained at the one place rotation is produced
-        // rather than re-established here per node per frame.
-        const simd_float4 inv = simd_conjugate(node.rotation).vector;
+        // UNIT quaternion. compose() renormalizes for exactly this reason, so
+        // the precondition is maintained where the frame is produced rather
+        // than re-established here per node per frame.
+        const simd_float4 inv = simd_conjugate(placement.frame.rotation).vector;
         SdfNode sn;
-        sn.pos_shape = sdf_make4(node.position.x, node.position.y, node.position.z,
-                                  static_cast<float>(static_cast<int32_t>(node.shape)));
+        sn.pos_shape = sdf_make4(placement.frame.position.x, placement.frame.position.y,
+                                 placement.frame.position.z,
+                                 static_cast<float>(static_cast<int32_t>(node.shape)));
         sn.half_extents_op =
             sdf_make4(half.x, half.y, half.z, (node.op == Op::Add) ? 0.0f : 1.0f);
         sn.inv_rotation = sdf_make4(inv.x, inv.y, inv.z, inv.w);
@@ -77,13 +90,17 @@ std::vector<SdfNode> pack_scene(const SceneDocument& doc) {
 }
 
 std::optional<float> evaluate_scene_sdf(const SceneDocument& doc, simd_float3 p) {
-    if (doc.nodes().empty()) {
-        return std::nullopt;
-    }
     // Single-point convenience query: packs once, folds once. sample_scene
     // below is the perf-sensitive path (N^3 fold evaluations) and packs
     // once itself rather than calling this function per sample point.
     const std::vector<SdfNode> packed = pack_scene(doc);
+    // Guarded on the PACKED count, not on doc.nodes(): a document holding only
+    // Groups has nodes but no geometry, and sdf_fold over nothing returns
+    // FLT_MAX -- which would be handed back as though it were a real distance
+    // rather than the nullopt that means "there is no scene here".
+    if (packed.empty()) {
+        return std::nullopt;
+    }
     return sdf_fold(packed.data(), static_cast<int>(packed.size()), p);
 }
 
@@ -99,13 +116,22 @@ struct Aabb {
 // the cube, loosely for the rest), which is what the cross-section contraction
 // in sdf_eval_node guarantees. Rotation is NOT accounted for -- a pre-existing
 // looseness, and the reason this is only used by the dormant DCSDD sampler.
+// Over SHAPE nodes only: a Group has no box, and folding its zero extent in at
+// its own origin would drag the bound out to wherever the frame happens to sit.
+// `first` tracks whether anything has been folded yet, since the first shape is
+// not necessarily nodes[0].
 Aabb scene_aabb(const SceneDocument& doc) {
-    const std::vector<Node>& nodes = doc.nodes();
-    Aabb box{nodes[0].position - nodes[0].scale * 0.5f, nodes[0].position + nodes[0].scale * 0.5f};
-    for (size_t i = 1; i < nodes.size(); ++i) {
-        const simd_float3 half = nodes[i].scale * 0.5f;
-        box.min = simd_min(box.min, nodes[i].position - half);
-        box.max = simd_max(box.max, nodes[i].position + half);
+    Aabb box{};
+    bool first = true;
+    for (const Node& node : doc.nodes()) {
+        if (node.kind != NodeKind::Shape) {
+            continue;
+        }
+        const NodePlacement p = doc.placement(node.id);
+        const simd_float3 lo = p.frame.position - p.half_extents;
+        const simd_float3 hi = p.frame.position + p.half_extents;
+        box = first ? Aabb{lo, hi} : Aabb{simd_min(box.min, lo), simd_max(box.max, hi)};
+        first = false;
     }
     return box;
 }
@@ -113,7 +139,11 @@ Aabb scene_aabb(const SceneDocument& doc) {
 } // namespace
 
 SampleGrid sample_scene(const SceneDocument& doc, int32_t n) {
-    if (doc.nodes().empty()) {
+    // Pack first and gate on THAT, for the same reason evaluate_scene_sdf does:
+    // a document of Groups alone has nodes and no geometry, and sampling it
+    // would fill every cell with FLT_MAX rather than reporting an empty grid.
+    const std::vector<SdfNode> packed = pack_scene(doc);
+    if (packed.empty()) {
         return SampleGrid{};
     }
     assert(n >= 2 && "sample_scene: n must be >= 2 for a non-empty scene");
@@ -131,10 +161,9 @@ SampleGrid sample_scene(const SceneDocument& doc, int32_t n) {
     grid.n = n;
     grid.values.resize(static_cast<size_t>(n) * static_cast<size_t>(n) * static_cast<size_t>(n));
 
-    // Pack once, fold N^3 times: evaluate_scene_sdf would re-pack (allocate)
-    // per sample point, which is the exact per-call cost this loop cannot
-    // afford at n=64 (262144 samples).
-    const std::vector<SdfNode> packed = pack_scene(doc);
+    // Packed ONCE, above, and folded N^3 times: evaluate_scene_sdf would
+    // re-pack (allocate) per sample point, which is the exact per-call cost
+    // this loop cannot afford at n=64 (262144 samples).
     const int node_count = static_cast<int>(packed.size());
 
     for (int32_t z = 0; z < n; ++z) {

@@ -31,8 +31,12 @@ final class ViewportNSView: NSView {
     var onScroll: ((CGFloat, CGFloat, CGPoint, NSEvent.Phase, NSEvent.Phase) -> Void)?
     /// (magnification, location, phase)
     var onMagnify: ((CGFloat, CGPoint, NSEvent.Phase) -> Void)?
-    /// Returns true if the key was consumed.
-    var onKeyDown: ((String) -> Bool)?
+    /// (characters, modifierFlags). Returns true if the key was consumed.
+    ///
+    /// The modifiers ride along because ⌘ chords are otherwise unreachable:
+    /// `charactersIgnoringModifiers` is all that used to cross, so ⌘Z arrived
+    /// indistinguishable from a bare Z.
+    var onKeyDown: ((String, NSEvent.ModifierFlags) -> Bool)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -118,7 +122,7 @@ final class ViewportNSView: NSView {
     }
 
     override func keyDown(with event: NSEvent) {
-        let consumed = onKeyDown?(event.charactersIgnoringModifiers ?? "") ?? false
+        let consumed = onKeyDown?(event.charactersIgnoringModifiers ?? "", event.modifierFlags) ?? false
         if !consumed {
             super.keyDown(with: event)
         }
@@ -209,7 +213,9 @@ struct MetalViewport: NSViewRepresentable {
         view.onMagnify = { [vm] magnification, point, phase in
             vm.handleMagnify(magnification, at: point, phase: phase)
         }
-        view.onKeyDown = { [vm] characters in vm.handleKeyDown(characters) }
+        view.onKeyDown = { [vm] characters, modifiers in
+            vm.handleKeyDown(characters, modifiers: modifiers)
+        }
 
         return view
     }

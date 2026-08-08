@@ -14,6 +14,26 @@ using namespace sq;
 
 namespace {
 
+// A NodePlacement for a stand-alone Node, built DIRECTLY rather than resolved
+// through a SceneDocument. These cases are about what this consumer does with a
+// placement, not about how one is produced -- so a bug in
+// SceneDocument::placement belongs to hierarchy_tests and must not light this
+// file up as well. Duplicated per file on purpose, like check_float3_approx.
+NodePlacement placement_of(const Node& n) {
+    NodePlacement p;
+    p.frame.position = n.local_position;
+    p.frame.rotation = n.local_rotation;
+    p.half_extents = 0.5f * simd_abs(n.scale);
+    if (n.contact.valid) {
+        p.contact = WorldContact{n.contact.point, n.contact.normal};
+    }
+    return p;
+}
+
+GizmoFrame gizmo_frame_for_node(const Node& node, const Camera& camera, GizmoSlot slot) {
+    return gizmo_frame_for_node(placement_of(node), camera, slot);
+}
+
 // Parameters are `const`: doctest's CHECK() binds the compared sub-expression
 // to a reference, and Clang only allows that for *const* accesses of
 // ext_vector_type components (e.g. `simd_float3.x`) — matches the pattern
@@ -45,10 +65,10 @@ Camera editor_test_camera() {
 GizmoFrame frame_for(Editor* editor, int32_t node_id, bool snapped,
                      simd_float3 snap_point = {}, simd_float3 snap_normal = {0.0f, 1.0f, 0.0f}) {
     Node stub;
-    stub.position = to_simd(editor->nodePosition(node_id));
-    stub.snapped = snapped;
-    stub.snap_point = snap_point;
-    stub.snap_normal = snap_normal;
+    stub.local_position = to_simd(editor->nodePosition(node_id));
+    stub.contact.valid = snapped;
+    stub.contact.point = snap_point;
+    stub.contact.normal = snap_normal;
     return gizmo_frame_for_node(stub, editor_test_camera(), GizmoSlot::Placement);
 }
 

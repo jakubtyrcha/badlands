@@ -39,6 +39,24 @@ final class EditorViewModel {
     /// Radial-menu anchor: the selected node's projected viewport position, or
     /// nil when there's nothing to project onto.
     var radialAnchor: CGPoint? = nil
+
+    /// Edit-menu mirrors. Core owns the one undo stack; these exist only so the
+    /// menu has something `@Observable` to read, refreshed after every edit —
+    /// the same pattern `refreshOverlayState` already follows.
+    var canUndo = false
+    var canRedo = false
+    var undoTitle = "Undo"
+    var redoTitle = "Redo"
+
+    /// Which label a gizmo drag gets, from the handle it grabbed, so the Edit
+    /// menu says what actually happened rather than a generic "Edit".
+    private static func dragLabel(_ hit: sq.GizmoHit) -> String {
+        if hit.slot == .Shape { return "Scale" }
+        switch hit.handle {
+        case .RingU, .RingV, .RingN: return "Rotate"
+        default: return "Move"
+        }
+    }
     /// Mirrors `editor.nodeOp(selectedNodeID)`; nil exactly when
     /// `selectedNodeID` is nil.
     var selectedNodeOp: sq.Op? = nil
@@ -85,8 +103,17 @@ final class EditorViewModel {
         // gesture began. Core also guards defensively (updateDrag no-ops if
         // the selection no longer matches the captured node), but the gesture
         // should be cleanly ended here regardless.
+        //
+        // The INTERACTION has to be closed for the same reason, and the cost of
+        // forgetting is worse than a stale drag. `pointer` is cleared just
+        // below, so the eventual mouseUp lands in `case nil` and the matching
+        // endInteraction never arrives — leaving History::depth_ pinned above
+        // zero, where every later begin/end pair merely nests and NO undo entry
+        // is ever pushed again. Silent, and permanent until a ⌘Z force-closes
+        // it and commits the whole accumulated blob as one step.
         if isDragging {
             editor.endDrag()
+            endInteraction()
             isDragging = false
         }
         pointer = nil
@@ -130,6 +157,11 @@ final class EditorViewModel {
         // the one place the chord didn't work.
         if gesture == .Orbit, mode == .edit, selectedNodeID != nil,
            editor.beginDrag(Float(p.x), Float(p.y)) {
+            // AFTER beginDrag, deliberately. That call captures gizmo state and
+            // mutates the document not at all, so the interaction still
+            // brackets every edit — and only now do we know which handle was
+            // grabbed, which is what the entry gets named after.
+            beginInteraction(Self.dragLabel(editor.activeDragHandle()))
             pointer = .manipulating
             isDragging = true
             return
@@ -170,6 +202,7 @@ final class EditorViewModel {
 
         case .manipulating:
             editor.endDrag()
+            endInteraction() // the whole gesture becomes ONE undo entry
             // endDrag cleared the (stale) pre-drag hover; re-derive it from
             // where the mouse actually is, so a handle still under the cursor
             // stays lit without waiting for the next move.
@@ -197,7 +230,12 @@ final class EditorViewModel {
             refreshSelectionMirrors()
             syncGizmo()
         case .spawn:
+            // A click that spawns is a gesture like any other, so it is
+            // bracketed like any other. The rule has no exceptions: if it
+            // changes the document, it is inside an interaction.
+            beginInteraction("Spawn")
             let s = editor.spawn(spawnShape, spawnOp, Float(p.x), Float(p.y))
+            endInteraction()
             guard s.node_id != sq.kInvalidNode else { return } // zero-size viewport guard in core
             // Selection was already made by core (Editor::spawn calls select()
             // internally); the mirrors + mode switch are the VM's job.
@@ -307,8 +345,25 @@ final class EditorViewModel {
 
     func radialToggleOp() {
         guard let id = selectedNodeID, let current = selectedNodeOp else { return }
+        beginInteraction("Change Op")
         editor.setNodeOp(id, current == .Add ? .Subtract : .Add)
+        endInteraction()
         refreshOverlayState()
+    }
+
+    /// Interaction passthroughs, so a view driving its own gesture (the shape
+    /// dial) never has to touch `editor` directly.
+    ///
+    /// The dial is the case these exist for: `setSelectedShapeParam` fires on
+    /// every mouse-move, and without a boundary each one would be its own undo
+    /// step — turning the dial across its range would cost twenty of them.
+    func beginInteraction(_ label: String) {
+        editor.beginInteraction(label)
+    }
+
+    func endInteraction() {
+        editor.endInteraction()
+        refreshHistoryMirrors()
     }
 
     /// Drives the arc dial. `value` is raw — straight off the cursor's angle —
@@ -325,17 +380,55 @@ final class EditorViewModel {
         refreshOverlayState()
     }
 
-    /// Deletes the selected node (permanent — no undo). Stays in `.edit`:
-    /// there is no camera mode to fall back to any more, and none is needed.
+    /// Deletes the selected node. Stays in `.edit`: there is no camera mode to
+    /// fall back to any more, and none is needed. Undoable — ⌘Z brings the node
+    /// back, still selected.
     func deleteSelected() {
+        beginInteraction("Delete")
         editor.deleteSelectedNode()
+        endInteraction()
+        refreshSelectionMirrors()
+        syncGizmo()
+    }
+
+    // MARK: - Undo / redo
+
+    func undo() {
+        editor.undo()
+        refreshSelectionMirrors()
+        syncGizmo()
+    }
+
+    func redo() {
+        editor.redo()
         refreshSelectionMirrors()
         syncGizmo()
     }
 
     /// Returns true if the key was consumed (so the caller skips
     /// `super.keyDown`).
-    func handleKeyDown(_ characters: String) -> Bool {
+    func handleKeyDown(_ characters: String, modifiers: NSEvent.ModifierFlags) -> Bool {
+        // ⌫ and ⌦ both delete, with no modifier — the Mac canvas-app convention
+        // (Figma, Sketch, Keynote). Finder's ⌘⌫ is a Finder-specific safety
+        // measure against deleting while typing, and this viewport has nothing
+        // to type into.
+        if characters == "\u{7F}" || characters.unicodeScalars.first?.value == UInt32(NSDeleteFunctionKey) {
+            deleteSelected()
+            return true
+        }
+
+        if modifiers.contains(.command) {
+            switch characters.lowercased() {
+            // ⇧⌘Z is the Mac redo. ⌘Y is a Windows convention and is unbound on
+            // macOS — accepted silently below, but never shown in the menu.
+            case "z":
+                if modifiers.contains(.shift) { redo() } else { undo() }
+                return true
+            case "y": redo(); return true
+            default: return false
+            }
+        }
+
         switch characters {
         case "1": setMode(.edit); return true
         case "2": setMode(.spawn); return true
@@ -366,6 +459,26 @@ final class EditorViewModel {
             selectedNodeName = buf.withUnsafeBufferPointer { String(cString: $0.baseAddress!) }
         }
         refreshOverlayState()
+        refreshHistoryMirrors()
+    }
+
+    /// Refreshes the Edit-menu mirrors from core. Called after every mutating
+    /// action and by `refreshSelectionMirrors`, since undo and redo change the
+    /// selection too.
+    private func refreshHistoryMirrors() {
+        canUndo = editor.canUndo()
+        canRedo = editor.canRedo()
+        undoTitle = Self.menuTitle("Undo", editor.undoLabel)
+        redoTitle = Self.menuTitle("Redo", editor.redoLabel)
+    }
+
+    /// "Undo" alone when there is nothing pending, "Undo Move" when there is —
+    /// the standard Mac Edit-menu shape.
+    private static func menuTitle(_ verb: String, _ fill: (UnsafeMutablePointer<CChar>, Int32) -> Void) -> String {
+        var buf = [CChar](repeating: 0, count: 64)
+        fill(&buf, 64)
+        let label = buf.withUnsafeBufferPointer { String(cString: $0.baseAddress!) }
+        return label.isEmpty ? verb : "\(verb) \(label)"
     }
 
     // MARK: - Radial-menu overlay mirrors

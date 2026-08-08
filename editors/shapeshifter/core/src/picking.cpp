@@ -67,7 +67,8 @@ simd_float3 local_normal(const SdfNode& sn, simd_float3 q) {
 
 } // namespace
 
-std::optional<RayHit> raycast_node(const Node& node, const Ray& world) {
+std::optional<RayHit> raycast_node(const Node& node, const NodePlacement& placement,
+                                   const Ray& world) {
     const float dir_len = simd_length(world.dir);
     if (!(dir_len > 0.0f)) {
         return std::nullopt;
@@ -78,14 +79,19 @@ std::optional<RayHit> raycast_node(const Node& node, const Ray& world) {
     // baked into the half-extents the evaluator measures against, exactly as it
     // does for rendering, so this frame differs from world by a rotation and a
     // translation only -- which is what lets `t` mean a world distance.
-    const simd_quatf inv_rotation = simd_conjugate(node.rotation);
-    const simd_float3 o = simd_act(inv_rotation, world.origin - node.position);
+    //
+    // That the resolved frame is rigid is guaranteed by Frame's own shape
+    // (position + rotation + one uniform scalar, no matrix), not merely by
+    // convention -- so no amount of parenting can make this map non-rigid and
+    // quietly turn `t` into something other than a distance.
+    const simd_quatf inv_rotation = simd_conjugate(placement.frame.rotation);
+    const simd_float3 o = simd_act(inv_rotation, world.origin - placement.frame.position);
     const simd_float3 d = simd_act(inv_rotation, dir);
 
     // Reusing sdf_eval_node rather than re-deriving a local evaluator is the
     // point: it is what makes picking and rendering answer with the same
     // surface by construction.
-    const SdfNode sn = local_sdf_node(node);
+    const SdfNode sn = local_sdf_node(node, placement.half_extents);
 
     // Start at kEps rather than 0, which is what makes a hit at or behind the
     // origin impossible by construction -- the guard the analytic version
@@ -102,8 +108,8 @@ std::optional<RayHit> raycast_node(const Node& node, const Ray& world) {
         const float advance = std::fabs(dist);
         if (advance < trace_hit_eps(t)) {
             const simd_float3 normal = local_normal(sn, q);
-            return RayHit{t, node.position + simd_act(node.rotation, q),
-                          simd_act(node.rotation, normal)};
+            return RayHit{t, placement.frame.position + simd_act(placement.frame.rotation, q),
+                          simd_act(placement.frame.rotation, normal)};
         }
         t += std::fmax(advance, kTraceMinStep);
     }
@@ -113,7 +119,10 @@ std::optional<RayHit> raycast_node(const Node& node, const Ray& world) {
 std::optional<PickHit> raycast_scene(const SceneDocument& doc, const Ray& world) {
     std::optional<PickHit> best;
     for (const Node& node : doc.nodes()) {
-        const std::optional<RayHit> hit = raycast_node(node, world);
+        if (node.kind != NodeKind::Shape) {
+            continue; // a Group is a frame, not a surface: nothing to hit
+        }
+        const std::optional<RayHit> hit = raycast_node(node, doc.placement(node.id), world);
         if (hit && (!best || hit->t < best->hit.t)) {
             best = PickHit{node.id, *hit};
         }

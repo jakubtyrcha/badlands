@@ -89,12 +89,12 @@ TEST_CASE("SceneDocument::spawn_snapped: the node is CENTRED on the surface, not
     // position == hit. This used to be hit + normal * 0.5, which left the
     // shape sitting on top of its parent instead of half-embedded in it, and
     // put the node's centre permanently half a unit off its own snap point.
-    check_float3_approx(node->position, hit);
-    check_float3_approx(node->position, node->snap_point); // the coincidence the gizmos rely on
-    CHECK(node->snapped == true);
-    check_float3_approx(node->snap_point, hit);
-    check_float3_approx(node->snap_normal, normal);
-    CHECK(node->snap_parent == 7);
+    check_float3_approx(node->local_position, hit);
+    check_float3_approx(node->local_position, node->contact.point); // the coincidence the gizmos rely on
+    CHECK(node->contact.valid == true);
+    check_float3_approx(node->contact.point, hit);
+    check_float3_approx(node->contact.normal, normal);
+    CHECK(node->contact.surface == 7);
 }
 
 TEST_CASE("SceneDocument::spawn_snapped: an oblique normal does not displace the node either") {
@@ -109,11 +109,11 @@ TEST_CASE("SceneDocument::spawn_snapped: an oblique normal does not displace the
     const Node* node = doc.find(id);
     REQUIRE(node != nullptr);
 
-    check_float3_approx(node->position, hit);
-    CHECK(node->snapped == true);
-    check_float3_approx(node->snap_point, hit);
-    check_float3_approx(node->snap_normal, normal);
-    CHECK(node->snap_parent == 3);
+    check_float3_approx(node->local_position, hit);
+    CHECK(node->contact.valid == true);
+    check_float3_approx(node->contact.point, hit);
+    check_float3_approx(node->contact.normal, normal);
+    CHECK(node->contact.surface == 3);
 }
 
 // --- spawn_unsnapped ---------------------------------------------------------
@@ -127,9 +127,9 @@ TEST_CASE("SceneDocument::spawn_unsnapped: position passed through unmodified, n
     const Node* node = doc.find(id);
     REQUIRE(node != nullptr);
 
-    check_float3_approx(node->position, position);
-    CHECK(node->snapped == false);
-    CHECK(node->snap_parent == kInvalidNode);
+    check_float3_approx(node->local_position, position);
+    CHECK(node->contact.valid == false);
+    CHECK(node->contact.surface == kInvalidNode);
 }
 
 // --- remove_node -------------------------------------------------------------
@@ -141,7 +141,7 @@ TEST_CASE("SceneDocument::remove_node: removes exactly the target node, others k
     const int32_t b = doc.spawn_unsnapped(Shape::Sphere, Op::Add, {1.0f, 0.0f, 0.0f});
     const int32_t c = doc.spawn_unsnapped(Shape::Cube, Op::Subtract, {2.0f, 0.0f, 0.0f});
 
-    doc.remove_node(b);
+    doc.remove_node(b, SceneDocument::OrphanPolicy::Reparent);
 
     REQUIRE(doc.nodes().size() == 2);
     CHECK(doc.nodes()[0].id == a);
@@ -159,7 +159,7 @@ TEST_CASE("SceneDocument::remove_node: removing an unknown id is a no-op") {
     const int32_t a = doc.spawn_unsnapped(Shape::Cube, Op::Add, {0.0f, 0.0f, 0.0f});
     const int32_t b = doc.spawn_unsnapped(Shape::Sphere, Op::Add, {1.0f, 0.0f, 0.0f});
 
-    doc.remove_node(9999); // never issued by this document
+    doc.remove_node(9999, SceneDocument::OrphanPolicy::Reparent); // never issued by this document
 
     REQUIRE(doc.nodes().size() == 2);
     CHECK(doc.nodes()[0].id == a);
@@ -175,25 +175,25 @@ TEST_CASE("SceneDocument::remove_node: survivors snapped onto the removed node h
     const int32_t a = doc.spawn_unsnapped(Shape::Cube, Op::Add, {0.0f, 0.0f, 0.0f});
     const simd_float3 normal = {1.0f, 0.0f, 0.0f};
     const int32_t b = doc.spawn_snapped(Shape::Sphere, Op::Add, {0.5f, 0.0f, 0.0f}, normal, a);
-    REQUIRE(doc.find(b)->snapped == true);
-    REQUIRE(doc.find(b)->snap_parent == a);
+    REQUIRE(doc.find(b)->contact.valid == true);
+    REQUIRE(doc.find(b)->contact.surface == a);
 
     // Unrelated snapped pair (C onto D) that must survive A's removal untouched.
     const int32_t d = doc.spawn_unsnapped(Shape::Cube, Op::Add, {5.0f, 0.0f, 0.0f});
     const int32_t c = doc.spawn_snapped(Shape::Sphere, Op::Add, {5.5f, 0.0f, 0.0f}, normal, d);
-    REQUIRE(doc.find(c)->snapped == true);
-    REQUIRE(doc.find(c)->snap_parent == d);
+    REQUIRE(doc.find(c)->contact.valid == true);
+    REQUIRE(doc.find(c)->contact.surface == d);
 
-    doc.remove_node(a);
+    doc.remove_node(a, SceneDocument::OrphanPolicy::Reparent);
 
     REQUIRE(doc.find(b) != nullptr);
-    CHECK(doc.find(b)->snapped == false);
-    CHECK(doc.find(b)->snap_parent == kInvalidNode);
+    CHECK(doc.find(b)->contact.valid == false);
+    CHECK(doc.find(b)->contact.surface == kInvalidNode);
 
     // Unrelated pair (C/D) untouched by A's removal.
     REQUIRE(doc.find(c) != nullptr);
-    CHECK(doc.find(c)->snapped == true);
-    CHECK(doc.find(c)->snap_parent == d);
+    CHECK(doc.find(c)->contact.valid == true);
+    CHECK(doc.find(c)->contact.surface == d);
 }
 
 TEST_CASE("SceneDocument::remove_node: per-shape name counters continue after removal, never reused") {
@@ -203,7 +203,7 @@ TEST_CASE("SceneDocument::remove_node: per-shape name counters continue after re
     const int32_t cube2 = doc.spawn_unsnapped(Shape::Cube, Op::Add, {0.0f, 0.0f, 0.0f});
     REQUIRE(doc.find(cube2)->name == "Cube 2");
 
-    doc.remove_node(cube2);
+    doc.remove_node(cube2, SceneDocument::OrphanPolicy::Reparent);
     const int32_t cube3 = doc.spawn_unsnapped(Shape::Cube, Op::Add, {0.0f, 0.0f, 0.0f});
 
     // The freed "Cube 2" name/number is never reissued — the counter tracks
@@ -455,4 +455,93 @@ TEST_CASE("Editor: every shape survives the whole app-facing round trip") {
         REQUIRE(attached.node_id != kInvalidNode);
         CHECK(attached.snapped);
     }
+}
+
+// --- placement(): the single placement resolver -----------------------------
+//
+// Pins what placement() answers while it still reads the node's world-space
+// fields directly. These expectations must survive the storage becoming
+// parent-local: a world-rooted node's placement is the same either way, which
+// is exactly the claim the rework rests on.
+
+TEST_CASE("placement reports a spawned node's world frame") {
+    SceneDocument doc;
+    const int32_t id = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{1, 2, 3});
+
+    const NodePlacement p = doc.placement(id);
+    check_float3_approx(p.frame.position, simd_float3{1, 2, 3});
+    CHECK(p.frame.uniform_scale == doctest::Approx(1.0f));
+    CHECK(simd_length(p.frame.rotation.vector) == doctest::Approx(1.0f));
+    // half_extents is scale * 0.5, the same quantity pack_scene writes.
+    check_float3_approx(p.half_extents, simd_float3{0.5f, 0.5f, 0.5f});
+    CHECK_FALSE(p.contact.has_value());
+    CHECK(p.binding_resolved);
+}
+
+TEST_CASE("placement carries a node's rotation and non-uniform scale") {
+    SceneDocument doc;
+    Node n;
+    n.id = 7;
+    n.shape = Shape::Cube;
+    n.local_position = simd_float3{0, 1, 0};
+    n.local_rotation = simd_quaternion(float(M_PI_2), simd_float3{0, 1, 0});
+    n.scale = simd_float3{2, 4, 8};
+    doc.add(n);
+
+    const NodePlacement p = doc.placement(7);
+    check_float3_approx(p.frame.position, simd_float3{0, 1, 0});
+    // Per-node non-uniform scale is untouched: it lives in half_extents and is
+    // applied in the node's own local space, so it never becomes shear.
+    check_float3_approx(p.half_extents, simd_float3{1, 2, 4});
+    check_float3_approx(simd_act(p.frame.rotation, simd_float3{1, 0, 0}), simd_float3{0, 0, -1});
+}
+
+// simd_abs, matching append_node_wireframe and sdf_safe_half_extents: the
+// evaluator measures against abs(half_extents), so a negative component
+// mirrors the solid rather than inverting the box.
+TEST_CASE("placement reports absolute half-extents for a negative scale") {
+    SceneDocument doc;
+    Node n;
+    n.id = 1;
+    n.scale = simd_float3{-2, 1, 1};
+    doc.add(n);
+
+    check_float3_approx(doc.placement(1).half_extents, simd_float3{1, 0.5f, 0.5f});
+}
+
+TEST_CASE("placement reports a snapped node's contact in world space") {
+    SceneDocument doc;
+    const int32_t base = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    const int32_t detail = doc.spawn_snapped(Shape::Sphere, Op::Add, simd_float3{0, 0.5f, 0},
+                                             simd_float3{0, 1, 0}, base);
+
+    const NodePlacement p = doc.placement(detail);
+    REQUIRE(p.contact.has_value());
+    check_float3_approx(p.contact->point, simd_float3{0, 0.5f, 0});
+    check_float3_approx(p.contact->normal, simd_float3{0, 1, 0});
+}
+
+// The tether's whole subject: dragging a detail moves it, and deliberately
+// leaves its contact on the surface it was placed on.
+TEST_CASE("placement's contact does not follow the node's position") {
+    SceneDocument doc;
+    const int32_t base = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    const int32_t detail = doc.spawn_snapped(Shape::Sphere, Op::Add, simd_float3{0, 0.5f, 0},
+                                             simd_float3{0, 1, 0}, base);
+    doc.find(detail)->local_position = simd_float3{0, 3, 0};
+
+    const NodePlacement p = doc.placement(detail);
+    check_float3_approx(p.frame.position, simd_float3{0, 3, 0});
+    REQUIRE(p.contact.has_value());
+    check_float3_approx(p.contact->point, simd_float3{0, 0.5f, 0});
+}
+
+TEST_CASE("placement of an unknown id is the default") {
+    SceneDocument doc;
+    doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{5, 5, 5});
+
+    const NodePlacement p = doc.placement(kInvalidNode);
+    check_float3_approx(p.frame.position, simd_float3{0, 0, 0});
+    check_float3_approx(p.half_extents, simd_float3{0, 0, 0});
+    CHECK_FALSE(p.contact.has_value());
 }

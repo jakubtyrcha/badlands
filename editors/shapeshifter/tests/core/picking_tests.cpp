@@ -15,6 +15,30 @@ using namespace sq;
 
 namespace {
 
+// A NodePlacement for a stand-alone Node, built DIRECTLY rather than resolved
+// through a SceneDocument. These cases are about what this consumer does with a
+// placement, not about how one is produced -- so a bug in
+// SceneDocument::placement belongs to hierarchy_tests and must not light this
+// file up as well. Duplicated per file on purpose, like check_float3_approx.
+NodePlacement placement_of(const Node& n) {
+    NodePlacement p;
+    p.frame.position = n.local_position;
+    p.frame.rotation = n.local_rotation;
+    p.half_extents = 0.5f * simd_abs(n.scale);
+    if (n.contact.valid) {
+        p.contact = WorldContact{n.contact.point, n.contact.normal};
+    }
+    return p;
+}
+
+std::optional<RayHit> raycast_node(const Node& node, const Ray& world) {
+    return raycast_node(node, placement_of(node), world);
+}
+
+SdfNode local_sdf_node(const Node& node) {
+    return local_sdf_node(node, placement_of(node).half_extents);
+}
+
 // Parameters are `const`: doctest's CHECK() binds the compared sub-expression
 // to a reference, and Clang only allows that for *const* accesses of
 // ext_vector_type components (e.g. `simd_float3.x`) — matches the pattern
@@ -418,7 +442,7 @@ TEST_CASE("raycast_scene: non-uniform scale + translation still renormalizes to 
     Node node;
     node.id = 7;
     node.shape = Shape::Sphere;
-    node.position = {3.0f, 0.0f, 0.0f};
+    node.local_position = {3.0f, 0.0f, 0.0f};
     node.scale = {2.0f, 1.0f, 1.0f};
     doc.add(node);
 
@@ -435,7 +459,7 @@ TEST_CASE("raycast_scene: translated cube") {
     Node node;
     node.id = 9;
     node.shape = Shape::Cube;
-    node.position = {0.0f, 3.0f, 0.0f};
+    node.local_position = {0.0f, 3.0f, 0.0f};
     doc.add(node);
 
     const auto hit = raycast_scene(doc, Ray{{0.0f, 3.0f, 5.0f}, {0.0f, 0.0f, -1.0f}});
@@ -451,14 +475,14 @@ TEST_CASE("raycast_scene: nearest node wins, miss-all is nullopt, Subtract nodes
     front.id = 10;
     front.shape = Shape::Sphere;
     front.op = Op::Add;
-    front.position = {0.0f, 0.0f, 0.0f};
+    front.local_position = {0.0f, 0.0f, 0.0f};
     doc.add(front);
 
     Node back; // z=-3
     back.id = 20;
     back.shape = Shape::Sphere;
     back.op = Op::Subtract;
-    back.position = {0.0f, 0.0f, -3.0f};
+    back.local_position = {0.0f, 0.0f, -3.0f};
     doc.add(back);
 
     SUBCASE("ray down -z from z=5 hits the front sphere first") {
@@ -555,14 +579,14 @@ TEST_CASE("raycast_scene: world_t is a true distance and the hit lies on the que
     Node squashed; // world semi-axes (0.1, 1.5, 0.5); reaches z=+0.5
     squashed.id = 1;
     squashed.shape = Shape::Sphere;
-    squashed.position = {0.0f, 0.0f, 0.0f};
+    squashed.local_position = {0.0f, 0.0f, 0.0f};
     squashed.scale = {0.2f, 3.0f, 1.0f};
     doc.add(squashed);
 
     Node stretched; // world half-extents (4, 0.25, 1); near face at z=-5
     stretched.id = 2;
     stretched.shape = Shape::Cube;
-    stretched.position = {0.0f, 0.0f, -6.0f};
+    stretched.local_position = {0.0f, 0.0f, -6.0f};
     stretched.scale = {8.0f, 0.5f, 2.0f};
     doc.add(stretched);
 
@@ -577,7 +601,7 @@ TEST_CASE("raycast_scene: world_t is a true distance and the hit lies on the que
     check_float3_traced(hit->hit.point, origin + hit->hit.t * dir);
 
     SUBCASE("removing the nearer node promotes the farther one, still with a true t") {
-        doc.remove_node(1);
+        doc.remove_node(1, SceneDocument::OrphanPolicy::Reparent);
         const auto far_hit = raycast_scene(doc, Ray{origin, dir});
         REQUIRE(far_hit.has_value());
         CHECK(far_hit->node_id == 2);
@@ -627,7 +651,7 @@ TEST_CASE("raycast_scene round-trips against the camera: ray -> hit -> project r
     Node node;
     node.id = 11;
     node.shape = Shape::Sphere;
-    node.position = camera.target;
+    node.local_position = camera.target;
     node.scale = {3.0f, 3.0f, 3.0f}; // world radius 1.5 -- covers the sampled pixels
     doc.add(node);
 
@@ -707,7 +731,7 @@ TEST_CASE("raycast_scene: a rotated node is picked in its own frame") {
     node.id = 1;
     node.shape = Shape::Cube;
     node.scale = {1.0f, 1.0f, 3.0f};
-    node.rotation = simd_quaternion(static_cast<float>(M_PI_4), simd_float3{0.0f, 1.0f, 0.0f});
+    node.local_rotation = simd_quaternion(static_cast<float>(M_PI_4), simd_float3{0.0f, 1.0f, 0.0f});
     doc.add(node);
 
     const auto hit = raycast_scene(doc, Ray{{0.0f, 0.0f, 5.0f}, {0.0f, 0.0f, -1.0f}});
@@ -760,9 +784,9 @@ TEST_CASE("raycast_scene hits lie on the SDF's zero set, for rotated and non-uni
         node.id = 1;
         node.shape = c.shape;
         node.shape_param = c.param;
-        node.position = {0.25f, -0.5f, 0.75f};
+        node.local_position = {0.25f, -0.5f, 0.75f};
         node.scale = c.scale;
-        node.rotation = simd_quaternion(0.9f, simd_normalize(simd_float3{1.0f, 2.0f, -1.0f}));
+        node.local_rotation = simd_quaternion(0.9f, simd_normalize(simd_float3{1.0f, 2.0f, -1.0f}));
         doc.add(node);
 
         // A spread of oblique rays, so no single lucky alignment can carry the
@@ -772,7 +796,7 @@ TEST_CASE("raycast_scene hits lie on the SDF's zero set, for rotated and non-uni
         }};
         for (const simd_float3& eye : eyes) {
             INFO("eye: (" << eye.x << ", " << eye.y << ", " << eye.z << ")");
-            const simd_float3 dir = simd_normalize(node.position - eye);
+            const simd_float3 dir = simd_normalize(node.local_position - eye);
             const auto hit = raycast_scene(doc, Ray{eye, dir});
             REQUIRE(hit.has_value());
             const auto d = evaluate_scene_sdf(doc, hit->hit.point);

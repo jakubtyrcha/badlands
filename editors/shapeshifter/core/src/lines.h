@@ -140,7 +140,13 @@ std::vector<LineVertex> build_scene_lines(const SceneDocument& doc, int32_t sele
 //
 // eye_world only reaches the sphere's view-dependent silhouette; the rest are
 // real edges or lathe profiles and do not depend on where you are looking from.
-void append_node_wireframe(std::vector<LineVertex>& out, const Node& node, simd_float4 color,
+//
+// `placement` supplies WHERE the node is and how big its box is; `node` supplies
+// only what it is (shape and profile parameter). build_scene_lines resolves the
+// pair from the document; this overload takes it explicitly so a test can place
+// one node without a document.
+void append_node_wireframe(std::vector<LineVertex>& out, const Node& node,
+                           const NodePlacement& placement, simd_float4 color,
                            simd_float3 eye_world);
 
 // The modify-mode move gizmo, drawn from the same GizmoFrame the hit-testing

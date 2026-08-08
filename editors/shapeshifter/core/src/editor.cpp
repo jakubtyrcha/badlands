@@ -10,6 +10,7 @@
 #include "camera.h"
 #include "camera_controller.h"
 #include "gizmo.h"
+#include "history.h"
 #include "navigation.h"
 #include "picking.h"
 #include "rhi_renderer.h"
@@ -37,6 +38,38 @@ inline constexpr float kOriginMarkerHeight = 3.0f;       // world units
 inline constexpr float kOriginMarkerHalfWidthPts = 1.0f; // ~2pt shaft
 inline constexpr float kOriginPipHalfSizePts = 2.5f;
 
+namespace {
+
+// Stores a WORLD pose on a node.
+//
+// Every gizmo drag solves in world space -- the gizmo frame is world, the ray
+// is world, the plane and axis solutions are world -- but a node's transform is
+// stored relative to whatever it hangs off. This is the one place the two meet,
+// so no solver has to know which frame it is writing into.
+//
+// The conversion is exactly the identity for a world-rooted node, which is
+// every node today. That is the point: the drags become CORRECT under
+// parenting rather than accidentally correct only while the scene is flat.
+void set_world_pose(SceneDocument& scene, Node& node, simd_float3 position,
+                    simd_quatf rotation) {
+    Frame world;
+    world.position = position;
+    world.rotation = rotation;
+    // Scale is not what a move or a rotate changes, so the node's current
+    // resolved scale rides through and relative_to hands its own contribution
+    // back untouched.
+    world.uniform_scale = scene.placement(node.id).frame.uniform_scale;
+
+    const Frame local = relative_to(scene.parent_frame(node.id), world);
+    node.local_position = local.position;
+    // Renormalised because pack_scene conjugates rather than inverts, which is
+    // only the same thing for a unit quaternion (see sdf.cpp). relative_to
+    // already normalises; this states the precondition where it is stored.
+    node.local_rotation = simd_normalize(local.rotation);
+}
+
+} // namespace
+
 struct Editor::Impl {
     // The device, the shader compiler and the renderer are all created at
     // attachLayer, because a Metal device is only worth creating once there is
@@ -59,7 +92,28 @@ struct Editor::Impl {
     void markSceneLinesDirty() {
         if (renderer) renderer->set_scene_lines_dirty();
     }
+
+    // Restores a replayed entry. The hover pointed at a gizmo belonging to a
+    // document that no longer exists; the app re-derives it from the cursor on
+    // the next mouse move.
+    void applyHistoryEntry(const Entry& entry) {
+        selected = entry.selected;
+        hover = GizmoHit{GizmoSlot::Placement, GizmoHandle::None};
+        markSceneLinesDirty();
+    }
+
+    // Unwinds however many interaction levels the app left open. A loop rather
+    // than a single call because the boundaries are refcounted and nesting is
+    // legal.
+    void closeOpenInteractions() {
+        while (history.in_interaction()) {
+            history.end_interaction(scene, selected);
+        }
+    }
     SceneDocument scene;
+    // Seeded from the scene as it stands at construction (empty), so entry 0 is
+    // a real starting point and undo always has somewhere to land.
+    History history{SceneDocument{}, kInvalidNode};
     CameraController controller;
     float viewportWidthPts = 0.0f;  // for pick()'s ray_through_view_point
     float viewportHeightPts = 0.0f; // for the camera gestures, gizmo picking and pick()
@@ -219,9 +273,13 @@ void Editor::render() {
     // just gets an origin/normal/extent to draw a grid at.
     const Node* selectedNode = impl_->gizmo_visible ? impl_->scene.find(impl_->selected) : nullptr;
     if (selectedNode != nullptr) {
+        // Resolved ONCE and reused for both slots: the two gizmos describe the
+        // same node, so asking the document twice would only invite them to
+        // disagree if resolution ever stops being a pure function.
+        const NodePlacement resolved = impl_->scene.placement(selectedNode->id);
         const GizmoFrame placement =
-            gizmo_frame_for_node(*selectedNode, camera, GizmoSlot::Placement);
-        const GizmoFrame shape = gizmo_frame_for_node(*selectedNode, camera, GizmoSlot::Shape);
+            gizmo_frame_for_node(resolved, camera, GizmoSlot::Placement);
+        const GizmoFrame shape = gizmo_frame_for_node(resolved, camera, GizmoSlot::Shape);
         // Mid-drag the active handle owns the highlight (mouseMoved doesn't
         // fire while the button is down, so hover would be stale anyway).
         const GizmoHit highlighted =
@@ -376,8 +434,10 @@ void Editor::frameSelected() {
         return;
     }
     const Camera camera = impl_->controller.to_camera();
-    const float radius = frame_radius_for_bound(node_bounding_radius(*node), camera.fov_y_radians);
-    if (impl_->controller.frame_on(node->position, radius)) {
+    const NodePlacement resolved = impl_->scene.placement(node->id);
+    const float radius =
+        frame_radius_for_bound(node_bounding_radius(*node, resolved), camera.fov_y_radians);
+    if (impl_->controller.frame_on(resolved.frame.position, radius)) {
         impl_->last_camera_activity = std::chrono::steady_clock::now();
         impl_->markSceneLinesDirty();
     }
@@ -450,13 +510,87 @@ void Editor::deleteSelectedNode() {
     // that both gizmo kinds share this one drag path.
     endDrag();
 
-    impl_->scene.remove_node(impl_->selected);
+    // Which policy a deletion means follows from what was deleted. Removing a
+    // SHAPE is removing one piece of geometry, and the details placed on it are
+    // their own things -- they survive where they stand, which is what removal
+    // has always done. Removing a GROUP is removing an assembly, and a group is
+    // its contents, so the subtree goes with it.
+    const Node* node = impl_->scene.find(impl_->selected);
+    const SceneDocument::OrphanPolicy policy =
+        (node != nullptr && node->kind == NodeKind::Group)
+            ? SceneDocument::OrphanPolicy::Cascade
+            : SceneDocument::OrphanPolicy::Reparent;
+    impl_->scene.remove_node(impl_->selected, policy);
     impl_->selected = kInvalidNode;
     impl_->hover = GizmoHit{GizmoSlot::Placement, GizmoHandle::None}; // deletion bypasses select(), so clear here too
     // Gizmo hides on its own next render(): selectedNode is looked up via
     // impl_->scene.find(impl_->selected), which is null once selected is
     // kInvalidNode, regardless of gizmo_visible — no separate flag to clear.
     impl_->markSceneLinesDirty();
+}
+
+// --- interactions and history ----------------------------------------------
+
+void Editor::beginInteraction(const char* label) {
+    impl_->history.begin_interaction(label != nullptr ? label : "", impl_->scene);
+}
+
+void Editor::endInteraction() {
+    impl_->history.end_interaction(impl_->scene, impl_->selected);
+}
+
+// An active drag holds a captured GizmoFrame and start_* values belonging to
+// the document state about to be discarded, so the gesture ends BEFORE anything
+// is restored. Closing any open interaction matters just as much: the app's
+// matching endInteraction would otherwise decompose the RESTORED document
+// against a baseline from a timeline that no longer exists, recording the undo
+// itself as an edit.
+void Editor::undo() {
+    endDrag();
+    impl_->closeOpenInteractions();
+    if (const std::optional<Entry> entry = impl_->history.undo(impl_->scene)) {
+        impl_->applyHistoryEntry(*entry);
+    }
+}
+
+void Editor::redo() {
+    endDrag();
+    impl_->closeOpenInteractions();
+    if (const std::optional<Entry> entry = impl_->history.redo(impl_->scene)) {
+        impl_->applyHistoryEntry(*entry);
+    }
+}
+
+bool Editor::canUndo() const { return impl_->history.can_undo(); }
+bool Editor::canRedo() const { return impl_->history.can_redo(); }
+
+namespace {
+
+// The NUL-terminated fill nodeName established, shared by both label getters.
+void fillLabel(const std::string& text, char* buf, int32_t bufLen) {
+    if (buf == nullptr || bufLen <= 0) {
+        return;
+    }
+    const int32_t n = std::min<int32_t>(bufLen - 1, static_cast<int32_t>(text.size()));
+    if (n > 0) {
+        std::memcpy(buf, text.data(), static_cast<size_t>(n));
+    }
+    buf[n] = '\0';
+}
+
+} // namespace
+
+void Editor::undoLabel(char* buf, int32_t bufLen) const {
+    fillLabel(impl_->history.undo_label(), buf, bufLen);
+}
+
+void Editor::redoLabel(char* buf, int32_t bufLen) const {
+    fillLabel(impl_->history.redo_label(), buf, bufLen);
+}
+
+GizmoHit Editor::activeDragHandle() const {
+    return impl_->drag.active ? GizmoHit{impl_->drag.slot, impl_->drag.handle}
+                              : GizmoHit{GizmoSlot::Placement, GizmoHandle::None};
 }
 
 void Editor::nodeName(int32_t nodeId, char* buf, int32_t bufLen) const {
@@ -496,8 +630,9 @@ void Editor::updateGizmoHover(float x, float y) {
 
     const Camera camera = impl_->controller.to_camera();
     const Ray ray = camera.ray_through_view_point(x, y, impl_->viewportWidthPts, impl_->viewportHeightPts);
-    impl_->hover = pick_gizmos(gizmo_frame_for_node(*node, camera, GizmoSlot::Placement),
-                               gizmo_frame_for_node(*node, camera, GizmoSlot::Shape), ray,
+    const NodePlacement resolved = impl_->scene.placement(node->id);
+    impl_->hover = pick_gizmos(gizmo_frame_for_node(resolved, camera, GizmoSlot::Placement),
+                               gizmo_frame_for_node(resolved, camera, GizmoSlot::Shape), ray,
                                camera.fov_y_radians, impl_->viewportHeightPts);
 }
 
@@ -548,8 +683,9 @@ bool Editor::beginDrag(float x, float y) {
     // Captured NOW: the frame (basis AND half_extent) is fixed for the whole
     // drag, even though the node (and, for a snapped node, its snap fields)
     // moves as the drag proceeds.
-    const GizmoFrame placement = gizmo_frame_for_node(*node, camera, GizmoSlot::Placement);
-    const GizmoFrame shape = gizmo_frame_for_node(*node, camera, GizmoSlot::Shape);
+    const NodePlacement resolved = impl_->scene.placement(node->id);
+    const GizmoFrame placement = gizmo_frame_for_node(resolved, camera, GizmoSlot::Placement);
+    const GizmoFrame shape = gizmo_frame_for_node(resolved, camera, GizmoSlot::Shape);
 
     const Ray ray = camera.ray_through_view_point(x, y, impl_->viewportWidthPts, impl_->viewportHeightPts);
     const GizmoHit hit =
@@ -585,7 +721,9 @@ bool Editor::beginDrag(float x, float y) {
             return false; // edge-on or degenerate: the solver has no angle to offer
         }
         impl_->drag.start_ring_dir = *dir;
-        impl_->drag.start_rotation = node->rotation;
+        // WORLD, matching the frame the solver works in. set_world_pose puts
+        // the result back into whatever frame the node is stored in.
+        impl_->drag.start_rotation = impl_->scene.placement(node->id).frame.rotation;
     } else if (gizmo_handle_is_axis(handle)) {
         const std::optional<float> s = ray_axis_param(ray, frame.origin, gizmo_axis_dir(frame, handle));
         if (!s) {
@@ -604,7 +742,8 @@ bool Editor::beginDrag(float x, float y) {
     impl_->drag.slot = slot;
     impl_->drag.handle = handle;
     impl_->drag.start_y = y;
-    impl_->drag.start_pos = node->position;
+    impl_->drag.start_pos = impl_->scene.placement(node->id).frame.position; // WORLD, like the frame
+
     impl_->drag.node_id = node->id;
     impl_->drag.active = true;
     return true;
@@ -650,11 +789,17 @@ void Editor::updateDrag(float x, float y) {
             // and finite by construction — see scale_axis_param.
             scale[axis] = impl_->drag.start_scale[axis] * (*s / impl_->drag.start_axis_s);
         }
-        node->scale = simd_float3{
+        // THROUGH the setter, not around it. set_node_scale exists because a
+        // Group's scale has to stay uniform -- compose has no meaning for a
+        // Group at {1,2,1} -- and this is the one place that could have written
+        // one directly. Unreachable today only because raycast_scene skips
+        // Groups so none can be picked, which is exactly the kind of accident
+        // that stops being true later.
+        impl_->scene.set_node_scale(node->id, simd_float3{
             std::clamp(scale.x, kNodeScaleMin, kNodeScaleMax),
             std::clamp(scale.y, kNodeScaleMin, kNodeScaleMax),
             std::clamp(scale.z, kNodeScaleMin, kNodeScaleMax),
-        };
+        });
         impl_->markSceneLinesDirty();
         return;
     }
@@ -674,19 +819,16 @@ void Editor::updateDrag(float x, float y) {
         // price of an angle that cannot mis-count a winding on a fast flick.
         const float theta = signed_angle_about(impl_->drag.start_ring_dir, *dir, axis);
         const simd_quatf q = simd_quaternion(theta, axis);
-        // Renormalised because pack_scene conjugates rather than inverts, which
-        // is only the same thing for a unit quaternion (see sdf.cpp). This is
-        // the one place rotation is produced, so it is the one place that has
-        // to hold up the precondition.
-        node->rotation = simd_normalize(simd_mul(q, impl_->drag.start_rotation));
         // Swing the node AROUND the anchor rather than spinning it in place:
         // for an attached detail the anchor is its contact point, so this is
         // what keeps it touching the surface. A free node's anchor is its own
         // centre, making the second term zero -- one formula, both cases.
-        node->position = impl_->drag.frame.origin +
-                         simd_act(q, impl_->drag.start_pos - impl_->drag.frame.origin);
-        // snap_point and snap_normal are deliberately untouched: the surface
-        // did not move, and the contact point is what we just rotated about.
+        set_world_pose(impl_->scene, *node, impl_->drag.frame.origin +
+                                                simd_act(q, impl_->drag.start_pos -
+                                                                impl_->drag.frame.origin),
+                       simd_mul(q, impl_->drag.start_rotation));
+        // The contact is deliberately untouched: the surface did not move, and
+        // its point is what we just rotated about.
         impl_->markSceneLinesDirty();
         return;
     }
@@ -716,8 +858,9 @@ void Editor::updateDrag(float x, float y) {
         delta = *hit - impl_->drag.start_hit;
     }
 
-    node->position = impl_->drag.start_pos + delta;
-    // snap_point deliberately does NOT follow. The attachment point is a fact
+    set_world_pose(impl_->scene, *node, impl_->drag.start_pos + delta,
+                   impl_->scene.placement(node->id).frame.rotation);
+    // The contact deliberately does NOT follow. The attachment point is a fact
     // about the surface the detail was placed on, not about where the detail
     // has since been dragged to -- so pulling a node along its normal leaves
     // the attachment on the skin and opens a visible offset between the two
@@ -741,11 +884,11 @@ void Editor::endDrag() {
 }
 
 Vec3f Editor::nodePosition(int32_t nodeId) const {
-    const Node* node = impl_->scene.find(nodeId);
-    if (node == nullptr) {
-        return Vec3f{0.0f, 0.0f, 0.0f};
-    }
-    return Vec3f{node->position.x, node->position.y, node->position.z};
+    // WORLD, which is what a caller asking "where is this node" means. An
+    // unknown id needs no separate branch: placement's own miss case is a
+    // default frame, whose position is already the {0,0,0} this promises.
+    const simd_float3 p = impl_->scene.placement(nodeId).frame.position;
+    return Vec3f{p.x, p.y, p.z};
 }
 
 ScreenPoint Editor::projectSelectedAnchor() const {
@@ -760,7 +903,8 @@ ScreenPoint Editor::projectSelectedAnchor() const {
     // ViewPoint already returns {0,0,false} when the point is behind the
     // camera (clip.w <= 0), so this is a direct field-for-field mapping.
     const ViewPoint vp = impl_->controller.to_camera().project(
-        node->position, impl_->viewportWidthPts, impl_->viewportHeightPts);
+        impl_->scene.placement(node->id).frame.position, impl_->viewportWidthPts,
+        impl_->viewportHeightPts);
     return ScreenPoint{vp.x, vp.y, vp.visible};
 }
 
@@ -784,11 +928,15 @@ void Editor::setNodeOp(int32_t nodeId, Op op) {
 }
 
 Vec3f Editor::nodeScale(int32_t nodeId) const {
-    const Node* node = impl_->scene.find(nodeId);
-    if (node == nullptr) {
-        return Vec3f{0.0f, 0.0f, 0.0f};
-    }
-    return Vec3f{node->scale.x, node->scale.y, node->scale.z};
+    // WORLD, to match nodePosition and nodeRotation. Reporting the node's own
+    // box here while those two report resolved values would hand any caller
+    // reading the trio a mixed-frame answer -- one that disagrees with what is
+    // rendered the moment anything is parented under a scaled Group.
+    //
+    // Doubled because half_extents is what the document resolves and what
+    // pack_scene writes; scale is the full extent it was derived from.
+    const simd_float3 extent = 2.0f * impl_->scene.placement(nodeId).half_extents;
+    return Vec3f{extent.x, extent.y, extent.z};
 }
 
 Vec4f Editor::nodeRotation(int32_t nodeId) const {
@@ -796,7 +944,7 @@ Vec4f Editor::nodeRotation(int32_t nodeId) const {
     if (node == nullptr) {
         return Vec4f{0.0f, 0.0f, 0.0f, 1.0f}; // identity, not zero: a zero quaternion is not a rotation
     }
-    const simd_float4 q = node->rotation.vector;
+    const simd_float4 q = impl_->scene.placement(node->id).frame.rotation.vector; // WORLD
     return Vec4f{q.x, q.y, q.z, q.w};
 }
 

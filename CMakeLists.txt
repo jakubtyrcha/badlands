@@ -2566,7 +2566,9 @@ add_library(shapeshifter_core STATIC
     ${SHAPESHIFTER_DIR}/core/src/camera_controller.cpp
     ${SHAPESHIFTER_DIR}/core/src/dcsdd.cpp
     ${SHAPESHIFTER_DIR}/core/src/editor.cpp
+    ${SHAPESHIFTER_DIR}/core/src/frame.cpp
     ${SHAPESHIFTER_DIR}/core/src/gizmo.cpp
+    ${SHAPESHIFTER_DIR}/core/src/history.cpp
     ${SHAPESHIFTER_DIR}/core/src/lines.cpp
     ${SHAPESHIFTER_DIR}/core/src/mesh_job.cpp
     ${SHAPESHIFTER_DIR}/core/src/navigation.cpp
@@ -2642,11 +2644,15 @@ add_executable(shapeshifter_core_tests
     ${SHAPESHIFTER_DIR}/tests/core/camera_tests.cpp
     ${SHAPESHIFTER_DIR}/tests/core/dcsdd_tests.cpp
     ${SHAPESHIFTER_DIR}/tests/core/drag_tests.cpp
+    ${SHAPESHIFTER_DIR}/tests/core/frame_tests.cpp
     ${SHAPESHIFTER_DIR}/tests/core/gizmo_tests.cpp
     ${SHAPESHIFTER_DIR}/tests/core/ground_grid_tests.cpp
+    ${SHAPESHIFTER_DIR}/tests/core/hierarchy_tests.cpp
+    ${SHAPESHIFTER_DIR}/tests/core/history_tests.cpp
     ${SHAPESHIFTER_DIR}/tests/core/lines_tests.cpp
     ${SHAPESHIFTER_DIR}/tests/core/mesh_job_tests.cpp
     ${SHAPESHIFTER_DIR}/tests/core/navigation_tests.cpp
+    ${SHAPESHIFTER_DIR}/tests/core/pack_baseline_tests.cpp
     ${SHAPESHIFTER_DIR}/tests/core/picking_tests.cpp
     ${SHAPESHIFTER_DIR}/tests/core/renderer_tests.cpp
     ${SHAPESHIFTER_DIR}/tests/core/scene_tests.cpp

@@ -1,0 +1,740 @@
+#include <doctest.h>
+
+#include <cmath>
+
+#include <shapeshifter/ShapeshifterCore.h>
+
+#include "scene.h"
+#include "sdf.h"
+
+using namespace sq;
+
+// The transform hierarchy, exercised directly.
+//
+// Nothing in the editor BUILDS one of these yet -- spawn_snapped deliberately
+// leaves every node world-rooted, which is what pack_baseline_tests proves. So
+// these are the only place the propagation rules run at all, and they are
+// written against the document API rather than through the Editor for exactly
+// that reason.
+
+namespace {
+
+void check_float3_approx(const simd_float3 actual, const simd_float3 expected) {
+    CHECK(actual.x == doctest::Approx(expected.x));
+    CHECK(actual.y == doctest::Approx(expected.y));
+    CHECK(actual.z == doctest::Approx(expected.z));
+}
+
+// Parents `child` to `parent` by writing the field directly. attach() (which
+// preserves world pose and rejects cycles) is a later concern; these cases are
+// about what the RESOLVER does once a parent exists.
+void set_parent(SceneDocument& doc, int32_t child, int32_t parent) {
+    Node* n = doc.find(child);
+    REQUIRE(n != nullptr);
+    n->parent.kind = ParentRef::Kind::Node;
+    n->parent.node = parent;
+}
+
+} // namespace
+
+// --- the propagation rule ---------------------------------------------------
+
+TEST_CASE("a Group's uniform scale scales its child's offset and its box") {
+    SceneDocument doc;
+    const int32_t group = doc.add_group();
+    doc.set_node_scale(group, simd_float3{2, 2, 2});
+
+    const int32_t child = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{1, 0, 0});
+    set_parent(doc, child, group);
+
+    const NodePlacement p = doc.placement(child);
+    check_float3_approx(p.frame.position, simd_float3{2, 0, 0}); // the OFFSET scaled, not just the box
+    CHECK(p.frame.uniform_scale == doctest::Approx(2.0f));
+    check_float3_approx(p.half_extents, simd_float3{1, 1, 1});   // 1 * 0.5 * 2
+}
+
+// The rule that keeps stretching a skull from smearing the horn on it, and
+// Maya's segmentScaleCompensate default stated as a test.
+TEST_CASE("a Shape parent's non-uniform scale reaches its child in no way at all") {
+    SceneDocument doc;
+    const int32_t skull = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    doc.set_node_scale(skull, simd_float3{5, 1, 1}); // stretched long
+
+    const int32_t horn = doc.spawn_unsnapped(Shape::Cone, Op::Add, simd_float3{1, 0, 0});
+    set_parent(doc, horn, skull);
+
+    const NodePlacement p = doc.placement(horn);
+    check_float3_approx(p.frame.position, simd_float3{1, 0, 0}); // NOT {5,0,0}
+    CHECK(p.frame.uniform_scale == doctest::Approx(1.0f));
+    check_float3_approx(p.half_extents, simd_float3{0.5f, 0.5f, 0.5f});
+}
+
+// Right-handed, Y up: +90 degrees about +Y sends +X to -Z.
+TEST_CASE("a parent's rotation swings its child around it") {
+    SceneDocument doc;
+    const int32_t parent = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    doc.find(parent)->local_rotation = simd_quaternion(float(M_PI_2), simd_float3{0, 1, 0});
+
+    const int32_t child = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{1, 0, 0});
+    set_parent(doc, child, parent);
+
+    const NodePlacement p = doc.placement(child);
+    check_float3_approx(p.frame.position, simd_float3{0, 0, -1});
+    // And the child's own axes turn with it.
+    check_float3_approx(simd_act(p.frame.rotation, simd_float3{1, 0, 0}), simd_float3{0, 0, -1});
+}
+
+TEST_CASE("Group scale composes multiplicatively through a chain") {
+    SceneDocument doc;
+    const int32_t outer = doc.add_group();
+    doc.set_node_scale(outer, simd_float3{2, 2, 2});
+    const int32_t inner = doc.add_group();
+    doc.set_node_scale(inner, simd_float3{3, 3, 3});
+    set_parent(doc, inner, outer);
+
+    const int32_t leaf = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{1, 0, 0});
+    set_parent(doc, leaf, inner);
+
+    const NodePlacement p = doc.placement(leaf);
+    CHECK(p.frame.uniform_scale == doctest::Approx(6.0f));
+    check_float3_approx(p.frame.position, simd_float3{6, 0, 0});
+    check_float3_approx(p.half_extents, simd_float3{3, 3, 3});
+}
+
+// A Shape in the middle of a chain passes a Group's scale through without
+// adding its own -- the two rules above, meeting.
+TEST_CASE("a Shape in a chain passes an ancestor Group's scale through unchanged") {
+    SceneDocument doc;
+    const int32_t group = doc.add_group();
+    doc.set_node_scale(group, simd_float3{2, 2, 2});
+
+    const int32_t middle = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    doc.set_node_scale(middle, simd_float3{9, 9, 9}); // its own box, and nobody else's business
+    set_parent(doc, middle, group);
+
+    const int32_t leaf = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{1, 0, 0});
+    set_parent(doc, leaf, middle);
+
+    const NodePlacement p = doc.placement(leaf);
+    CHECK(p.frame.uniform_scale == doctest::Approx(2.0f)); // the Group's, not 18
+    check_float3_approx(p.frame.position, simd_float3{2, 0, 0});
+}
+
+// --- Group invariants -------------------------------------------------------
+
+TEST_CASE("a Group's scale is forced uniform") {
+    SceneDocument doc;
+    const int32_t group = doc.add_group();
+    doc.set_node_scale(group, simd_float3{2, 7, 9}); // only x is meaningful
+
+    const Node* n = doc.find(group);
+    REQUIRE(n != nullptr);
+    check_float3_approx(n->scale, simd_float3{2, 2, 2});
+}
+
+TEST_CASE("a Shape's scale is written through as given") {
+    SceneDocument doc;
+    const int32_t id = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    doc.set_node_scale(id, simd_float3{2, 7, 9});
+
+    check_float3_approx(doc.find(id)->scale, simd_float3{2, 7, 9});
+}
+
+// A Group carries a frame, not geometry. Packing it with a zero extent would
+// not be harmless: sdf_eval_node floors half-extents at SDF_MIN_HALF_EXTENT, so
+// it would render as a speck.
+TEST_CASE("a Group contributes no SDF node and no extent") {
+    SceneDocument doc;
+    const int32_t group = doc.add_group();
+    doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+
+    CHECK(pack_scene(doc).size() == 1);
+    check_float3_approx(doc.placement(group).half_extents, simd_float3{0, 0, 0});
+}
+
+TEST_CASE("a Group is named off its own counter") {
+    SceneDocument doc;
+    doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    const int32_t g1 = doc.add_group();
+    const int32_t g2 = doc.add_group();
+
+    CHECK(doc.find(g1)->name == "Group 1");
+    CHECK(doc.find(g2)->name == "Group 2");
+}
+
+// --- the contact rides the PARENT, not the node -----------------------------
+
+TEST_CASE("the contact is expressed in the parent's frame") {
+    SceneDocument doc;
+    const int32_t group = doc.add_group();
+    doc.set_node_scale(group, simd_float3{2, 2, 2});
+    doc.find(group)->local_position = simd_float3{10, 0, 0};
+
+    const int32_t child = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    set_parent(doc, child, group);
+    Node* n = doc.find(child);
+    n->contact.valid = true;
+    n->contact.point = simd_float3{1, 0, 0};
+    n->contact.normal = simd_float3{0, 1, 0};
+
+    const NodePlacement p = doc.placement(child);
+    REQUIRE(p.contact.has_value());
+    // Scaled and translated by the PARENT's frame: 10 + 2*1.
+    check_float3_approx(p.contact->point, simd_float3{12, 0, 0});
+    // The normal is rotated only, so it stays unit -- the gizmo builds a
+    // tangent basis from it and a scaled normal would skew the whole frame.
+    check_float3_approx(p.contact->normal, simd_float3{0, 1, 0});
+    CHECK(simd_length(p.contact->normal) == doctest::Approx(1.0f));
+}
+
+TEST_CASE("a parent's rotation rotates the contact normal") {
+    SceneDocument doc;
+    const int32_t parent = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    doc.find(parent)->local_rotation = simd_quaternion(float(M_PI_2), simd_float3{0, 0, 1});
+
+    const int32_t child = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    set_parent(doc, child, parent);
+    doc.find(child)->contact.valid = true;
+    doc.find(child)->contact.normal = simd_float3{0, 1, 0};
+
+    const NodePlacement p = doc.placement(child);
+    REQUIRE(p.contact.has_value());
+    // +90 about +Z sends +Y to -X.
+    check_float3_approx(p.contact->normal, simd_float3{-1, 0, 0});
+}
+
+// --- degradation ------------------------------------------------------------
+
+// Only a direct field write can build this: attach() rejects cycles. The guard
+// exists so a corrupt document cannot hang the render loop or blow the stack.
+TEST_CASE("a hand-built cycle terminates and places nothing") {
+    SceneDocument doc;
+    const int32_t a = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{1, 0, 0});
+    const int32_t b = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 1, 0});
+    set_parent(doc, a, b);
+    set_parent(doc, b, a);
+
+    const NodePlacement p = doc.placement(a);
+    check_float3_approx(p.frame.position, simd_float3{0, 0, 0});
+    check_float3_approx(p.half_extents, simd_float3{0, 0, 0});
+    CHECK_FALSE(p.contact.has_value());
+}
+
+TEST_CASE("a self-parented node terminates and places nothing") {
+    SceneDocument doc;
+    const int32_t a = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{1, 0, 0});
+    set_parent(doc, a, a);
+
+    check_float3_approx(doc.placement(a).frame.position, simd_float3{0, 0, 0});
+}
+
+TEST_CASE("a dangling parent id falls back to world-rooted") {
+    SceneDocument doc;
+    const int32_t child = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{1, 2, 3});
+    set_parent(doc, child, 9999); // never existed
+
+    const NodePlacement p = doc.placement(child);
+    check_float3_approx(p.frame.position, simd_float3{1, 2, 3});
+    CHECK(p.binding_resolved); // a missing NODE is not an unresolved BINDING
+}
+
+// No FrameProvider is wired up yet, so a named attachment cannot resolve. The
+// node stays usable -- world-rooted -- and says so, rather than sitting at the
+// origin with no explanation.
+TEST_CASE("an attachment-named parent is unresolved and falls back to world-rooted") {
+    SceneDocument doc;
+    const int32_t child = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{1, 2, 3});
+    Node* n = doc.find(child);
+    n->parent.kind = ParentRef::Kind::Attachment;
+    n->parent.attachment = "hand.R";
+
+    const NodePlacement p = doc.placement(child);
+    check_float3_approx(p.frame.position, simd_float3{1, 2, 3});
+    CHECK_FALSE(p.binding_resolved);
+}
+
+// --- what removal does to the two relations ---------------------------------
+
+TEST_CASE("removing a node invalidates contacts resting on it") {
+    SceneDocument doc;
+    const int32_t base = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    const int32_t detail = doc.spawn_snapped(Shape::Sphere, Op::Add, simd_float3{0, 0.5f, 0},
+                                             simd_float3{0, 1, 0}, base);
+    REQUIRE(doc.placement(detail).contact.has_value());
+
+    doc.remove_node(base, SceneDocument::OrphanPolicy::Reparent);
+    CHECK_FALSE(doc.placement(detail).contact.has_value());
+    // The detail itself survives, where it stood.
+    check_float3_approx(doc.placement(detail).frame.position, simd_float3{0, 0.5f, 0});
+}
+
+// --- the inertness ruling, from the hierarchy's side -------------------------
+
+TEST_CASE("spawn_snapped records a contact but does NOT parent") {
+    SceneDocument doc;
+    const int32_t base = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    const int32_t detail = doc.spawn_snapped(Shape::Sphere, Op::Add, simd_float3{0, 0.5f, 0},
+                                             simd_float3{0, 1, 0}, base);
+
+    const Node* n = doc.find(detail);
+    REQUIRE(n != nullptr);
+    CHECK(n->parent.kind == ParentRef::Kind::World); // inert: nothing propagates
+    CHECK(n->contact.valid);
+    CHECK(n->contact.surface == base);
+}
+
+// The consequence that ruling buys, stated as behaviour rather than as a field
+// check: moving the surface leaves the detail where it was.
+TEST_CASE("moving a node a detail rests on does not move the detail") {
+    SceneDocument doc;
+    const int32_t base = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    const int32_t detail = doc.spawn_snapped(Shape::Sphere, Op::Add, simd_float3{0, 0.5f, 0},
+                                             simd_float3{0, 1, 0}, base);
+
+    doc.find(base)->local_position = simd_float3{100, 0, 0};
+
+    check_float3_approx(doc.placement(detail).frame.position, simd_float3{0, 0.5f, 0});
+}
+
+// --- attach / detach --------------------------------------------------------
+//
+// The machinery, with no UI reaching it. Written now because the model has to
+// HANDLE attaching and detaching before there is a way to ask for it -- an
+// untested capability is a claim.
+
+namespace {
+
+ParentRef node_parent(int32_t id) {
+    ParentRef ref;
+    ref.kind = ParentRef::Kind::Node;
+    ref.node = id;
+    return ref;
+}
+
+} // namespace
+
+TEST_CASE("attach preserving world pose does not move the node") {
+    SceneDocument doc;
+    const int32_t parent = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{3, -1, 2});
+    doc.find(parent)->local_rotation = simd_quaternion(0.8f, simd_normalize(simd_float3{1, 2, 3}));
+
+    const int32_t child = doc.spawn_unsnapped(Shape::Sphere, Op::Add, simd_float3{-1, 4, 0});
+    doc.find(child)->local_rotation = simd_quaternion(-0.5f, simd_normalize(simd_float3{0, 1, 1}));
+    const Frame before = doc.placement(child).frame;
+
+    REQUIRE(doc.attach(child, node_parent(parent)));
+
+    const Frame after = doc.placement(child).frame;
+    check_float3_approx(after.position, before.position);
+    check_float3_approx(simd_act(after.rotation, simd_float3{1, 0, 0}),
+                        simd_act(before.rotation, simd_float3{1, 0, 0}));
+}
+
+TEST_CASE("attach preserving world pose survives a scaled Group parent") {
+    SceneDocument doc;
+    const int32_t group = doc.add_group();
+    doc.set_node_scale(group, simd_float3{4, 4, 4});
+    doc.find(group)->local_position = simd_float3{5, 0, 0};
+
+    const int32_t child = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{9, 1, -2});
+    const Frame before = doc.placement(child).frame;
+
+    REQUIRE(doc.attach(child, node_parent(group)));
+
+    check_float3_approx(doc.placement(child).frame.position, before.position);
+    // The local offset had to shrink by the group's scale to stay put.
+    check_float3_approx(doc.find(child)->local_position, simd_float3{1, 0.25f, -0.5f});
+}
+
+TEST_CASE("attach without preserving world pose reinterprets the local transform") {
+    SceneDocument doc;
+    const int32_t parent = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{10, 0, 0});
+    const int32_t child = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{1, 0, 0});
+
+    REQUIRE(doc.attach(child, node_parent(parent), /*preserve_world_pose=*/false));
+
+    // The local {1,0,0} now means "1 along X from the parent", so the node jumps.
+    check_float3_approx(doc.placement(child).frame.position, simd_float3{11, 0, 0});
+}
+
+TEST_CASE("detach re-roots without moving the node") {
+    SceneDocument doc;
+    const int32_t group = doc.add_group();
+    doc.set_node_scale(group, simd_float3{3, 3, 3});
+    doc.find(group)->local_position = simd_float3{0, 2, 0};
+    doc.find(group)->local_rotation = simd_quaternion(float(M_PI_2), simd_float3{0, 1, 0});
+
+    const int32_t child = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{1, 0, 0});
+    set_parent(doc, child, group);
+    const Frame before = doc.placement(child).frame;
+
+    doc.detach(child);
+
+    CHECK(doc.find(child)->parent.kind == ParentRef::Kind::World);
+    check_float3_approx(doc.placement(child).frame.position, before.position);
+}
+
+TEST_CASE("detaching an already world-rooted node changes nothing") {
+    SceneDocument doc;
+    const int32_t id = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{1, 2, 3});
+    doc.detach(id);
+    check_float3_approx(doc.placement(id).frame.position, simd_float3{1, 2, 3});
+}
+
+TEST_CASE("attach leaves the contact alone") {
+    SceneDocument doc;
+    const int32_t base = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    const int32_t detail = doc.spawn_snapped(Shape::Sphere, Op::Add, simd_float3{0, 0.5f, 0},
+                                             simd_float3{0, 1, 0}, base);
+    const int32_t other = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{9, 9, 9});
+
+    REQUIRE(doc.attach(detail, node_parent(other)));
+
+    // What a node RESTS ON is not changed by whose frame its transform is in.
+    const Node* n = doc.find(detail);
+    CHECK(n->contact.valid);
+    CHECK(n->contact.surface == base);
+}
+
+// --- attach's rejections ----------------------------------------------------
+//
+// THE CYCLE CHECK LIVES HERE, at the mutation boundary, which is what keeps
+// placement()'s depth guard a corruption detector rather than a load-bearing
+// part of normal operation.
+
+TEST_CASE("attach rejects self-parenting") {
+    SceneDocument doc;
+    const int32_t id = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{1, 0, 0});
+
+    CHECK_FALSE(doc.attach(id, node_parent(id)));
+    CHECK(doc.find(id)->parent.kind == ParentRef::Kind::World);
+    check_float3_approx(doc.placement(id).frame.position, simd_float3{1, 0, 0});
+}
+
+TEST_CASE("attach rejects a direct cycle") {
+    SceneDocument doc;
+    const int32_t a = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{1, 0, 0});
+    const int32_t b = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 1, 0});
+    REQUIRE(doc.attach(b, node_parent(a)));
+
+    CHECK_FALSE(doc.attach(a, node_parent(b)));
+    CHECK(doc.find(a)->parent.kind == ParentRef::Kind::World);
+}
+
+TEST_CASE("attach rejects an indirect cycle") {
+    SceneDocument doc;
+    const int32_t a = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    const int32_t b = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    const int32_t c = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    REQUIRE(doc.attach(b, node_parent(a)));
+    REQUIRE(doc.attach(c, node_parent(b)));
+
+    CHECK_FALSE(doc.attach(a, node_parent(c))); // a -> c -> b -> a
+    CHECK(doc.find(a)->parent.kind == ParentRef::Kind::World);
+}
+
+TEST_CASE("attach rejects an unknown node and an unknown parent") {
+    SceneDocument doc;
+    const int32_t id = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+
+    CHECK_FALSE(doc.attach(9999, node_parent(id)));
+    CHECK_FALSE(doc.attach(id, node_parent(9999)));
+    CHECK(doc.find(id)->parent.kind == ParentRef::Kind::World);
+}
+
+TEST_CASE("attach accepts an attachment-named parent without a provider") {
+    SceneDocument doc;
+    const int32_t id = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    ParentRef ref;
+    ref.kind = ParentRef::Kind::Attachment;
+    ref.attachment = "hand.R";
+
+    // Nothing resolves it yet, so the node is world-rooted in effect -- but the
+    // BINDING is recorded, which is what a document has to round-trip even when
+    // its rig is not loaded.
+    CHECK(doc.attach(id, ref));
+    CHECK(doc.find(id)->parent.attachment == "hand.R");
+    CHECK_FALSE(doc.placement(id).binding_resolved);
+}
+
+// --- orphan policies --------------------------------------------------------
+
+TEST_CASE("remove_node Reparent preserves each survivor's world frame") {
+    SceneDocument doc;
+    const int32_t group = doc.add_group();
+    doc.set_node_scale(group, simd_float3{2, 2, 2});
+    doc.find(group)->local_position = simd_float3{4, 0, 0};
+
+    const int32_t middle = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{1, 0, 0});
+    set_parent(doc, middle, group);
+    const int32_t leaf = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 1, 0});
+    set_parent(doc, leaf, middle);
+
+    const simd_float3 leaf_before = doc.placement(leaf).frame.position;
+
+    doc.remove_node(middle, SceneDocument::OrphanPolicy::Reparent);
+
+    REQUIRE(doc.find(leaf) != nullptr);
+    check_float3_approx(doc.placement(leaf).frame.position, leaf_before);
+    CHECK(doc.find(leaf)->parent.kind == ParentRef::Kind::World);
+}
+
+TEST_CASE("remove_node Cascade removes exactly the subtree") {
+    SceneDocument doc;
+    const int32_t root = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    const int32_t child = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    const int32_t grandchild = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    const int32_t sibling = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    REQUIRE(doc.attach(child, node_parent(root)));
+    REQUIRE(doc.attach(grandchild, node_parent(child)));
+
+    doc.remove_node(root, SceneDocument::OrphanPolicy::Cascade);
+
+    CHECK(doc.find(root) == nullptr);
+    CHECK(doc.find(child) == nullptr);
+    CHECK(doc.find(grandchild) == nullptr);
+    CHECK(doc.find(sibling) != nullptr); // outside the subtree, untouched
+    CHECK(doc.nodes().size() == 1);
+}
+
+TEST_CASE("remove_node Cascade invalidates contacts resting on anything it removed") {
+    SceneDocument doc;
+    const int32_t root = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    const int32_t child = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    REQUIRE(doc.attach(child, node_parent(root)));
+
+    // An outsider resting on the CHILD, which the cascade will take.
+    const int32_t outsider = doc.spawn_snapped(Shape::Sphere, Op::Add, simd_float3{0, 1, 0},
+                                               simd_float3{0, 1, 0}, child);
+
+    doc.remove_node(root, SceneDocument::OrphanPolicy::Cascade);
+
+    REQUIRE(doc.find(outsider) != nullptr);
+    CHECK_FALSE(doc.find(outsider)->contact.valid);
+}
+
+TEST_CASE("remove_node on an unknown id is a no-op under both policies") {
+    SceneDocument doc;
+    doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+
+    doc.remove_node(9999, SceneDocument::OrphanPolicy::Reparent);
+    CHECK(doc.nodes().size() == 1);
+    doc.remove_node(9999, SceneDocument::OrphanPolicy::Cascade);
+    CHECK(doc.nodes().size() == 1);
+}
+
+// --- the external attachment seam -------------------------------------------
+//
+// The animation-preview seam, exercised with no animation code anywhere. A real
+// provider will be backed by AnimationSet::AttachmentTransform(id, pose) --
+// name-addressed, exactly like this, because that is the contract the engine
+// already has: joints and sockets share one namespace and nothing public can
+// ask which it found.
+
+namespace {
+
+// Resolves one name and nothing else, so the miss path is exercised by every
+// other name a test tries.
+class StubRig : public FrameProvider {
+public:
+    std::optional<Frame> frame_for_attachment(const std::string& name) const override {
+        if (name != "hand.R") {
+            return std::nullopt;
+        }
+        Frame f;
+        f.position = simd_float3{0, 2, 0};
+        f.rotation = simd_quaternion(float(M_PI_2), simd_float3{0, 1, 0});
+        return f;
+    }
+};
+
+ParentRef attachment_parent(const char* name) {
+    ParentRef ref;
+    ref.kind = ParentRef::Kind::Attachment;
+    ref.attachment = name;
+    return ref;
+}
+
+} // namespace
+
+TEST_CASE("a node parented to a known attachment resolves through the provider") {
+    StubRig rig;
+    SceneDocument doc;
+    doc.set_frame_provider(&rig);
+
+    const int32_t id = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{1, 0, 0});
+    doc.find(id)->parent = attachment_parent("hand.R");
+
+    const NodePlacement p = doc.placement(id);
+    CHECK(p.binding_resolved);
+    // The joint sits at {0,2,0} turned +90 about Y, which sends +X to -Z.
+    check_float3_approx(p.frame.position, simd_float3{0, 2, -1});
+}
+
+TEST_CASE("a chain above an attachment composes on top of the rig's frame") {
+    StubRig rig;
+    SceneDocument doc;
+    doc.set_frame_provider(&rig);
+
+    const int32_t group = doc.add_group();
+    doc.set_node_scale(group, simd_float3{2, 2, 2});
+    doc.find(group)->parent = attachment_parent("hand.R");
+
+    const int32_t leaf = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{1, 0, 0});
+    set_parent(doc, leaf, group);
+
+    const NodePlacement p = doc.placement(leaf);
+    CHECK(p.binding_resolved);
+    CHECK(p.frame.uniform_scale == doctest::Approx(2.0f));
+    // The group scales the offset to 2, then the joint's rotation sends +X to -Z.
+    check_float3_approx(p.frame.position, simd_float3{0, 2, -2});
+}
+
+TEST_CASE("an unknown attachment name falls back to world-rooted") {
+    StubRig rig;
+    SceneDocument doc;
+    doc.set_frame_provider(&rig);
+
+    const int32_t id = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{1, 2, 3});
+    doc.find(id)->parent = attachment_parent("no.such.joint");
+
+    const NodePlacement p = doc.placement(id);
+    CHECK_FALSE(p.binding_resolved);
+    check_float3_approx(p.frame.position, simd_float3{1, 2, 3}); // usable, not stranded
+}
+
+TEST_CASE("a null provider falls back to world-rooted") {
+    SceneDocument doc; // no provider at all -- the default, and today's state
+
+    const int32_t id = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{1, 2, 3});
+    doc.find(id)->parent = attachment_parent("hand.R");
+
+    const NodePlacement p = doc.placement(id);
+    CHECK_FALSE(p.binding_resolved);
+    check_float3_approx(p.frame.position, simd_float3{1, 2, 3});
+}
+
+// A descendant of a broken binding is misplaced too, and has to be able to know
+// it rather than reporting a confidently wrong frame.
+TEST_CASE("an unresolved binding is reported to descendants") {
+    SceneDocument doc;
+    const int32_t parent = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    doc.find(parent)->parent = attachment_parent("hand.R"); // no provider
+
+    const int32_t child = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    set_parent(doc, child, parent);
+
+    CHECK_FALSE(doc.placement(child).binding_resolved);
+}
+
+// Clearing the provider is what unloading a rig does, and it must not strand
+// anything -- the binding survives, only its resolution goes away.
+TEST_CASE("clearing the provider re-roots without losing the binding") {
+    StubRig rig;
+    SceneDocument doc;
+    doc.set_frame_provider(&rig);
+
+    const int32_t id = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{1, 0, 0});
+    doc.find(id)->parent = attachment_parent("hand.R");
+    REQUIRE(doc.placement(id).binding_resolved);
+
+    doc.set_frame_provider(nullptr);
+
+    CHECK_FALSE(doc.placement(id).binding_resolved);
+    CHECK(doc.find(id)->parent.attachment == "hand.R"); // the binding is still there
+    check_float3_approx(doc.placement(id).frame.position, simd_float3{1, 0, 0});
+}
+
+// --- attach preserves the whole transform, and re-states the contact ---------
+//
+// Regressions for a code review. Each of these passed silently before, because
+// the existing attach cases asserted position and rotation and nothing else.
+
+TEST_CASE("attach preserves world SIZE under a scaled Group") {
+    SceneDocument doc;
+    const int32_t group = doc.add_group();
+    doc.set_node_scale(group, simd_float3{4, 4, 4});
+
+    const int32_t child = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{1, 0, 0});
+    const simd_float3 before = doc.placement(child).half_extents;
+
+    REQUIRE(doc.attach(child, node_parent(group)));
+
+    // Without compensation the box would quadruple -- a very visible move, on
+    // an operation whose whole promise is that nothing moves.
+    check_float3_approx(doc.placement(child).half_extents, before);
+}
+
+TEST_CASE("detach preserves world size on the way back out") {
+    SceneDocument doc;
+    const int32_t group = doc.add_group();
+    doc.set_node_scale(group, simd_float3{3, 3, 3});
+    const int32_t child = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{1, 0, 0});
+    REQUIRE(doc.attach(child, node_parent(group)));
+    const simd_float3 attached = doc.placement(child).half_extents;
+
+    doc.detach(child);
+
+    check_float3_approx(doc.placement(child).half_extents, attached);
+}
+
+TEST_CASE("attach and detach round-trip the whole transform") {
+    SceneDocument doc;
+    const int32_t group = doc.add_group();
+    doc.set_node_scale(group, simd_float3{2.5f, 2.5f, 2.5f});
+    doc.find(group)->local_position = simd_float3{7, -2, 1};
+    doc.find(group)->local_rotation = simd_quaternion(0.9f, simd_normalize(simd_float3{1, 2, 3}));
+
+    const int32_t child = doc.spawn_unsnapped(Shape::Cone, Op::Add, simd_float3{1, 2, 3});
+    doc.set_node_scale(child, simd_float3{2, 1, 0.5f});
+    const NodePlacement before = doc.placement(child);
+
+    REQUIRE(doc.attach(child, node_parent(group)));
+    doc.detach(child);
+
+    const NodePlacement after = doc.placement(child);
+    check_float3_approx(after.frame.position, before.frame.position);
+    check_float3_approx(after.half_extents, before.half_extents);
+    check_float3_approx(simd_act(after.frame.rotation, simd_float3{1, 0, 0}),
+                        simd_act(before.frame.rotation, simd_float3{1, 0, 0}));
+}
+
+// A surface does not move because something was re-parented. contact.point is
+// stored in the PARENT's frame, so leaving it alone would silently re-read it
+// against a different one -- putting the Placement gizmo, and the rotate drag's
+// pivot, nowhere near the skin the node rests on.
+TEST_CASE("attach re-states the contact so it stays on its surface") {
+    SceneDocument doc;
+    const int32_t base = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    const int32_t detail = doc.spawn_snapped(Shape::Sphere, Op::Add, simd_float3{0, 0.5f, 0},
+                                             simd_float3{0, 1, 0}, base);
+    const int32_t elsewhere = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{9, 9, 9});
+
+    const WorldContact before = *doc.placement(detail).contact;
+    REQUIRE(doc.attach(detail, node_parent(elsewhere)));
+
+    const NodePlacement after = doc.placement(detail);
+    REQUIRE(after.contact.has_value());
+    check_float3_approx(after.contact->point, before.point);
+    check_float3_approx(after.contact->normal, before.normal);
+}
+
+TEST_CASE("attach re-states the contact through a rotated, scaled parent") {
+    SceneDocument doc;
+    const int32_t base = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    const int32_t detail = doc.spawn_snapped(Shape::Sphere, Op::Add, simd_float3{0, 0.5f, 0},
+                                             simd_float3{0, 1, 0}, base);
+    const int32_t group = doc.add_group();
+    doc.set_node_scale(group, simd_float3{3, 3, 3});
+    doc.find(group)->local_position = simd_float3{2, 0, -4};
+    doc.find(group)->local_rotation = simd_quaternion(float(M_PI_2), simd_float3{0, 1, 0});
+
+    const WorldContact before = *doc.placement(detail).contact;
+    REQUIRE(doc.attach(detail, node_parent(group)));
+
+    const NodePlacement after = doc.placement(detail);
+    REQUIRE(after.contact.has_value());
+    check_float3_approx(after.contact->point, before.point);
+    check_float3_approx(after.contact->normal, before.normal);
+    CHECK(simd_length(after.contact->normal) == doctest::Approx(1.0f));
+}

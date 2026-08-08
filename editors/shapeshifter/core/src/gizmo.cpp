@@ -47,15 +47,16 @@ float gizmo_half_extent(simd_float3 origin, const Camera& camera) {
 
 } // namespace
 
-GizmoFrame gizmo_frame_for_node(const Node& node, const Camera& camera, GizmoSlot slot) {
+GizmoFrame gizmo_frame_for_node(const NodePlacement& placement, const Camera& camera,
+                                GizmoSlot slot) {
     GizmoFrame f;
 
-    if (slot == GizmoSlot::Placement && node.snapped) {
+    if (slot == GizmoSlot::Placement && placement.contact.has_value()) {
         // The surface the detail was placed on. Fixed in world space, so
         // "pull it out along the normal" means the same thing from every
         // camera angle.
-        f.origin = node.snap_point;
-        f.n = node.snap_normal;
+        f.origin = placement.contact->point;
+        f.n = placement.contact->normal;
         tangent_basis(f.n, f.u, f.v);
         // Both readings of the grid coincide here: the tangent plane IS the
         // surface and IS the plane handle's drag plane.
@@ -67,10 +68,10 @@ GizmoFrame gizmo_frame_for_node(const Node& node, const Camera& camera, GizmoSlo
         // preserves X x Y == Z), and exactly world X/Y/Z while the node's
         // rotation is identity -- which is what makes this a no-op for every
         // scene built before rotation existed.
-        f.origin = node.position;
-        f.u = simd_act(node.rotation, simd_float3{1.0f, 0.0f, 0.0f});
-        f.v = simd_act(node.rotation, simd_float3{0.0f, 1.0f, 0.0f});
-        f.n = simd_act(node.rotation, simd_float3{0.0f, 0.0f, 1.0f});
+        f.origin = placement.frame.position;
+        f.u = simd_act(placement.frame.rotation, simd_float3{1.0f, 0.0f, 0.0f});
+        f.v = simd_act(placement.frame.rotation, simd_float3{0.0f, 1.0f, 0.0f});
+        f.n = simd_act(placement.frame.rotation, simd_float3{0.0f, 0.0f, 1.0f});
         // Shape has no grid and no plane handle, so these are inert -- set to
         // (n, u, v) rather than left unset, so there is no "meaningless unless"
         // state to reason about. A free Placement node gets a world-horizontal

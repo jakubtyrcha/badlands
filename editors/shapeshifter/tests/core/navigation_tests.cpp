@@ -12,6 +12,26 @@ using namespace sq;
 
 namespace {
 
+// A NodePlacement for a stand-alone Node, built DIRECTLY rather than resolved
+// through a SceneDocument. These cases are about what this consumer does with a
+// placement, not about how one is produced -- so a bug in
+// SceneDocument::placement belongs to hierarchy_tests and must not light this
+// file up as well. Duplicated per file on purpose, like check_float3_approx.
+NodePlacement placement_of(const Node& n) {
+    NodePlacement p;
+    p.frame.position = n.local_position;
+    p.frame.rotation = n.local_rotation;
+    p.half_extents = 0.5f * simd_abs(n.scale);
+    if (n.contact.valid) {
+        p.contact = WorldContact{n.contact.point, n.contact.normal};
+    }
+    return p;
+}
+
+float node_bounding_radius(const Node& node) {
+    return node_bounding_radius(node, placement_of(node));
+}
+
 void check_float3_approx(const simd_float3 actual, const simd_float3 expected) {
     CHECK(actual.x == doctest::Approx(expected.x));
     CHECK(actual.y == doctest::Approx(expected.y));
@@ -22,7 +42,7 @@ Node make_sphere(int32_t id, simd_float3 position, simd_float3 scale) {
     Node node;
     node.id = id;
     node.shape = Shape::Sphere;
-    node.position = position;
+    node.local_position = position;
     node.scale = scale;
     return node;
 }
