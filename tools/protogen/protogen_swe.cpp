@@ -1073,8 +1073,12 @@ void SedExchange(Grid& g, const Params& p, float dt_morpho) {
 // gather-only pass rescales `sus_b` in place (each cell touching only its own
 // slot), then the swap. No cell reads another cell's `sus_b`.
 //
-// THE ADVECTION STEP IS THE CYCLE'S WHOLE FLUID TIME, `dt_morpho` =
-// swe_substeps * dt. `sus` is not advected during the substeps themselves --
+// THE ADVECTION STEP IS THE CYCLE'S WHOLE FLUID TIME, `dt_morpho` -- the
+// SUM of that cycle's actual substep dts, not `swe_substeps * dt` (that
+// identity only held while dt was frozen for the whole cycle; CFL dt is
+// now recomputed every substep -- owner ruling, "CFL staleness" finding,
+// see RunSweCycles's own comment at its substep loop). `sus` is not
+// advected during the substeps themselves --
 // this one pass stands in for all of them -- so it must cover the distance
 // they covered. That distance is large (measured at ~6 cells per cycle on a
 // production-shaped fixture), so the pass takes it as SEVERAL sub-steps of

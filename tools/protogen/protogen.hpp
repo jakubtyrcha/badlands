@@ -749,11 +749,15 @@ void SweVelocity(Grid& g, const Params& p);
 //   SedExchange -> SedAdvect -> TalusFlux -> TalusApply
 //
 // NO PASS CALLS ANOTHER; the sequencing lives entirely in RunSweCycles.
-// `dt_morpho` is the cycle's TOTAL fluid time (swe_substeps * dt) -- these
-// passes stand in for the sediment work of the substeps they representatively
-// skipped, so they run on the fluid clock, not on a clock of their own. The
-// only quantity on the accelerated BED clock is the bed-elevation delta
-// inside SedExchange, and it gets there through `ClampMorfacBedDelta` alone.
+// `dt_morpho` is the cycle's TOTAL fluid time -- the SUM of that cycle's
+// actual substep dts, not `swe_substeps * dt` (that identity only held
+// while dt was frozen for the whole cycle; CFL dt is now recomputed every
+// substep -- owner ruling, "CFL staleness" finding, see RunSweCycles) --
+// these passes stand in for the sediment work of the substeps they
+// representatively skipped, so they run on the fluid clock, not on a clock
+// of their own. The only quantity on the accelerated BED clock is the
+// bed-elevation delta inside SedExchange, and it gets there through
+// `ClampMorfacBedDelta` alone.
 // `dt_bed_s` is the BED-clock interval, `morfac * dt_morpho` -- see
 // Params::talus_relaxation_per_yr for why the talus pair runs on the bed
 // clock and not the fluid one.

@@ -3561,9 +3561,12 @@ void MorphoKnobLiveness() {
   static const Knob knobs[] = {
       // A fluid knob, not a morpho one, but it needs a row IN THIS harness
       // (Task 7): it changes how finely the fluid clock inside one cycle is
-      // resolved, which the morpho hook only ever sees through `dt_morpho =
-      // swe_substeps * dt` -- KnobLiveness's own harness runs phase-0's
-      // RunSim, which never touches this at all.
+      // resolved (and, since CFL dt is recomputed every substep -- owner
+      // ruling, "CFL staleness" finding -- how many chances dt has to
+      // shrink within the cycle too), which the morpho hook only ever sees
+      // through `dt_morpho`, the SUM of that cycle's actual substep dts --
+      // KnobLiveness's own harness runs phase-0's RunSim, which never
+      // touches this at all.
       {"swe_substeps", [](Params& p, int i) { p.swe_substeps = i ? 5 : 60; }},
       // Also a fluid depth knob needing its own row for the SAME reason as
       // swe_substeps above: KnobLiveness's phase-0 harness runs RunSim, which
