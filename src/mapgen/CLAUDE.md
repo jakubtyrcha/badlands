@@ -24,7 +24,15 @@ source speaks, the on-disk form, and the river network algebra.
 - **`nodata_fill.cpp`, `soil_estimate.cpp` and `standing_water.cpp` are pure
   functions of rasters** and know nothing about patches or providers. The last
   two are marked TEMPORARY: they stand in for the simulation's own soil and
-  water, and the header says what replaces them.
+  bathymetry, and the header says what replaces them.
+- **Water extent and surface come from the DATA, never from terrain shape.**
+  `standing_water.cpp` reads the observed cover mask and the survey's own
+  elevation; the only thing it invents is the BED, lowered in proportion to the
+  distance from the nearest non-water texel. Priority-flood is deliberately not
+  used — it ponds behind every drystone wall, and the survey's value under water
+  is the SURFACE, whose rim sits above it. Filtering the extent by elevation is
+  the specific mistake to avoid: half a flat plate lies above its own median, so
+  it once turned one lake into ten and 13% water into 9.5%.
 - **`erosion.hpp` is only `ErosionParams`** now — a channel-hydraulics params
   block. `MapArtifacts`, `MapGenParams` and `generator.hpp` are gone.
 - **This directory is not a pipeline stage.** All three procgen stages sit on

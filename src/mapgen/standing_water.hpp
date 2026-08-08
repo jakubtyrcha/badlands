@@ -1,28 +1,30 @@
 #pragma once
 
-// STANDING WATER from a DTM plus an OBSERVED water mask.
+// STANDING WATER, TAKEN FROM THE DATA AND NOWHERE ELSE.
 //
-// THE SURVEY'S VALUE UNDER WATER IS THE SURFACE, NOT THE BED. Every national
-// LiDAR programme synthesises water differently -- France hydro-enforces with
-// virtual points, England fills from older surveys, the Netherlands leaves
-// nodata -- but none of them measures the bottom. Measured on the fetched
-// bundles, the observed-water region is a flat plate:
+// Where the water is, and what elevation its surface sits at, both come from the
+// bundle: the observed cover mask says which texels are water, and the survey's
+// own raster says how high. Nothing here infers water from the shape of the
+// terrain.
 //
-//     lake-district/00   13.1% water   253.37 .. 261.87 m   std 0.28 m
-//     broads/01           0.8% water     0.25 ..   0.95 m   std 0.11 m
+// THAT RULES OUT PRIORITY-FLOOD, which is the obvious approach. Two independent
+// reasons, and either alone is fatal:
 //
-// and its immediate rim sits +1.56 m and +0.17 m ABOVE that plate.
+//   - Real 1 m LiDAR is full of drystone walls, field banks, road embankments
+//     and hedge bunds. All are genuine relief that genuinely dams water, and a
+//     terrain-only flood ponds behind every one of them.
+//   - The survey's value under water is the SURFACE, not the bed. Measured on
+//     the fetched bundles, observed water is a flat plate whose rim sits ABOVE
+//     it -- lake-district/00 is 253.37..261.87 m (std 0.28 m) with a rim +1.56 m
+//     higher; broads/01 is 0.25..0.95 m (std 0.11 m), rim +0.17 m. Flooding to
+//     that rim would raise the surface a metre and a half and drown the shore.
 //
-// That measurement rules out priority-flood, which was the obvious approach:
-// route_flow would find the plate as a depression and fill it to the rim,
-// raising the surface a metre and a half and drowning the shore. It also rules
-// out reading the plate as `height`, which the patch contract defines as THE
-// BED -- doing so asserts a lake of zero depth, so `depth = max(0, level -
-// height)` is zero everywhere and the map has no lake in it at all.
-//
-// So: observation defines WHICH texels are one body of water, the plate defines
-// its LEVEL, and the level cutting the real bed defines its SHORELINE at the
-// heightfield's own resolution rather than at land cover's 10 m staircase.
+// SO THE BED IS THE ONLY THING INVENTED, and it has to be: no survey looked at a
+// lake bottom, but the patch contract expresses water as `depth = max(0, level -
+// bed)`, so a bed equal to the surface is a lake of zero depth -- which is to say
+// no lake at all. The model is deliberately the simplest thing that reads as a
+// basin: lower the ground in proportion to how far it is from the nearest
+// non-water texel, up to a cap.
 //
 // RIVERS ARE NOT DERIVED. A ~1 km window has no catchment worth extracting from
 // (measured previously at zero reaches below a 512 m cut), so a river network
@@ -35,41 +37,39 @@
 
 namespace badlands::mapgen {
 
-// TEMPORARY, and the one quantity here that is assumed rather than measured.
+// TEMPORARY, and the only quantities here that are assumed rather than read.
+// Replaced by the simulation's own bathymetry.
 //
-// Nothing in the bundle knows how deep a lake is, because no survey looked. But
-// the contract cannot express "there is a lake here" without a bed below the
-// surface, so refusing to choose means silently dropping every lake. These say
-// what was assumed, in metres, where a reader will trip over them. Replaced by
-// the simulation's own bathymetry.
-inline constexpr float kAssumedLakeDepthM = 3.0f;
-// Distance from the shoreline over which the bed falls to that full depth. A
-// step instead of a taper would put a vertical wall at the waterline, which is
-// visible wherever the water is clear enough to see through.
-inline constexpr float kShoreTaperM = 20.0f;
-
-// Smallest observed-water component worth treating as a lake, in texels. Land
-// cover at 10 m misclassifies isolated pixels; one of them should not carve a
-// pond into the terrain.
-inline constexpr int kMinLakeTexels = 64;
+// Metres of depth per metre from the shore. A shelving bank; it also makes the
+// model self-limiting, since a misclassified speck of cover is never more than a
+// texel or two from dry ground and so becomes a puddle rather than a pond.
+inline constexpr float kLakeBedSlope = 0.15f;
+// Ceiling, so a wide lake becomes a basin rather than a canyon. Reached 80 m
+// from the shore at the slope above.
+inline constexpr float kMaxLakeDepthM = 12.0f;
 
 struct StandingWater {
-  // The water surface. Follows the contract's convention exactly: `level ==
-  // bed` on dry ground, `level > bed` inside a lake, so no sentinel and no mask
-  // are needed and the surface is flat by construction.
+  // The water surface. Follows the contract's convention exactly: `level == bed`
+  // on dry ground, `level > bed` inside a lake, so no sentinel and no mask are
+  // needed. Constant across each body, so the surface is flat by construction.
   Field2D<float> level;
-  // The input DTM with lake beds carved beneath their surfaces. Identical to
+  // The input raster with lake beds carved beneath their surfaces. Identical to
   // the input BITWISE outside every lake.
   Field2D<float> bed;
 };
 
 // `dtm` is the survey's raster: ground on land, water SURFACE over water.
 // `cover` holds mapgen::Cover values and must match `dtm`'s dimensions;
-// Cover::Water is the observed signal.
+// Cover::Water is the whole of the extent signal.
 //
 // A mismatched or empty `cover` yields an entirely dry result rather than an
-// error -- there is no honest lake to report without observation, and guessing
-// one from terrain alone is what this whole approach rejects.
+// error -- there is no water to report without observation, and guessing it from
+// terrain is what this approach exists to reject.
+//
+// THE PATCH EDGE IS NOT A SHORE. Water running off the side of the patch
+// continues in the real world, so the distance field is seeded only from actual
+// non-water texels; a lake cut by the frame stays deep at the cut instead of
+// tapering to nothing against a boundary that is not there.
 //
 // Feed the result to patch_io.hpp's derive_water for depth, lake ids and the
 // LakeInfo records.

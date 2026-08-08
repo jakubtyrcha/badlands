@@ -1,6 +1,7 @@
-// The two TEMPORARY stand-in derivations a heightfield-only map source needs:
-// soil estimated from slope, and standing water proposed by flood-fill and
-// vetoed by observation. Both are replaced by the simulation's own rasters.
+// The two TEMPORARY stand-in derivations a bundle-backed map source needs: soil
+// estimated from slope, and a lake BED modelled under water whose extent and
+// surface both came from the data. Both are replaced by the simulation's own
+// rasters.
 
 #include <catch_amalgamated.hpp>
 
@@ -78,72 +79,105 @@ TEST_CASE("a degenerate soil request returns an empty field", "[soil]") {
 
 namespace {
 
-// What a real bundle actually looks like, per the measurement in
-// standing_water.hpp: a flat PLATE at the water surface, sitting slightly below
-// a rim that rises around it. Not a basin -- the survey never saw the bottom.
+// What a real bundle looks like, per the measurement in standing_water.hpp: a
+// flat PLATE at the water surface with a rim rising around it. Not a basin --
+// the survey never saw the bottom. `noise` reproduces the plate's own scatter
+// (measured at 0.28 m std), which is what makes an elevation filter over the
+// extent a mistake.
 struct Plate {
   Field2D<float> dtm;
   Field2D<uint8_t> cover;
 };
 
 Plate plate(int w, int h, int x0, int y0, int side, float surface,
-            float rim_above) {
+            float rim_above, float noise = 0.0f) {
   Plate p;
   p.dtm = Field2D<float>(w, h, surface + rim_above);
   p.cover = all_cover(w, h, Cover::Grass);
+  int k = 0;
   for (int y = y0; y < y0 + side; ++y) {
-    for (int x = x0; x < x0 + side; ++x) {
-      p.dtm.at(x, y) = surface;
+    for (int x = x0; x < x0 + side; ++x, ++k) {
+      // Deterministic alternating scatter about the surface.
+      p.dtm.at(x, y) = surface + ((k % 2) ? noise : -noise);
       p.cover.at(x, y) = static_cast<uint8_t>(Cover::Water);
     }
   }
   return p;
 }
 
+int WetCount(const badlands::mapgen::StandingWater& out) {
+  int n = 0;
+  for (size_t i = 0; i < out.level.size(); ++i)
+    n += (out.level.data[i] > out.bed.data[i]);
+  return n;
+}
+
 }  // namespace
 
-TEST_CASE("an observed plate becomes a flat surface over a carved bed",
-          "[water]") {
-  Plate p = plate(48, 48, 8, 8, 32, 100.0f, 1.5f);
+TEST_CASE("the extent is the observed mask, exactly", "[water]") {
+  // THE DEFECT THIS PINS. Taking the plate's median as a surface and then
+  // dropping every texel above it discards half the plate by definition --
+  // measured once as one lake becoming ten fragments and 13% water rendering as
+  // 9.5%. Every observed texel is water, whatever its own elevation.
+  Plate p = plate(48, 48, 8, 8, 32, 100.0f, 1.5f, /*noise=*/0.28f);
 
   const auto out = derive_standing_water(p.dtm, p.cover, 1.0f);
 
-  // EXACTLY flat, and at the plate's own elevation -- not flooded to the rim,
-  // which is what a priority-flood would have done (+1.5 m here).
-  REQUIRE(out.level.at(10, 10) == 100.0f);
-  REQUIRE(out.level.at(30, 30) == 100.0f);
-  // The bed is carved beneath it, so the contract can express a lake at all:
-  // depth = max(0, level - bed) is positive.
+  REQUIRE(WetCount(out) == 32 * 32);
+}
+
+TEST_CASE("an observed plate becomes a flat surface over a carved bed",
+          "[water]") {
+  Plate p = plate(48, 48, 8, 8, 32, 100.0f, 1.5f, 0.28f);
+
+  const auto out = derive_standing_water(p.dtm, p.cover, 1.0f);
+
+  // EXACTLY flat, and at the plate's own elevation -- not raised to the rim,
+  // which is what a terrain flood would have done (+1.5 m here).
+  REQUIRE(out.level.at(10, 10) == out.level.at(30, 30));
+  REQUIRE_THAT(out.level.at(24, 24), WithinAbs(100.0f, 0.3f));
+  // A bed beneath it, so the contract can express a lake at all.
   REQUIRE(out.bed.at(24, 24) < out.level.at(24, 24));
-  // Dry outside: level == bed is the contract's dry texel, and the DTM is
+  // Dry outside: level == bed is the contract's dry texel, and the raster is
   // untouched there.
   REQUIRE(out.level.at(0, 0) == out.bed.at(0, 0));
   REQUIRE(out.bed.at(0, 0) == p.dtm.at(0, 0));
 }
 
-TEST_CASE("the bed tapers to the shoreline rather than stepping", "[water]") {
-  // A vertical wall at the waterline is visible wherever the water is clear
-  // enough to see through, so depth must grow with distance from the shore.
-  Plate p = plate(64, 64, 8, 8, 48, 100.0f, 1.5f);
+TEST_CASE("depth follows distance from the nearest non-water texel", "[water]") {
+  Plate p = plate(80, 80, 8, 8, 64, 100.0f, 1.5f);
 
   const auto out = derive_standing_water(p.dtm, p.cover, 1.0f);
 
-  const float near_shore = out.level.at(9, 32) - out.bed.at(9, 32);
-  const float mid = out.level.at(16, 32) - out.bed.at(16, 32);
-  const float deep = out.level.at(32, 32) - out.bed.at(32, 32);
-  REQUIRE(near_shore < mid);
-  REQUIRE(mid < deep);
-  REQUIRE_THAT(deep, WithinAbs(badlands::mapgen::kAssumedLakeDepthM, 1e-4f));
+  const auto depth_at = [&](int x, int y) {
+    return out.level.at(x, y) - out.bed.at(x, y);
+  };
+  // One texel in from the shore is one texel deep at the modelled slope.
+  REQUIRE_THAT(depth_at(8, 40), WithinAbs(badlands::mapgen::kLakeBedSlope, 1e-4f));
+  REQUIRE(depth_at(8, 40) < depth_at(16, 40));
+  REQUIRE(depth_at(16, 40) < depth_at(32, 40));
+  // And it is capped, so a wide lake is a basin rather than a canyon.
+  REQUIRE(depth_at(40, 40) <= badlands::mapgen::kMaxLakeDepthM + 1e-4f);
+}
+
+TEST_CASE("a misclassified speck becomes a puddle, not a pond", "[water]") {
+  // At 10 m, one bad cover pixel covers 10x10 texels of a 1 m grid. The model
+  // self-limits: nothing in it is more than a few texels from dry ground.
+  Plate p = plate(48, 48, 20, 20, 10, 100.0f, 1.5f);
+
+  const auto out = derive_standing_water(p.dtm, p.cover, 1.0f);
+
+  const float deepest = out.level.at(24, 24) - out.bed.at(24, 24);
+  REQUIRE(deepest > 0.0f);
+  REQUIRE(deepest < 1.0f);
 }
 
 TEST_CASE("unobserved ground stays dry however hollow it is", "[water]") {
-  // THE DEFECT THIS DESIGN EXISTS TO AVOID. Real 1 m LiDAR is full of drystone
-  // walls, field banks and road embankments that genuinely dam water; a
-  // terrain-only flood-fill ponds behind every one of them.
+  // Real 1 m LiDAR is full of drystone walls, field banks and road embankments
+  // that genuinely dam water; a terrain-only flood ponds behind every one.
   Field2D<float> dtm(32, 32, 10.0f);
-  for (int y = 8; y < 24; ++y) {
+  for (int y = 8; y < 24; ++y)
     for (int x = 8; x < 24; ++x) dtm.at(x, y) = 7.0f;  // a deep, closed hollow
-  }
   const Field2D<uint8_t> cover = all_cover(32, 32, Cover::Grass);
 
   const auto out = derive_standing_water(dtm, cover, 1.0f);
@@ -154,38 +188,34 @@ TEST_CASE("unobserved ground stays dry however hollow it is", "[water]") {
   }
 }
 
-TEST_CASE("a speck of misclassified land cover is not a lake", "[water]") {
-  // At 10 m, one misclassified land-cover texel is 100 m^2 of evidence. It must
-  // not carve a pond.
-  Plate p = plate(32, 32, 5, 5, 2, 100.0f, 1.5f);  // 4 texels, below the floor
-
-  const auto out = derive_standing_water(p.dtm, p.cover, 1.0f);
-
-  for (size_t i = 0; i < out.bed.size(); ++i) {
-    REQUIRE(out.bed.data[i] == p.dtm.data[i]);
-  }
-}
-
-TEST_CASE("the shoreline follows the bed, not the land-cover staircase",
-          "[water]") {
-  // Land cover is 10 m against 1 m relief, so its edge is a staircase. Ground
-  // below the plate's surface belongs to the lake even where cover missed it;
-  // ground above it does not, even where cover claimed it.
+TEST_CASE("a bank inside the mask is still water", "[water]") {
+  // The mask is 10 m against 1 m relief, so it over-claims. Trusting the data
+  // means trusting it here too; the never-raise rule keeps the bank's own
+  // survey height wherever that is already below the modelled bed.
   Plate p = plate(48, 48, 8, 8, 32, 100.0f, 1.5f);
-  // A one-texel trench outside the observed mask, below the surface.
-  for (int y = 8; y < 40; ++y) p.dtm.at(7, y) = 99.5f;
-  // And a bank INSIDE the observed mask, above the surface.
   for (int y = 20; y < 24; ++y) p.dtm.at(20, y) = 101.0f;
 
   const auto out = derive_standing_water(p.dtm, p.cover, 1.0f);
 
-  // Below the surface but outside the observed mask -> joins the lake.
-  REQUIRE(out.level.at(7, 20) == 100.0f);
-  REQUIRE(out.bed.at(7, 20) < out.level.at(7, 20));
-  // Above the surface but inside the observed mask -> stays dry ground. Carving
-  // it would dig a hole where the survey plainly saw a bank.
-  REQUIRE(out.bed.at(20, 21) == 101.0f);
-  REQUIRE(out.level.at(20, 21) == out.bed.at(20, 21));
+  REQUIRE(out.level.at(20, 21) > out.bed.at(20, 21));
+  REQUIRE(out.level.at(20, 21) == out.level.at(24, 24));  // one flat surface
+}
+
+TEST_CASE("the patch edge is not a shore", "[water]") {
+  // Water leaving the frame carries on in the real world. Tapering it to zero
+  // against the boundary would invent a shore that is not there.
+  Field2D<float> dtm(48, 48, 100.0f);
+  Field2D<uint8_t> cover = all_cover(48, 48, Cover::Grass);
+  for (int y = 0; y < 48; ++y)
+    for (int x = 0; x < 24; ++x) cover.at(x, y) = static_cast<uint8_t>(Cover::Water);
+
+  const auto out = derive_standing_water(dtm, cover, 1.0f);
+
+  // Against the frame, depth is set by the distance to the REAL shore at x=24,
+  // not by proximity to the edge -- so the far corner is the deepest point.
+  const float at_edge = out.level.at(0, 24) - out.bed.at(0, 24);
+  const float at_shore = out.level.at(23, 24) - out.bed.at(23, 24);
+  REQUIRE(at_edge > at_shore);
 }
 
 TEST_CASE("two lakes at different elevations keep their own surfaces",
@@ -220,6 +250,18 @@ TEST_CASE("water needs observation, so a missing cover raster yields dry ground"
     REQUIRE(out.level.data[i] == p.dtm.data[i]);
     REQUIRE(out.bed.data[i] == p.dtm.data[i]);
   }
+}
+
+TEST_CASE("an all-water raster has no shore to measure from", "[water]") {
+  Field2D<float> dtm(16, 16, 50.0f);
+  const Field2D<uint8_t> cover = all_cover(16, 16, Cover::Water);
+
+  const auto out = derive_standing_water(dtm, cover, 1.0f);
+
+  // No dry texel anywhere, so nothing seeds the distance field. Full depth is
+  // the honest answer; zero would render an ocean as a dry plate.
+  REQUIRE(out.level.at(8, 8) - out.bed.at(8, 8) ==
+          Catch::Approx(badlands::mapgen::kMaxLakeDepthM));
 }
 
 TEST_CASE("a degenerate water request returns empty fields", "[water]") {
