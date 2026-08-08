@@ -488,7 +488,17 @@ void Editor::deleteSelectedNode() {
     // that both gizmo kinds share this one drag path.
     endDrag();
 
-    impl_->scene.remove_node(impl_->selected);
+    // Which policy a deletion means follows from what was deleted. Removing a
+    // SHAPE is removing one piece of geometry, and the details placed on it are
+    // their own things -- they survive where they stand, which is what removal
+    // has always done. Removing a GROUP is removing an assembly, and a group is
+    // its contents, so the subtree goes with it.
+    const Node* node = impl_->scene.find(impl_->selected);
+    const SceneDocument::OrphanPolicy policy =
+        (node != nullptr && node->kind == NodeKind::Group)
+            ? SceneDocument::OrphanPolicy::Cascade
+            : SceneDocument::OrphanPolicy::Reparent;
+    impl_->scene.remove_node(impl_->selected, policy);
     impl_->selected = kInvalidNode;
     impl_->hover = GizmoHit{GizmoSlot::Placement, GizmoHandle::None}; // deletion bypasses select(), so clear here too
     // Gizmo hides on its own next render(): selectedNode is looked up via

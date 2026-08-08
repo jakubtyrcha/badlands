@@ -578,7 +578,7 @@ TEST_CASE("raycast_scene: world_t is a true distance and the hit lies on the que
     check_float3_traced(hit->hit.point, origin + hit->hit.t * dir);
 
     SUBCASE("removing the nearer node promotes the farther one, still with a true t") {
-        doc.remove_node(1);
+        doc.remove_node(1, SceneDocument::OrphanPolicy::Reparent);
         const auto far_hit = raycast_scene(doc, Ray{origin, dir});
         REQUIRE(far_hit.has_value());
         CHECK(far_hit->node_id == 2);

@@ -168,6 +168,40 @@ public:
     // the spawn ray on a raycast miss). No contact, and world-rooted.
     int32_t spawn_unsnapped(Shape shape, Op op, simd_float3 position);
 
+    // --- hierarchy operations ----------------------------------------------
+    //
+    // No UI reaches any of these yet. They exist because the machinery has to
+    // handle attaching and detaching before there is a way to ask for it --
+    // otherwise the model is a claim rather than a capability.
+
+    // Re-parents `id`. With preserve_world_pose the node does not appear to
+    // move: its local transform is re-solved against the new parent's frame
+    // (relative_to), so only the frame it is EXPRESSED in changes. Without it,
+    // the existing local transform is simply reinterpreted in the new frame,
+    // and the node jumps.
+    //
+    // `contact` is untouched either way. What a node rests on is not changed by
+    // whose frame its transform is written in -- that separation is the point.
+    //
+    // Returns false, having changed nothing, for an unknown id, a parent id
+    // that does not exist, self-parenting, or any parent whose own chain
+    // already passes through `id`. THE CYCLE CHECK LIVES HERE, at the mutation
+    // boundary, so placement()'s depth guard only ever sees a document someone
+    // corrupted by writing fields directly.
+    bool attach(int32_t id, ParentRef parent, bool preserve_world_pose = true);
+
+    // Re-roots to world with the world pose unchanged. detach of an already
+    // world-rooted node is a no-op.
+    void detach(int32_t id);
+
+    // What becomes of a removed node's CHILDREN -- the transform relation, not
+    // the contact one.
+    //
+    // Reparent: each child is detached first, so it survives exactly where it
+    //           stood. This generalises what removal has always done.
+    // Cascade:  the whole subtree goes, because a group IS its contents.
+    enum class OrphanPolicy { Reparent, Cascade };
+
     // Removes the node with this id from the flat vector; unknown id is a
     // no-op. Per-shape name counters are NOT reset or decremented, so a later
     // spawn of that shape always gets the next number, never a reused name.
@@ -176,9 +210,13 @@ public:
     // contact.surface pointing at a dead id would be a dangling reference, and
     // the Placement gizmo keys off contact.valid, so clearing it drops the
     // orphan back to its own local axes like a node that never rested on
-    // anything. The orphan-POLICY overload (children in the transform sense)
-    // arrives with attach/detach.
-    void remove_node(int32_t id);
+    // anything. That happens under BOTH policies, and applies to nodes that
+    // merely rested on the removed one without being parented to it.
+    //
+    // `policy` is REQUIRED rather than defaulted: which of the two a deletion
+    // means is exactly the kind of thing that must not be decided silently at a
+    // call site (the same rule pick_gizmo_handle's `slot` parameter follows).
+    void remove_node(int32_t id, OrphanPolicy policy);
 
 private:
     // The frame a node's own locals contribute: its local position and rotation,

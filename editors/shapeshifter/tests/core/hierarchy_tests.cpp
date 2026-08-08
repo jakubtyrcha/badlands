@@ -262,7 +262,7 @@ TEST_CASE("removing a node invalidates contacts resting on it") {
                                              simd_float3{0, 1, 0}, base);
     REQUIRE(doc.placement(detail).contact.has_value());
 
-    doc.remove_node(base);
+    doc.remove_node(base, SceneDocument::OrphanPolicy::Reparent);
     CHECK_FALSE(doc.placement(detail).contact.has_value());
     // The detail itself survives, where it stood.
     check_float3_approx(doc.placement(detail).frame.position, simd_float3{0, 0.5f, 0});
@@ -294,4 +294,231 @@ TEST_CASE("moving a node a detail rests on does not move the detail") {
     doc.find(base)->local_position = simd_float3{100, 0, 0};
 
     check_float3_approx(doc.placement(detail).frame.position, simd_float3{0, 0.5f, 0});
+}
+
+// --- attach / detach --------------------------------------------------------
+//
+// The machinery, with no UI reaching it. Written now because the model has to
+// HANDLE attaching and detaching before there is a way to ask for it -- an
+// untested capability is a claim.
+
+namespace {
+
+ParentRef node_parent(int32_t id) {
+    ParentRef ref;
+    ref.kind = ParentRef::Kind::Node;
+    ref.node = id;
+    return ref;
+}
+
+} // namespace
+
+TEST_CASE("attach preserving world pose does not move the node") {
+    SceneDocument doc;
+    const int32_t parent = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{3, -1, 2});
+    doc.find(parent)->local_rotation = simd_quaternion(0.8f, simd_normalize(simd_float3{1, 2, 3}));
+
+    const int32_t child = doc.spawn_unsnapped(Shape::Sphere, Op::Add, simd_float3{-1, 4, 0});
+    doc.find(child)->local_rotation = simd_quaternion(-0.5f, simd_normalize(simd_float3{0, 1, 1}));
+    const Frame before = doc.placement(child).frame;
+
+    REQUIRE(doc.attach(child, node_parent(parent)));
+
+    const Frame after = doc.placement(child).frame;
+    check_float3_approx(after.position, before.position);
+    check_float3_approx(simd_act(after.rotation, simd_float3{1, 0, 0}),
+                        simd_act(before.rotation, simd_float3{1, 0, 0}));
+}
+
+TEST_CASE("attach preserving world pose survives a scaled Group parent") {
+    SceneDocument doc;
+    const int32_t group = doc.add_group();
+    doc.set_node_scale(group, simd_float3{4, 4, 4});
+    doc.find(group)->local_position = simd_float3{5, 0, 0};
+
+    const int32_t child = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{9, 1, -2});
+    const Frame before = doc.placement(child).frame;
+
+    REQUIRE(doc.attach(child, node_parent(group)));
+
+    check_float3_approx(doc.placement(child).frame.position, before.position);
+    // The local offset had to shrink by the group's scale to stay put.
+    check_float3_approx(doc.find(child)->local_position, simd_float3{1, 0.25f, -0.5f});
+}
+
+TEST_CASE("attach without preserving world pose reinterprets the local transform") {
+    SceneDocument doc;
+    const int32_t parent = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{10, 0, 0});
+    const int32_t child = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{1, 0, 0});
+
+    REQUIRE(doc.attach(child, node_parent(parent), /*preserve_world_pose=*/false));
+
+    // The local {1,0,0} now means "1 along X from the parent", so the node jumps.
+    check_float3_approx(doc.placement(child).frame.position, simd_float3{11, 0, 0});
+}
+
+TEST_CASE("detach re-roots without moving the node") {
+    SceneDocument doc;
+    const int32_t group = doc.add_group();
+    doc.set_node_scale(group, simd_float3{3, 3, 3});
+    doc.find(group)->local_position = simd_float3{0, 2, 0};
+    doc.find(group)->local_rotation = simd_quaternion(float(M_PI_2), simd_float3{0, 1, 0});
+
+    const int32_t child = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{1, 0, 0});
+    set_parent(doc, child, group);
+    const Frame before = doc.placement(child).frame;
+
+    doc.detach(child);
+
+    CHECK(doc.find(child)->parent.kind == ParentRef::Kind::World);
+    check_float3_approx(doc.placement(child).frame.position, before.position);
+}
+
+TEST_CASE("detaching an already world-rooted node changes nothing") {
+    SceneDocument doc;
+    const int32_t id = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{1, 2, 3});
+    doc.detach(id);
+    check_float3_approx(doc.placement(id).frame.position, simd_float3{1, 2, 3});
+}
+
+TEST_CASE("attach leaves the contact alone") {
+    SceneDocument doc;
+    const int32_t base = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    const int32_t detail = doc.spawn_snapped(Shape::Sphere, Op::Add, simd_float3{0, 0.5f, 0},
+                                             simd_float3{0, 1, 0}, base);
+    const int32_t other = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{9, 9, 9});
+
+    REQUIRE(doc.attach(detail, node_parent(other)));
+
+    // What a node RESTS ON is not changed by whose frame its transform is in.
+    const Node* n = doc.find(detail);
+    CHECK(n->contact.valid);
+    CHECK(n->contact.surface == base);
+}
+
+// --- attach's rejections ----------------------------------------------------
+//
+// THE CYCLE CHECK LIVES HERE, at the mutation boundary, which is what keeps
+// placement()'s depth guard a corruption detector rather than a load-bearing
+// part of normal operation.
+
+TEST_CASE("attach rejects self-parenting") {
+    SceneDocument doc;
+    const int32_t id = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{1, 0, 0});
+
+    CHECK_FALSE(doc.attach(id, node_parent(id)));
+    CHECK(doc.find(id)->parent.kind == ParentRef::Kind::World);
+    check_float3_approx(doc.placement(id).frame.position, simd_float3{1, 0, 0});
+}
+
+TEST_CASE("attach rejects a direct cycle") {
+    SceneDocument doc;
+    const int32_t a = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{1, 0, 0});
+    const int32_t b = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 1, 0});
+    REQUIRE(doc.attach(b, node_parent(a)));
+
+    CHECK_FALSE(doc.attach(a, node_parent(b)));
+    CHECK(doc.find(a)->parent.kind == ParentRef::Kind::World);
+}
+
+TEST_CASE("attach rejects an indirect cycle") {
+    SceneDocument doc;
+    const int32_t a = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    const int32_t b = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    const int32_t c = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    REQUIRE(doc.attach(b, node_parent(a)));
+    REQUIRE(doc.attach(c, node_parent(b)));
+
+    CHECK_FALSE(doc.attach(a, node_parent(c))); // a -> c -> b -> a
+    CHECK(doc.find(a)->parent.kind == ParentRef::Kind::World);
+}
+
+TEST_CASE("attach rejects an unknown node and an unknown parent") {
+    SceneDocument doc;
+    const int32_t id = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+
+    CHECK_FALSE(doc.attach(9999, node_parent(id)));
+    CHECK_FALSE(doc.attach(id, node_parent(9999)));
+    CHECK(doc.find(id)->parent.kind == ParentRef::Kind::World);
+}
+
+TEST_CASE("attach accepts an attachment-named parent without a provider") {
+    SceneDocument doc;
+    const int32_t id = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    ParentRef ref;
+    ref.kind = ParentRef::Kind::Attachment;
+    ref.attachment = "hand.R";
+
+    // Nothing resolves it yet, so the node is world-rooted in effect -- but the
+    // BINDING is recorded, which is what a document has to round-trip even when
+    // its rig is not loaded.
+    CHECK(doc.attach(id, ref));
+    CHECK(doc.find(id)->parent.attachment == "hand.R");
+    CHECK_FALSE(doc.placement(id).binding_resolved);
+}
+
+// --- orphan policies --------------------------------------------------------
+
+TEST_CASE("remove_node Reparent preserves each survivor's world frame") {
+    SceneDocument doc;
+    const int32_t group = doc.add_group();
+    doc.set_node_scale(group, simd_float3{2, 2, 2});
+    doc.find(group)->local_position = simd_float3{4, 0, 0};
+
+    const int32_t middle = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{1, 0, 0});
+    set_parent(doc, middle, group);
+    const int32_t leaf = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 1, 0});
+    set_parent(doc, leaf, middle);
+
+    const simd_float3 leaf_before = doc.placement(leaf).frame.position;
+
+    doc.remove_node(middle, SceneDocument::OrphanPolicy::Reparent);
+
+    REQUIRE(doc.find(leaf) != nullptr);
+    check_float3_approx(doc.placement(leaf).frame.position, leaf_before);
+    CHECK(doc.find(leaf)->parent.kind == ParentRef::Kind::World);
+}
+
+TEST_CASE("remove_node Cascade removes exactly the subtree") {
+    SceneDocument doc;
+    const int32_t root = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    const int32_t child = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    const int32_t grandchild = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    const int32_t sibling = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    REQUIRE(doc.attach(child, node_parent(root)));
+    REQUIRE(doc.attach(grandchild, node_parent(child)));
+
+    doc.remove_node(root, SceneDocument::OrphanPolicy::Cascade);
+
+    CHECK(doc.find(root) == nullptr);
+    CHECK(doc.find(child) == nullptr);
+    CHECK(doc.find(grandchild) == nullptr);
+    CHECK(doc.find(sibling) != nullptr); // outside the subtree, untouched
+    CHECK(doc.nodes().size() == 1);
+}
+
+TEST_CASE("remove_node Cascade invalidates contacts resting on anything it removed") {
+    SceneDocument doc;
+    const int32_t root = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    const int32_t child = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    REQUIRE(doc.attach(child, node_parent(root)));
+
+    // An outsider resting on the CHILD, which the cascade will take.
+    const int32_t outsider = doc.spawn_snapped(Shape::Sphere, Op::Add, simd_float3{0, 1, 0},
+                                               simd_float3{0, 1, 0}, child);
+
+    doc.remove_node(root, SceneDocument::OrphanPolicy::Cascade);
+
+    REQUIRE(doc.find(outsider) != nullptr);
+    CHECK_FALSE(doc.find(outsider)->contact.valid);
+}
+
+TEST_CASE("remove_node on an unknown id is a no-op under both policies") {
+    SceneDocument doc;
+    doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+
+    doc.remove_node(9999, SceneDocument::OrphanPolicy::Reparent);
+    CHECK(doc.nodes().size() == 1);
+    doc.remove_node(9999, SceneDocument::OrphanPolicy::Cascade);
+    CHECK(doc.nodes().size() == 1);
 }

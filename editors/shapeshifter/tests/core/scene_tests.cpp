@@ -141,7 +141,7 @@ TEST_CASE("SceneDocument::remove_node: removes exactly the target node, others k
     const int32_t b = doc.spawn_unsnapped(Shape::Sphere, Op::Add, {1.0f, 0.0f, 0.0f});
     const int32_t c = doc.spawn_unsnapped(Shape::Cube, Op::Subtract, {2.0f, 0.0f, 0.0f});
 
-    doc.remove_node(b);
+    doc.remove_node(b, SceneDocument::OrphanPolicy::Reparent);
 
     REQUIRE(doc.nodes().size() == 2);
     CHECK(doc.nodes()[0].id == a);
@@ -159,7 +159,7 @@ TEST_CASE("SceneDocument::remove_node: removing an unknown id is a no-op") {
     const int32_t a = doc.spawn_unsnapped(Shape::Cube, Op::Add, {0.0f, 0.0f, 0.0f});
     const int32_t b = doc.spawn_unsnapped(Shape::Sphere, Op::Add, {1.0f, 0.0f, 0.0f});
 
-    doc.remove_node(9999); // never issued by this document
+    doc.remove_node(9999, SceneDocument::OrphanPolicy::Reparent); // never issued by this document
 
     REQUIRE(doc.nodes().size() == 2);
     CHECK(doc.nodes()[0].id == a);
@@ -184,7 +184,7 @@ TEST_CASE("SceneDocument::remove_node: survivors snapped onto the removed node h
     REQUIRE(doc.find(c)->contact.valid == true);
     REQUIRE(doc.find(c)->contact.surface == d);
 
-    doc.remove_node(a);
+    doc.remove_node(a, SceneDocument::OrphanPolicy::Reparent);
 
     REQUIRE(doc.find(b) != nullptr);
     CHECK(doc.find(b)->contact.valid == false);
@@ -203,7 +203,7 @@ TEST_CASE("SceneDocument::remove_node: per-shape name counters continue after re
     const int32_t cube2 = doc.spawn_unsnapped(Shape::Cube, Op::Add, {0.0f, 0.0f, 0.0f});
     REQUIRE(doc.find(cube2)->name == "Cube 2");
 
-    doc.remove_node(cube2);
+    doc.remove_node(cube2, SceneDocument::OrphanPolicy::Reparent);
     const int32_t cube3 = doc.spawn_unsnapped(Shape::Cube, Op::Add, {0.0f, 0.0f, 0.0f});
 
     // The freed "Cube 2" name/number is never reissued — the counter tracks

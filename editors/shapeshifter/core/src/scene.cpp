@@ -269,7 +269,104 @@ int32_t SceneDocument::spawn_unsnapped(Shape shape, Op op, simd_float3 position)
     return add(std::move(node)).id; // world-rooted, resting on nothing
 }
 
-void SceneDocument::remove_node(int32_t id) {
+bool SceneDocument::attach(int32_t id, ParentRef parent, bool preserve_world_pose) {
+    Node* node = find(id);
+    if (node == nullptr) {
+        return false;
+    }
+    if (parent.kind == ParentRef::Kind::Node) {
+        if (parent.node == id) {
+            return false; // a node cannot be its own parent
+        }
+        if (find(parent.node) == nullptr) {
+            return false; // parent must exist
+        }
+        // Walk up from the PROPOSED parent. If the chain reaches `id`, adopting
+        // it would close a loop. Bounded by kMaxParentDepth so an already-cyclic
+        // document cannot hang this check either.
+        const Node* cur = find(parent.node);
+        for (int depth = 0; cur != nullptr && depth <= kMaxParentDepth; ++depth) {
+            if (cur->id == id) {
+                return false; // would create a cycle
+            }
+            if (cur->parent.kind != ParentRef::Kind::Node) {
+                break;
+            }
+            cur = find(cur->parent.node);
+        }
+    }
+
+    // Captured BEFORE the parent changes, since that is the pose being kept.
+    const Frame world = placement(id).frame;
+    node->parent = std::move(parent);
+    if (preserve_world_pose) {
+        const Frame local = relative_to(parent_frame(id), world);
+        node->local_position = local.position;
+        node->local_rotation = local.rotation;
+        // local.uniform_scale is deliberately dropped. A Shape contributes 1
+        // regardless, and a Group's scale is its own authored size rather than
+        // something to be solved for -- re-parenting must not silently resize
+        // an assembly.
+    }
+    return true;
+}
+
+void SceneDocument::detach(int32_t id) {
+    attach(id, ParentRef{}, /*preserve_world_pose=*/true);
+}
+
+void SceneDocument::remove_node(int32_t id, OrphanPolicy policy) {
+    if (find(id) == nullptr) {
+        return; // unknown id: nothing to remove, and no orphans to consider
+    }
+
+    if (policy == OrphanPolicy::Cascade) {
+        // Collect the subtree before erasing anything, because detecting
+        // descendants needs the chain intact. Repeated sweeps rather than a
+        // child index: the node count is in the tens, and a stale index is a
+        // whole class of bug this does not need.
+        std::vector<int32_t> doomed{id};
+        for (bool grew = true; grew;) {
+            grew = false;
+            for (const Node& node : nodes_) {
+                if (node.parent.kind != ParentRef::Kind::Node) {
+                    continue;
+                }
+                const bool parent_doomed =
+                    std::find(doomed.begin(), doomed.end(), node.parent.node) != doomed.end();
+                const bool already =
+                    std::find(doomed.begin(), doomed.end(), node.id) != doomed.end();
+                if (parent_doomed && !already) {
+                    doomed.push_back(node.id);
+                    grew = true;
+                }
+            }
+        }
+        std::erase_if(nodes_, [&doomed](const Node& node) {
+            return std::find(doomed.begin(), doomed.end(), node.id) != doomed.end();
+        });
+        // Contacts resting on ANY removed node dangle, not just on `id`.
+        for (Node& node : nodes_) {
+            if (std::find(doomed.begin(), doomed.end(), node.contact.surface) != doomed.end()) {
+                node.contact = Contact{};
+            }
+        }
+        return;
+    }
+
+    // Reparent: every direct child is re-rooted FIRST, while the parent still
+    // exists -- detach solves the world pose against a frame that is about to
+    // go away, so the order is load-bearing.
+    std::vector<int32_t> children;
+    for (const Node& node : nodes_) {
+        if (node.parent.kind == ParentRef::Kind::Node && node.parent.node == id) {
+            children.push_back(node.id);
+        }
+    }
+    for (const int32_t child : children) {
+        detach(child);
+    }
+
     std::erase_if(nodes_, [id](const Node& node) { return node.id == id; });
 
     // Fix up survivors that were resting ON the just-removed node: leaving
