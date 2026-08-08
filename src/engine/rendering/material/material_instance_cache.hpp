@@ -36,12 +36,18 @@ entt::id_type ComposeMaterialCacheKey(entt::id_type factory_id,
 class MaterialInstanceCache {
  public:
   // Returns cached or creates new. Returns resource handle (bool-testable).
-  // Null handle if factory fails to create instance.
+  // Null handle if the factory fails to create the instance, OR if `key`
+  // collides with an entry built from different arguments (see the .cpp) --
+  // so every caller must test the handle, not assume a hit.
   entt::resource<RenderingMaterialInstance> GetOrCreate(
       entt::id_type key, MaterialInstanceFactory& factory, GeometryType geo,
       MaterialPassType material_pass, RenderPassType pass,
       const InstanceParams& params = {});
 
+  // Whether `key` is occupied -- NOT whether GetOrCreate will serve it. This
+  // takes no factory/geometry/pass, so it cannot tell an entry built from the
+  // caller's arguments from one that merely collides with them, and
+  // GetOrCreate refuses the latter. Gate on GetOrCreate's handle instead.
   bool Contains(entt::id_type key) const { return cache_.contains(key); }
   void Erase(entt::id_type key) {
     cache_.erase(key);
