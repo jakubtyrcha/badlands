@@ -1488,17 +1488,21 @@ bool WriteWorldArtifacts(const WorldArtifactInputs& in, const std::string& out_d
 // plain serial scan is fine here: this only ever runs once, on the abort
 // path, never in a hot loop, so it does not need DeterministicMaxDepth's
 // chunked-parallel-reduction machinery -- it only needs the same
-// `std::isfinite` check that machinery uses, over every field
+// `std::isfinite` check that machinery uses, over EVERY field
 // BuildInputsFromGrid/DumpPhase1 below actually reads: `height` and `soil`
 // feed the on-disk bed/cover rasters and SoilCutoffs' quantile sort (which
 // has no defined behaviour for a NaN input); `h`/`velx`/`vely` feed
 // ClassifyBoundaryWater's depth/speed test, which is what the lake/river
-// split and `water.f32` are built from.
+// split and `water.f32` are built from; `sus` is DumpPhase1's own
+// `-sus.f32` raster (round-review finding: an earlier version of this check
+// omitted it, so a NaN confined to `sus` alone classified as FINITE and
+// landed on disk under a name indistinguishable from a good snapshot --
+// exactly the failure mode this whole function exists to prevent).
 bool GridFinite(const Grid& g) {
   for (size_t i = 0; i < g.cells; ++i) {
     if (!std::isfinite(g.height[i]) || !std::isfinite(g.soil[i]) ||
         !std::isfinite(g.h[i]) || !std::isfinite(g.velx[i]) ||
-        !std::isfinite(g.vely[i]))
+        !std::isfinite(g.vely[i]) || !std::isfinite(g.sus[i]))
       return false;
   }
   return true;

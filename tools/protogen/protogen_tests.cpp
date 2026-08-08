@@ -118,6 +118,26 @@ double SumSus(const Grid& g) {
   return s;
 }
 
+// RAII scratch directory for the handful of tests in this file that must
+// touch the filesystem on purpose (checking what ends up ON DISK, not just
+// in memory) -- everything else here runs with `p.out = ""` specifically to
+// avoid it (see MorphoBase's own comment). Same TempDir idiom as
+// coarse_world_patch_source_tests.cpp / patch_io_tests.cpp, own prefix so a
+// parallel run cannot collide.
+struct TestTempDir {
+  std::filesystem::path path;
+  explicit TestTempDir(const std::string& name)
+      : path(std::filesystem::temp_directory_path() / ("bl_protogen_" + name)) {
+    std::filesystem::remove_all(path);
+    std::filesystem::create_directories(path);
+  }
+  ~TestTempDir() {
+    std::error_code ec;
+    std::filesystem::remove_all(path, ec);
+  }
+  std::string str() const { return path.string(); }
+};
+
 // --- 1. mass conservation -------------------------------------------------
 // Everything the particles move must be accounted for: what stays on the grid
 // plus what left the map equals what was there to begin with.
@@ -147,6 +167,104 @@ void MassConservation() {
   Check("mass conservation: sus is fully flushed to the bed by the time "
         "RunSim returns, so the ON-DISK artifacts close too",
         sus_after == 0.0, F("sum(sus) %.3e (want exactly 0)", sus_after));
+}
+
+// --- 1b. RunSim's terminal flush closes the ledger ON DISK, not just in
+// memory -----------------------------------------------------------------
+// Round 2 (re-review): the in-memory Σsus==0 check above (and MassConservation
+// itself) only ever inspects the `Grid` RunSim returns -- it says nothing
+// about whether the BYTES ON DISK reflect the flush, which is the actual
+// artifact CoarseWorldPatchSource/downstream consumers read. RunSim's own
+// fix comment explains why this is not automatic: the final "%04d-step"
+// snapshot is dumped INSIDE the step loop, at `step == p.steps`, which runs
+// BEFORE the post-loop flush -- so the fix has to re-dump that same tag
+// AFTER flushing, and a regression (e.g. someone "simplifying" away the
+// re-dump) would silently go back to shipping the pre-flush raster while
+// every in-memory assertion kept passing.
+//
+// This runs RunSim with a REAL `p.out`, then reads the final height raster
+// back off disk and recomputes MassConservation's own residual formula
+// --  (Σheight − before) + lost_offmap -- sourced from DISK instead of the
+// in-memory grid. Phase 0's `Dump` never writes a `sus` raster at all (only
+// DumpPhase1, phase 1's, does) -- which is exactly the point: with the
+// flush, `sus` has nothing left in it, so height ALONE must already close
+// the ledger on disk.
+//
+// USES TerminalLoadInjection's OWN FIXTURE (single deterministic source,
+// short `max_travel_m` so the particle exhausts it and hits the terminal
+// exit EVERY step -- see that test's own comment), not the generic
+// Base()/Bowl default: MassConservation's 200-step default fixture turned
+// out to be the wrong one to build this on -- verified directly (a scratch
+// build with the flush removed entirely) that by step 200, ordinary
+// per-step SettleSus has ALREADY geometrically decayed `sus` to ~1e-9 of
+// the baseline on its own, so removing the flush barely moved that
+// fixture's on-disk residual (both stayed under 1e-4 relative either way --
+// not a real test). Continuous terminal-exit injection every step keeps
+// `sus` at a real, non-decaying magnitude right up to the last step, which
+// is what makes "did the FINAL flush actually run before the dump" an
+// observable difference on disk.
+//
+// TOLERANCE, MEASURED NOT GUESSED: with the flush, the on-disk residual is
+// pure float32 round-trip noise, ~3e-8 relative (write `height * relief_m`,
+// read back, divide by `relief_m` again). With the flush removed (verified
+// directly, same scratch build as above), it jumps to ~2e-5 relative --
+// three orders of magnitude higher, but still a small-looking number, which
+// is exactly why a loose tolerance (this test's first draft used 1e-4 and
+// PASSED either way -- a false green). `1e-5` sits cleanly between the two,
+// with a full order of magnitude of headroom on both sides.
+void RunSimFlushClosesOnDisk() {
+  TestTempDir dir("runsim_flush_on_disk");
+  Params p = Base(48);
+  p.terrain = Params::Terrain::Bowl;
+  p.source_jitter_cells = 0.f;  // deterministic: identical spawn every step
+  p.drops = 1;
+  p.steps = 80;
+  const float cell_m = p.world_m / float(p.res);
+  p.max_travel_m = 6.0f * cell_m;  // exhausted mid-slope -- see TerminalLoadInjection
+  p.out = dir.str();
+  Grid g0(p.res);
+  InitTerrain(g0, p);
+  const double before = SumH(g0);
+
+  Grid g(p.res);
+  InitTerrain(g, p);
+  SimStats st;
+  RunSim(p, g, st, /*verbose=*/true);  // verbose: Dump() is gated on it
+
+  char tag[64];
+  std::snprintf(tag, sizeof(tag), "%04d-step", p.steps);
+  const std::string path = dir.str() + "/" + std::string(tag) + "-height.f32";
+  std::vector<float> disk_height_m(g.cells);
+  std::ifstream f(path, std::ios::binary);
+  bool read_ok = bool(f);
+  if (read_ok) {
+    f.read(reinterpret_cast<char*>(disk_height_m.data()),
+           static_cast<std::streamsize>(disk_height_m.size() * sizeof(float)));
+    read_ok = bool(f) && f.gcount() ==
+                            static_cast<std::streamsize>(disk_height_m.size() *
+                                                         sizeof(float));
+  }
+
+  // Undo Dump()'s `* p.relief_m` scale to compare in SumH's own
+  // dimensionless units -- the same formula MassConservation uses, just
+  // sourced from the raster instead of `g` directly.
+  double disk_sum = 0.0;
+  if (read_ok)
+    for (float h_m : disk_height_m) disk_sum += double(h_m) / double(p.relief_m);
+
+  const double residual = read_ok ? (disk_sum - before) + g.lost_offmap
+                                  : std::numeric_limits<double>::infinity();
+  const double rel = std::fabs(residual) / std::max(std::fabs(before), 1e-9);
+
+  const bool ok = read_ok && rel < 1e-5;
+  char buf[300];
+  std::snprintf(buf, sizeof(buf),
+               "raster read ok=%d, on-disk sum(height) residual %.3e of "
+               "%.3e (rel %.3e, want < 1e-5)",
+               read_ok, residual, before, rel);
+  Check("RunSim: the terminal sus flush lands ON DISK, not just in memory "
+        "-- the final height raster alone closes the mass ledger",
+        ok, buf);
 }
 
 // --- 2. flat plane does nothing -------------------------------------------
@@ -3540,6 +3658,52 @@ void BoundaryClassification() {
     g.vely[i] = 0.0f;
   }
 
+  // Round 2 (re-review): two lakes at DIFFERENT levels, joined by a shallow
+  // reach, to prove the seed-relative bound (finding 3) is genuinely
+  // PER-REGION, not one global reference level for the whole grid -- that
+  // is currently true only by code inspection (`seed_surface` is captured
+  // fresh each time the outer scan finds a new, unvisited seed), and no
+  // fixture pinned it. If it were accidentally global instead (e.g.
+  // `seed_surface` hoisted out of the scan loop, reused for every region),
+  // Lake B below would fail almost entirely: its own core/margin sits 3.0 m
+  // from Lake A's 6.0 m, so growth from Lake B's own seed into its own
+  // immediately-adjacent cells would be checked against Lake A's level and
+  // refused, leaving only the one seed cell tagged.
+  //
+  // Lake B: x in [41,47], y in [27,42], flat surface at 3.0 m (half Lake
+  // A's 6.0 m) -- same core/margin construction as Lake A, scaled to the
+  // remaining grid.
+  const int mx0 = 41, mx1 = 47, my0 = 27, my1 = 42;
+  for (int y = my0; y <= my1; ++y) {
+    for (int x = mx0; x <= mx1; ++x) {
+      const bool margin =
+          (x - mx0 < 2) || (mx1 - x < 2) || (y - my0 < 2) || (my1 - y < 2);
+      const size_t i = g.idx(x, y);
+      if (margin) { g.height[i] = 2.6f; g.h[i] = 0.4f; }
+      else { g.height[i] = 0.0f; g.h[i] = 3.0f; }
+      g.velx[i] = 0.001f;
+      g.vely[i] = 0.0f;
+    }
+  }
+
+  // Reach: x in [38,40], y in [33,35] -- 4-connected to Lake A's margin at
+  // x=37 on its west side and Lake B's margin at x=41 on its east side (a
+  // row band inside both lakes' y-overlap). Flat surface at 4.5 m, 1.5 m
+  // off EACH lake's level -- two orders past kLakeSurfaceContinuityM either
+  // way. Shallow (h=0.3 m, under kLakeSeedDepthM) so it never seeds on its
+  // own; growth from either lake is the only way it could ever get tagged,
+  // and the seed-relative bound must refuse both directions.
+  const int rx0 = 38, rx1 = 40, ry0 = 33, ry1 = 35;
+  for (int y = ry0; y <= ry1; ++y) {
+    for (int x = rx0; x <= rx1; ++x) {
+      const size_t i = g.idx(x, y);
+      g.h[i] = 0.3f;
+      g.height[i] = 4.5f - g.h[i];
+      g.velx[i] = 0.0f;
+      g.vely[i] = 0.0f;
+    }
+  }
+
   const std::vector<float> water = ClassifyBoundaryWater(g, p);
 
   bool core_tagged = true, margin_tagged = true;
@@ -3572,20 +3736,42 @@ void BoundaryClassification() {
   const bool backwater_far_clear =
       water[g.idx(bx, 13)] == 0.0f && water[g.idx(bx, 0)] == 0.0f;
 
+  // Lake B: same core/margin sampling shape as Lake A above, scaled to its
+  // smaller box.
+  bool lakeB_core_tagged = true, lakeB_margin_tagged = true;
+  for (int y = my0 + 2; y <= my1 - 2; y += 3)
+    for (int x = mx0 + 2; x <= mx1 - 2; ++x)
+      if (!(water[g.idx(x, y)] > 0.0f)) lakeB_core_tagged = false;
+  for (int x = mx0; x <= mx1; x += 2) {
+    if (!(water[g.idx(x, my0)] > 0.0f)) lakeB_margin_tagged = false;
+    if (!(water[g.idx(x, my1)] > 0.0f)) lakeB_margin_tagged = false;
+  }
+
+  bool reach_clear = true;
+  for (int y = ry0; y <= ry1; ++y)
+    for (int x = rx0; x <= rx1; ++x)
+      if (water[g.idx(x, y)] != 0.0f) reach_clear = false;
+
   const bool ok = core_tagged && margin_tagged && channel_clear &&
                   pulse_clear && puddle_clear && backwater_near_tagged &&
-                  backwater_far_clear;
-  char buf[380];
+                  backwater_far_clear && lakeB_core_tagged &&
+                  lakeB_margin_tagged && reach_clear;
+  char buf[560];
   std::snprintf(buf, sizeof(buf),
-                "lake core tagged=%d, shallow margin tagged=%d, channel "
+                "lake A core tagged=%d, shallow margin tagged=%d, channel "
                 "clear=%d, flood-pulse cell clear=%d, puddle cell clear=%d, "
-                "backwater near end tagged=%d, backwater far end clear=%d",
+                "backwater near end tagged=%d, backwater far end clear=%d, "
+                "lake B (different level) core tagged=%d, margin tagged=%d, "
+                "connecting reach clear (annexed by neither lake)=%d",
                 core_tagged, margin_tagged, channel_clear, pulse_clear,
-                puddle_clear, backwater_near_tagged, backwater_far_clear);
+                puddle_clear, backwater_near_tagged, backwater_far_clear,
+                lakeB_core_tagged, lakeB_margin_tagged, reach_clear);
   Check("BoundaryClassification: whole lake incl. margins tagged, channel "
-        "and isolated deep/fast + shallow/slow cells are not, and a "
-        "near-flat backwater is annexed only up to the seed's total "
-        "surface tolerance, not indefinitely by per-hop continuity",
+        "and isolated deep/fast + shallow/slow cells are not, a near-flat "
+        "backwater is annexed only up to the seed's total surface "
+        "tolerance, and a second lake at a different level (joined by a "
+        "shallow reach) is fully tagged on its OWN seed rather than being "
+        "blocked by or merged with the first",
         ok, buf);
 }
 
@@ -3758,22 +3944,8 @@ void BatchedMassAuditFiresOnNonMultipleCadence() {
 // its own comment, protogen.hpp/.cpp) is exercised directly here, the same
 // way SweTripwire drives RunSweCycles directly rather than through main():
 // both are driver/output-boundary glue with no CLI of their own to go
-// through. This is also the one test in this file that touches the
-// filesystem on purpose (TestTempDir), since the whole point is checking
-// what ends up ON DISK.
-struct TestTempDir {
-  std::filesystem::path path;
-  explicit TestTempDir(const std::string& name)
-      : path(std::filesystem::temp_directory_path() / ("bl_protogen_" + name)) {
-    std::filesystem::remove_all(path);
-    std::filesystem::create_directories(path);
-  }
-  ~TestTempDir() {
-    std::error_code ec;
-    std::filesystem::remove_all(path, ec);
-  }
-  std::string str() const { return path.string(); }
-};
+// through. Uses TestTempDir (defined near SumSus, above), since the whole
+// point is checking what ends up ON DISK.
 
 void HandlePhase1AbortFinalizesDirectory() {
   namespace mg = badlands::mapgen;
@@ -3900,11 +4072,73 @@ void HandlePhase1AbortFinalizesDirectory() {
   Check("HandlePhase1Abort: a NON-FINITE abort (seeded NaN) leaves world.txt "
         "untouched and writes an ABORTED marker instead",
         nonfinite_ok, nonfinite_detail);
+
+  // --- Round 2 (re-review): GridFinite must catch a NaN confined to `sus`
+  // ALONE, not just h/height/velx/vely. `sus` is DumpPhase1's own
+  // `-sus.f32` raster (see its call site) -- an earlier GridFinite omitted
+  // it, so a NaN living only in `sus` classified FINITE and would have
+  // landed on disk under a name indistinguishable from a good snapshot.
+  // `g.h`/`g.height`/`g.velx`/`g.vely` are all left clean here on purpose
+  // (RunSweCycles's own pre-loop tripwire only inspects h/height -- see its
+  // header comment -- so a sus-only corruption would sail straight past it
+  // and never even reach HandlePhase1Abort in a real run; this calls it
+  // directly to pin GridFinite's own coverage, independent of whether
+  // RunSweCycles would have caught the fault some other way first).
+  bool sus_nonfinite_ok = false;
+  std::string sus_nonfinite_detail;
+  {
+    TestTempDir dir("abort_sus_nonfinite");
+    Params p = MorphoBase(24, 16.f);
+    p.out = dir.str();
+
+    mg::CoarseManifest seed_man;
+    seed_man.resolution = p.res;
+    seed_man.world_size_m = p.world_m;
+    seed_man.cycles = 5678;  // distinguishable from every other value here
+    std::string werr;
+    const bool seeded = mg::write_coarse_manifest(dir.str(), seed_man, &werr);
+
+    Grid g(p.res);
+    InitTerrain(g, p);
+    g.sus[g.idx(12, 12)] = std::numeric_limits<float>::quiet_NaN();
+
+    const int fake_cycles_run = 7;
+    const std::string fake_reason = "test: sus-only corruption";
+    const bool handled =
+        HandlePhase1Abort(g, p, fake_cycles_run, fake_reason);
+
+    std::string err;
+    const auto man = mg::load_coarse_manifest(dir.str(), &err);
+    const bool manifest_unchanged = man.has_value() && man->cycles == 5678;
+
+    char tag[64];
+    std::snprintf(tag, sizeof(tag), "%04d-cycle", fake_cycles_run);
+    const bool no_raster = !std::filesystem::exists(
+        dir.str() + "/" + std::string(tag) + "-sus.f32");
+
+    const bool marker_exists =
+        std::filesystem::exists(dir.str() + "/ABORTED");
+
+    sus_nonfinite_ok =
+        seeded && handled && manifest_unchanged && no_raster && marker_exists;
+    char buf[400];
+    std::snprintf(buf, sizeof(buf),
+                 "seeded manifest=%d, handled=%d, manifest unchanged "
+                 "(cycles still 5678)=%d, no sus raster written=%d, "
+                 "ABORTED marker exists=%d",
+                 seeded, handled, manifest_unchanged, no_raster,
+                 marker_exists);
+    sus_nonfinite_detail = buf;
+  }
+  Check("HandlePhase1Abort: GridFinite catches a NaN confined to sus alone "
+        "(h/height/velx/vely all clean)",
+        sus_nonfinite_ok, sus_nonfinite_detail);
 }
 
 int RunAll() {
   std::printf("protogen sanity tests (small grids, production 16 m cells)\n");
   MassConservation();
+  RunSimFlushClosesOnDisk();
   FlatPlaneInert();
   Determinism();
   KnobLiveness();
