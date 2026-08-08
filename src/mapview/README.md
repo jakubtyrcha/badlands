@@ -10,8 +10,11 @@ it is interchangeable. There is no in-repo generator any more.
 
   coarse sim  ──► world.txt ──► CoarseWorldPatchSource ──┐
   (16 km, ~5 min)  rivers.bin                            │
-                                                         ├─► PatchData ─► mapview
+                                                         │
   a patch dir  ──────────────► FilePatchSource ──────────┤
+                                                         ├─► PatchData ─► mapview
+  a terrain-net ─────────────► TerrainNetPatchSource ────┤
+  bundle (real LiDAR)                                    │
                                                          │
   nothing at all ────────────► SyntheticPatchSource ─────┘
 ```
@@ -23,6 +26,12 @@ it is interchangeable. There is no in-repo generator any more.
 - **`--load <coarse-dir>`** — an arbitrary cut out of a cached coarse world, at
   any `--patch-size` and `--patch-res`.
 - **`--load <patch-dir>`** — a finished patch read off disk.
+- **`--load <terrain-net-bundle>`** — real bare-earth LiDAR at 1 m plus ESA
+  WorldCover land cover, fetched by `terrain-fetch --format raw`
+  (`/Users/jakub/repos/terrain-net`). Stages 1 and 2 are set aside pending an ML
+  upscaler, so this is what the rendering path is judged against today. Which
+  kind of directory it is gets DETECTED — `world.txt` / `map.txt` / `raw.json` —
+  never chosen with a flag.
 
 Stage 3 cannot tell them apart, and that is enforced rather than hoped for:
 `map_view_view.cpp` compiles into a library that links the contract and **not**
@@ -80,12 +89,22 @@ plus a key/value manifest, so numpy reads them without a parser.
 ```
 worlddir/                              patchdir/
   world.txt    resolution, extent,       map.txt      resolution, world_size_m,
-               texel_m, seed, runoff,                 origin_m, source
-               steps, soil cutoffs       height.f32   metres — the BED
-  <tag>-height.f32  and the other        level.f32    metres — LAKE SURFACE
-  <tag>-*.f32       snapshot rasters     biome.u8     mapgen::Biome
-  rivers.bin   whole-world graph,        soil.f32     erodible cover
-               culled by flow            rivers.bin   clipped graph
+               texel_m, seed, runoff,                 origin_m, source,
+               steps, soil cutoffs                    terrain_class
+  <tag>-height.f32  and the other        height.f32   metres — the BED
+  <tag>-*.f32       snapshot rasters     level.f32    metres — LAKE SURFACE
+  rivers.bin   whole-world graph,        cover.u8     mapgen::Cover
+               culled by flow            soil.f32     erodible cover
+                                         rivers.bin   clipped graph
+
+A terrain-net BUNDLE is a third form, and it is not ours — it is written by
+`terrain-fetch --format raw` and only read here:
+
+  bundledir/
+    raw.json       grid, res_m, the nodata sentinel, row order, class tables
+    height.r32     float32 LE, north-to-south, -9999 = nodata
+    landcover.r8   uint8 raw ESA WorldCover codes
+    manifest.json  CRS, provenance, licence, and area.detail_class
 ```
 
 - **Water rides in the LEVEL raster, not a depth field.** `depth = max(0, level −
@@ -104,6 +123,29 @@ worlddir/                              patchdir/
   the manifests apply to unknown keys.
 - **Nothing is versioned.** Forward compatibility comes from ignored keys and
   tolerated absence, which has covered every change so far.
+
+## What a patch says about its ground
+
+Three separate questions, deliberately not one raster:
+
+- **`cover`** (`mapgen::Cover`) — what GROWS here, for shading and foliage. Not
+  `mapgen::Biome`: that is the SIMULATION's vocabulary (walkability, move cost,
+  habitat, animal spawning, frozen across the C ABI) and does not appear in this
+  contract. The two meet in exactly one place, `mapgen/biome_cover.hpp`.
+- **`terrain_class`** (`mapgen::TerrainClass`) — how the ground was CARVED, and
+  therefore which rock and ground materials to paint with. Per patch, because
+  that is what the sources emit; a raster later.
+- **the continuous fields** (`height`, `level`, `soil`) — WHERE things go.
+
+**Ground material is not indexed off any of them.** It is derived from slope,
+curvature and soil at the heightfield's own resolution
+(`mapview/ground_splat.hpp`), so a material edge is not pinned to a
+classification's much coarser lattice. That derivation is a named seam, not a
+frozen decision — the slot meanings and the pack palette are provisional.
+
+Elevation-derived classes are gone from the contract entirely: "hills" and
+"mountain" are recoverable from `height`, so a label carrying them carries
+nothing.
 
 ## Biomes come from the substrate
 

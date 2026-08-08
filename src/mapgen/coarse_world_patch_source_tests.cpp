@@ -13,7 +13,7 @@
 #include <string>
 #include <vector>
 
-#include "mapgen/biomes.hpp"
+#include "mapgen/cover.hpp"
 #include "mapgen/coarse_world_patch_source.hpp"
 #include "mapgen/river_io.hpp"
 #include "mapgen/synthetic_patch_source.hpp"
@@ -58,7 +58,7 @@ float AnalyticBed(float x, float z) {
 
 // Writes a coarse world fixture: world.txt + "<tag>-{height,water,soil}.f32",
 // all dry, uniform soil comfortably above both cutoffs (so every dry texel
-// classifies Plains and the biome/water logic stays out of the way of the
+// classifies Plains and the cover/water logic stays out of the way of the
 // resample tests). `bed` supplies height at each texel's WORLD-METRE centre.
 template <typename BedFn>
 void write_coarse_world(const std::string& dir, int res, float world_size_m,
@@ -133,7 +133,7 @@ void CheckPatchInvariants(const PatchSource& src, const PatchRequest& req) {
   CHECK(p.level.data.size() == count);
   CHECK(p.water_depth.data.size() == count);
   CHECK(p.lake_id.data.size() == count);
-  CHECK(p.biome.data.size() == count);
+  CHECK(p.cover.data.size() == count);
   CHECK(p.soil.data.size() == count);
   CHECK(p.texel_m == Catch::Approx(req.world_size_m / static_cast<float>(n)));
 
@@ -141,7 +141,7 @@ void CheckPatchInvariants(const PatchSource& src, const PatchRequest& req) {
     CHECK(p.level.data[i] >= p.height.data[i] - 1e-3f);
     const float expect_depth = std::max(0.0f, p.level.data[i] - p.height.data[i]);
     CHECK(p.water_depth.data[i] == Catch::Approx(expect_depth).margin(1e-3));
-    CHECK(p.biome.data[i] < kBiomeCount);
+    CHECK(p.cover.data[i] < kCoverCount);
   }
 
   CHECK(p.elevation_range.min_m <= p.elevation_range.max_m);
@@ -250,7 +250,7 @@ TEST_CASE("a request whose extent is not a whole number of coarse cells "
   CHECK(p.height.height == 50);
   for (float h : p.height.data) CHECK(std::isfinite(h));
   for (float d : p.water_depth.data) CHECK(d >= 0.0f);
-  for (uint8_t b : p.biome.data) CHECK(b < kBiomeCount);
+  for (uint8_t c : p.cover.data) CHECK(c < kCoverCount);
 }
 
 TEST_CASE("a request coarser than the source produces area-averages, not "

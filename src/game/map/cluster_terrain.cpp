@@ -25,7 +25,7 @@ namespace badlands {
 ClusterTerrain::ClusterTerrain() = default;
 ClusterTerrain::~ClusterTerrain() = default;
 
-bool ClusterTerrain::Build(const MapData& map, const RenderContext& ctx,
+bool ClusterTerrain::Build(const TerrainLattice& map, const RenderContext& ctx,
                            entt::registry& registry, const glm::mat4& model,
                            const TerrainClusterParams& params,
                            const MaterialLibrary::TerrainArrays& arrays,
@@ -54,7 +54,7 @@ bool ClusterTerrain::Build(const MapData& map, const RenderContext& ctx,
     return false;
   }
 
-  // Build the cluster-LOD DAG from the frozen MapData lattice, subdividing
+  // Build the cluster-LOD DAG from the lattice, subdividing
   // wherever `detail` asks for it (null = the plain lattice).
   dag_ = BuildTerrainClusterDag(map, params, detail);
 

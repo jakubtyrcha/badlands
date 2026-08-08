@@ -11,7 +11,7 @@
 //     map.txt        manifest, "key value" per line
 //     height.f32     float32 metres, row-major, resolution^2 -- the BED
 //     level.f32      float32 metres, LAKE SURFACE elevation
-//     biome.u8       uint8, Biome values
+//     cover.u8       uint8, mapgen::Cover values (what GROWS here)
 //     soil.f32       float32 metres of erodible cover (see below)
 //     rivers.bin     binary RiverGraph dump, mapgen/river_io.hpp (see below)
 //
@@ -43,6 +43,7 @@
 #include <glm/glm.hpp>
 
 #include "mapgen/patch_data.hpp"
+#include "mapgen/terrain_class.hpp"
 
 namespace badlands::mapgen {
 
@@ -52,6 +53,9 @@ struct PatchManifest {
   float world_size_m = 0.0f;
   glm::dvec2 origin_m{0.0};  // optional key; absent means the origin is unknown
   std::string source;
+  // Optional key. Absent, or a name this build does not know, means Unknown --
+  // the same forward-compatibility rule the rest of the manifest follows.
+  TerrainClass terrain_class = TerrainClass::Unknown;
 };
 
 // Reads <dir>/map.txt. Returns nullopt and writes the reason to `error` if the

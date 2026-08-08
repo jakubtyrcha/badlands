@@ -79,7 +79,10 @@ Scene BuildScene(int nodes, float spacing_m, int tree_count, uint32_t seed) {
   s.size_x_m = map.size_x_m();
   s.size_z_m = map.size_z_m();
 
-  s.dag = BuildTerrainClusterDag(map);
+  // The lattice view has to outlive the build -- it holds raw pointers into
+  // `map` and into its own derived class buffer.
+  badlands::TerrainLatticeStorage lattice = map.Lattice();
+  s.dag = BuildTerrainClusterDag(lattice.View());
   uint32_t max_indices = 0;
   size_t over_budget = 0;
   for (const auto& c : s.dag.clusters) {

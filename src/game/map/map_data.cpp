@@ -139,4 +139,28 @@ mapgen::Biome MapData::DominantBiomeAt(float wx, float wz) const {
   return BiomesAt(wx, wz).Dominant();
 }
 
+TerrainLatticeStorage MapData::Lattice() const {
+  TerrainLatticeStorage out;
+  const std::size_t n =
+      static_cast<std::size_t>(nodes_x_) * static_cast<std::size_t>(nodes_z_);
+  out.class_id.resize(n);
+  for (int j = 0; j < nodes_z_; ++j) {
+    for (int i = 0; i < nodes_x_; ++i) {
+      out.class_id[index(i, j)] =
+          static_cast<uint8_t>(WeightsAtNode(i, j).Dominant());
+    }
+  }
+
+  out.lattice.nodes_x = nodes_x_;
+  out.lattice.nodes_z = nodes_z_;
+  out.lattice.spacing_m = spacing_m_;
+  out.lattice.height = height_.data();
+  out.lattice.class_id = out.class_id.data();
+  // The BIOME palette, since this map's class bytes are Biome values. The
+  // builder never learns which palette it was handed, and does not need to.
+  out.lattice.palette = mapgen::kBiomePalette.data();
+  out.lattice.palette_count = mapgen::kBiomeCount;
+  return out;
+}
+
 }  // namespace badlands

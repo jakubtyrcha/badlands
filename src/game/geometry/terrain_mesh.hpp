@@ -16,6 +16,7 @@
 
 #include "engine/core/ray.hpp"
 #include "game/map/map_data.hpp"
+#include "game/map/terrain_lattice.hpp"
 
 namespace badlands {
 
@@ -44,7 +45,8 @@ VertexBlend ResolveVertexBlend(const BiomeWeights& weights);
 // The surface is the bilinear heightmap, not the tessellated mesh, so a hit can
 // differ from the rendered triangles by the tessellation error -- fine for
 // picking, not for physics.
-bool RaycastTerrain(const MapData& map, const Ray& ray, glm::vec3& out_hit);
+bool RaycastTerrain(const TerrainLattice& map, const Ray& ray,
+                    glm::vec3& out_hit);
 
 // A kTerrainBlend triangle mesh. Each vertex is 8 floats: pos(3) + normal(3) +
 // layer_indices(Uint8x4 packed as 1 float) + blend_weights(Unorm8x4 packed as 1

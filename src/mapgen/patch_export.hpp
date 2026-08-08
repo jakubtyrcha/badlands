@@ -61,11 +61,11 @@ std::vector<uint8_t> encode_height_water_rgba(const Field2D<float>& height,
                                               ExportRange range,
                                               float water_max_m);
 
-// Biome ids through kBiomePalette (biomes.hpp) -- the SAME palette the cluster
-// terrain's per-vertex colour uses, so an exported biome map matches the 3D view
+// Cover ids through kCoverPalette (cover.hpp) -- the SAME palette the cluster
+// terrain's per-vertex colour uses, so an exported cover map matches the 3D view
 // byte for byte. Out-of-range ids clamp to opaque black rather than indexing
 // past the palette.
-std::vector<uint8_t> encode_biome_rgba(const Field2D<uint8_t>& biome);
+std::vector<uint8_t> encode_cover_rgba(const Field2D<uint8_t>& cover);
 
 // The judgement image: Lambert shading on the height gradient (fixed NW sun at
 // 45 degrees, ambient floor), flat water tinted by depth, and river centrelines

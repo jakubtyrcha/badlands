@@ -8,7 +8,7 @@
 #include <iomanip>
 #include <sstream>
 
-#include "mapgen/biomes.hpp"
+#include "mapgen/cover.hpp"
 #include "mapgen/river_io.hpp"
 
 namespace badlands::mapgen {
@@ -94,6 +94,13 @@ std::optional<PatchManifest> load_patch_manifest(const std::string& dir,
     } else if (key == "source") {
       std::getline(ls, m.source);
       if (!m.source.empty() && m.source[0] == ' ') m.source.erase(0, 1);
+    } else if (key == "terrain_class") {
+      // Tolerated when absent, exactly like soil.f32 and rivers.bin -- a
+      // directory written before this key existed loads as Unknown. An
+      // unrecognised NAME is also Unknown rather than an error, so a patch
+      // labelled by a newer writer still renders.
+      std::string name;
+      if (ls >> name) m.terrain_class = terrain_class_from_name(name);
     }
     // Unknown keys are ignored on purpose: the writer may add provenance
     // fields without breaking older readers.
@@ -174,10 +181,27 @@ std::optional<PatchData> load_patch(const std::string& dir, std::string* error) 
   const size_t count = static_cast<size_t>(n) * n;
 
   std::vector<float> height, level, soil;
-  std::vector<uint8_t> biome;
+  std::vector<uint8_t> cover;
   if (!read_raster(dir + "/height.f32", count, height, error)) return std::nullopt;
   if (!read_raster(dir + "/level.f32", count, level, error)) return std::nullopt;
-  if (!read_raster(dir + "/biome.u8", count, biome, error)) return std::nullopt;
+  // A directory written before cover replaced biome fails the read below with
+  // "cannot open .../cover.u8", which does not say what to do about it. Worse,
+  // the obvious guess -- rename the file -- SILENTLY reinterprets the bytes:
+  // Biome::Lake=0 becomes Cover::Unknown, Plains=3 becomes Grass, Mountain=5
+  // becomes Built, all inside kCoverCount, so the range check below passes and
+  // nothing complains. Say so instead. There is no migration: the values mean
+  // different things and only the producer can restate them.
+  if (!std::filesystem::exists(std::filesystem::path(dir) / "cover.u8") &&
+      std::filesystem::exists(std::filesystem::path(dir) / "biome.u8")) {
+    if (error) {
+      *error = dir +
+               ": holds biome.u8, written before cover replaced biome. Renaming "
+               "it would silently reinterpret the values -- regenerate the "
+               "patch instead.";
+    }
+    return std::nullopt;
+  }
+  if (!read_raster(dir + "/cover.u8", count, cover, error)) return std::nullopt;
   // Soil is optional ON DISK (see the header): a patch written before the
   // two-layer substrate is still perfectly renderable, and loads as zeros. A
   // present-but-malformed file is still an error.
@@ -187,18 +211,18 @@ std::optional<PatchData> load_patch(const std::string& dir, std::string* error) 
     return std::nullopt;
 
   // A NaN reaches the GPU as a hole in the terrain with no diagnostic, and a
-  // single out-of-range biome samples the wrong texture array layer silently.
+  // single out-of-range cover value indexes past the palette silently.
   // Both are cheap to reject here.
   for (size_t i = 0; i < count; ++i) {
     if (!std::isfinite(height[i]) || !std::isfinite(level[i])) {
       if (error) *error = dir + ": non-finite sample in height.f32/level.f32";
       return std::nullopt;
     }
-    if (biome[i] >= kBiomeCount) {
+    if (cover[i] >= kCoverCount) {
       if (error) {
         std::ostringstream os;
-        os << dir << ": biome.u8 holds " << int(biome[i]) << ", valid range is 0.."
-           << (kBiomeCount - 1);
+        os << dir << ": cover.u8 holds " << int(cover[i]) << ", valid range is 0.."
+           << (kCoverCount - 1);
         *error = os.str();
       }
       return std::nullopt;
@@ -213,8 +237,9 @@ std::optional<PatchData> load_patch(const std::string& dir, std::string* error) 
   p.height.data = std::move(height);
   p.level = Field2D<float>(n, n);
   p.level.data = std::move(level);
-  p.biome = Field2D<uint8_t>(n, n);
-  p.biome.data = std::move(biome);
+  p.cover = Field2D<uint8_t>(n, n);
+  p.cover.data = std::move(cover);
+  p.terrain_class = man->terrain_class;
   p.soil = Field2D<float>(n, n, 0.0f);
   if (have_soil) p.soil.data = std::move(soil);
 
@@ -241,7 +266,7 @@ bool write_patch(const std::string& dir, const PatchData& patch,
     return false;
   }
   const size_t count = static_cast<size_t>(n) * n;
-  if (patch.level.data.size() != count || patch.biome.data.size() != count ||
+  if (patch.level.data.size() != count || patch.cover.data.size() != count ||
       patch.soil.data.size() != count) {
     if (error) *error = "write_patch: rasters disagree with the height extent";
     return false;
@@ -272,6 +297,9 @@ bool write_patch(const std::string& dir, const PatchData& patch,
     f << std::setprecision(17)
       << "origin_m " << patch.origin_m.x << " " << patch.origin_m.y << "\n";
     if (!source.empty()) f << "source " << source << "\n";
+    // Absent means Unknown, which is what an older directory loads as. Written
+    // unconditionally so a round-trip is exact even for an unlabelled patch.
+    f << "terrain_class " << terrain_class_name(patch.terrain_class) << "\n";
     if (!f) {
       if (error) *error = "short write on " + dir + "/map.txt";
       return false;
@@ -280,7 +308,7 @@ bool write_patch(const std::string& dir, const PatchData& patch,
 
   return write_raster(dir + "/height.f32", patch.height.data, error) &&
          write_raster(dir + "/level.f32", patch.level.data, error) &&
-         write_raster(dir + "/biome.u8", patch.biome.data, error) &&
+         write_raster(dir + "/cover.u8", patch.cover.data, error) &&
          write_raster(dir + "/soil.f32", patch.soil.data, error) &&
          write_river_graph(dir + "/rivers.bin", patch.rivers, error);
 }

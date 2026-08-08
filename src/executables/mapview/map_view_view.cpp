@@ -30,10 +30,12 @@
 #include "game/geometry/terrain_mesh.hpp"  // RaycastTerrain(MapData)
 #include "game/map/forest_test_map_generator.hpp"
 #include "game/map/map_data_terrain_query.hpp"
+#include "game/map/visual_map_terrain_query.hpp"
 #include "game/visual/forest_catalog.hpp"
+#include "mapgen/biome_cover.hpp"
 #include "mapgen/biomes.hpp"
-#include "mapview/biome_manifest.hpp"
-#include "mapview/biome_splat.hpp"
+#include "mapgen/soil_estimate.hpp"
+#include "mapview/ground_splat.hpp"
 #include "mapgen/river_arcs.hpp"
 #include "mapview/lake_surface.hpp"
 #include "mapview/river_surface.hpp"
@@ -59,32 +61,47 @@ constexpr float kRiverArcToleranceTexels = 0.5f;
 // positions with ==.
 constexpr uint8_t kRiverDetailExponent = 3;
 
-// Wrap the generator output in the frozen MapData contract at the raster's own
-// texel spacing. Slices are ONE-HOT: the hard per-pixel biome assignment, so
-// WeightsAtNode(i,j).Dominant() == the single biome and the cluster terrain's
-// per-vertex color is the crisp per-texel biome. Blended slices are the game's
-// symbolic generator's business.
-MapData MakeOneHotMapData(const mapgen::PatchData& patch, glm::vec2 size_m) {
+// Wrap the patch in the VISUAL map at the raster's own texel spacing.
+//
+// One class per node, not blended slices: the patch's cover raster is already a
+// hard per-texel assignment, and blending it would only soften a debug tint --
+// the GROUND MATERIAL does not come from cover at all (see ground_splat.hpp).
+VisualMapData MakeVisualMap(const mapgen::PatchData& patch, glm::vec2 size_m) {
   const int sw = patch.height.width, sh = patch.height.height;
   if (sw <= 0 || sh <= 0) return {};
   const float tx = size_m.x / static_cast<float>(sw);
   const float ty = size_m.y / static_cast<float>(sh);
   if (tx <= 0.0f) return {};
-  // The frozen MapData lattice has ONE spacing scalar; this wrap is the code
-  // that depends on square texels, so the invariant is asserted here (the CLI
-  // check in main_mapview is the user-facing error for the same contradiction).
+  // The lattice has ONE spacing scalar; this wrap is the code that depends on
+  // square texels, so the invariant is asserted here (the CLI check in
+  // main_mapview is the user-facing error for the same contradiction).
   assert(std::abs(tx - ty) <= 1e-4f * std::max(tx, ty));
   // One more node than texels per axis: node i sits at i * tx, so the
   // lattice spans exactly the map's size_m; edge nodes clamp to the last texel.
-  MapData map(sw + 1, sh + 1, tx);
+  VisualMapData map(sw + 1, sh + 1, tx);
+  map.set_terrain_class(patch.terrain_class);
   for (int j = 0; j <= sh; ++j) {
     for (int i = 0; i <= sw; ++i) {
       const int sx = std::min(i, sw - 1), sz = std::min(j, sh - 1);
       map.mutable_height(i, j) = patch.height.at(sx, sz);
-      map.mutable_slice(patch.biome.at(sx, sz), i, j) = 255;
+      map.set_cover(i, j, static_cast<mapgen::Cover>(patch.cover.at(sx, sz)));
     }
   }
   return map;
+}
+
+// --test-map hands over a GAMEPLAY map (the forest fixture predates the split
+// and drives the forest plopper through MapDataTerrainQuery). Convert it, so
+// the render path downstream sees only one map type.
+VisualMapData VisualFromGameplay(const MapData& src) {
+  VisualMapData out(src.nodes_x(), src.nodes_z(), src.spacing_m());
+  for (int j = 0; j < src.nodes_z(); ++j) {
+    for (int i = 0; i < src.nodes_x(); ++i) {
+      out.mutable_height(i, j) = src.height(i, j);
+      out.set_cover(i, j, mapgen::CoverForBiome(src.WeightsAtNode(i, j).Dominant()));
+    }
+  }
+  return out;
 }
 }  // namespace
 
@@ -197,18 +214,23 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
     // give it one.
     map_size_m_ = ForestTestMapGenerator::kMapSizeM;
     request_.world_size_m = map_size_m_;
-    terrain_map_ = ForestTestMapGenerator(foliage_seed_).Generate();
-    // The splat builder wants a HARD per-texel biome raster (it derives its own
-    // blend from it), so hand it the argmax of the soft slices. The 3 m blur it
-    // applies re-softens the boundary for the terrain material.
-    patch_.biome = mapgen::Field2D<uint8_t>(terrain_map_.nodes_x(),
+    gameplay_map_ = ForestTestMapGenerator(foliage_seed_).Generate();
+    terrain_map_ = VisualFromGameplay(gameplay_map_);
+    // The ground-material derivation reads the patch rasters, so the fixture
+    // has to fill them too -- height for slope and curvature, cover for the
+    // vegetation signal.
+    patch_.height = mapgen::Field2D<float>(terrain_map_.nodes_x(),
+                                           terrain_map_.nodes_z());
+    patch_.cover = mapgen::Field2D<uint8_t>(terrain_map_.nodes_x(),
                                             terrain_map_.nodes_z(), 0);
     for (int j = 0; j < terrain_map_.nodes_z(); ++j) {
       for (int i = 0; i < terrain_map_.nodes_x(); ++i) {
-        patch_.biome.at(i, j) =
-            static_cast<uint8_t>(terrain_map_.WeightsAtNode(i, j).Dominant());
+        patch_.height.at(i, j) = terrain_map_.height(i, j);
+        patch_.cover.at(i, j) = static_cast<uint8_t>(terrain_map_.cover(i, j));
       }
     }
+    patch_.texel_m = terrain_map_.spacing_m();
+    patch_.soil = mapgen::estimate_soil(patch_.height, patch_.texel_m);
     log_step("test map", since(t));
   } else {
     // `source_->Fetch` is the ONLY seam: a patch cut from a simulated world, a
@@ -383,15 +405,14 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
     }
   }
 
-  // Wrap the generator output in the frozen MapData contract (one-hot biomes) at
-  // the raster's own texel spacing -- the input to the cluster terrain and
-  // picking. The cluster LOD's job is to decimate from full detail, so the leaf
+  // Wrap the patch in the VISUAL map at the raster's own texel spacing -- the
+  // input to the cluster terrain and picking. The cluster LOD's job is to decimate from full detail, so the leaf
   // lattice is the finest source data (one node per texel), not a coarser mesh
   // density; LOD selection manages the triangle cost.
   if (!test_map_) {
     t = clock::now();
-    terrain_map_ = MakeOneHotMapData(patch_, glm::vec2(request_.world_size_m));
-    log_step("map->MapData", since(t));
+    terrain_map_ = MakeVisualMap(patch_, glm::vec2(request_.world_size_m));
+    log_step("map->VisualMapData", since(t));
   }
 
   // Frame the camera BEFORE building the terrain, so the cluster path's initial
@@ -425,16 +446,18 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   }
   gamecam_.UpdateCamera(camera_);
 
-  // Terrain materials: one PBR pack per biome, keyed by name so a renamed or
-  // reordered manifest entry fails loudly instead of mis-mapping a biome.
+  // Terrain materials: one PBR pack per GROUND SLOT, selected by the patch's
+  // terrain class and keyed by name, so a renamed or reordered manifest entry
+  // fails loudly instead of silently binding the wrong texture.
   t = clock::now();
   if (!matlib_.Initialize(ctx.device, ctx.queue, ctx.pipeline_gen)) {
     spdlog::error("MapViewView: MaterialLibrary init failed");
     return false;
   }
   std::vector<std::string> pack_dirs;
-  if (!ResolveBiomePacks("assets/materials/terrain_biomes.json", pack_dirs)) {
-    spdlog::error("MapViewView: failed to resolve biome packs");
+  if (!ResolveGroundPacks("assets/materials/terrain_ground.json",
+                          patch_.terrain_class, pack_dirs)) {
+    spdlog::error("MapViewView: failed to resolve ground packs");
     return false;
   }
   terrain_arrays_ = matlib_.LoadTerrainArrays(pack_dirs);
@@ -442,23 +465,15 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
     spdlog::error("MapViewView: terrain arrays failed to build");
     return false;
   }
-  log_step("biome packs", since(t));
+  log_step("ground packs", since(t));
 
-  // Biome splat: the per-biome blend weights, sampled by world XZ in the
+  // Ground splat: the per-slot blend weights, sampled by world XZ in the
   // fragment stage rather than carried on the vertices, so the coarsest LOD
-  // cluster still gets full-resolution biome detail.
+  // cluster still gets full-resolution material detail.
   t = clock::now();
-  // Texel size comes from the biome raster's OWN width, not request_.resolution:
-  // the blur radius and the world->UV transform below must be derived from the
-  // same source, or they would disagree silently if the source ever emitted
-  // the biome raster at a different resolution than requested.
-  const float splat_texel_m =
-      patch_.biome.width > 0
-          ? request_.world_size_m / static_cast<float>(patch_.biome.width)
-          : 0.0f;
-  const BiomeSplat splat = BuildBiomeSplat(patch_.biome, splat_texel_m);
+  const GroundSplat splat = BuildGroundSplat(patch_);
   if (splat.empty()) {
-    spdlog::error("MapViewView: empty biome splat");
+    spdlog::error("MapViewView: empty ground splat");
     return false;
   }
   splat0_view_ = UploadTexture2DWithMips(
@@ -472,11 +487,11 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
                      static_cast<uint32_t>(splat.height), splat.slots1.data())
                      .view;
   if (!splat0_view_ || !splat1_view_) {
-    spdlog::error("MapViewView: biome splat upload failed");
+    spdlog::error("MapViewView: ground splat upload failed");
     return false;
   }
   // Trilinear + CLAMP. Mips matter: at max zoom one screen pixel covers several
-  // map texels, and unmipped weights alias into a shimmering biome mosaic.
+  // map texels, and unmipped weights alias into a shimmering material mosaic.
   wgpu::SamplerDescriptor splat_sd = {};
   splat_sd.minFilter = wgpu::FilterMode::Linear;
   splat_sd.magFilter = wgpu::FilterMode::Linear;
@@ -488,7 +503,7 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
   const float inv_n = 1.0f / static_cast<float>(splat.width);
   const float splat_scale = (1.0f - inv_n) / request_.world_size_m;
   const glm::vec4 splat_uv(splat_scale, splat_scale, 0.5f * inv_n, 0.5f * inv_n);
-  log_step("biome splat", since(t));
+  log_step("ground splat", since(t));
 
   // Build the shared cluster-LOD terrain (identity model -- mapview vertices are
   // absolute world coords). --serial-build forces the single-threaded DAG build
@@ -515,7 +530,8 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
     }
   }
   t = clock::now();
-  if (!cluster_terrain_.Build(terrain_map_, ctx, registry_, glm::mat4(1.0f),
+  if (!cluster_terrain_.Build(terrain_map_.Lattice(), ctx, registry_,
+                              glm::mat4(1.0f),
                               cluster_params, terrain_arrays_,
                               matlib_.shared_sampler(), splat0_view_,
                               splat1_view_, splat_sampler_, splat_uv, detail)) {
@@ -602,7 +618,12 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
     return false;
   }
 
-  const MapDataTerrainQuery forest_query(terrain_map_, mapgen::Biome::Forest);
+  // Reads COVER off the visual map, so every source that reports tree cover
+  // plants: the synthetic fixture, a patch dir carrying it, and a terrain-net
+  // bundle (new-forest/00 is 93% tree). Reading the gameplay map instead would
+  // silently plant nothing anywhere except --test-map, which the coarse path
+  // never noticed only because ClassifyBiome cannot return Forest.
+  const VisualMapTerrainQuery forest_query(terrain_map_, mapgen::Cover::Tree);
   foliage::FoliageGenParams foliage_params;
   foliage_params.seed = foliage_seed_;
   foliage_params.origin_m = glm::vec2(0.0f);
@@ -675,7 +696,7 @@ void MapViewView::HandleEvent(const SDL_Event& event, int /*width*/,
       }
       const Ray ray = ScreenPointToRay(
           camera_, glm::vec2(event.motion.x, event.motion.y), screen);
-      hover_valid_ = RaycastTerrain(terrain_map_, ray, hover_point_);
+      hover_valid_ = RaycastTerrain(terrain_map_.Lattice(), ray, hover_point_);
       break;
     }
     case SDL_EVENT_MOUSE_WHEEL: {
@@ -688,7 +709,7 @@ void MapViewView::HandleEvent(const SDL_Event& event, int /*width*/,
       // -- re-pick now rather than waiting for the next motion event (which may
       // never come if the user is only scrolling).
       const Ray ray = ScreenPointToRay(camera_, pixel, screen);
-      hover_valid_ = RaycastTerrain(terrain_map_, ray, hover_point_);
+      hover_valid_ = RaycastTerrain(terrain_map_.Lattice(), ray, hover_point_);
       break;
     }
     default:
@@ -741,8 +762,8 @@ void MapViewView::DrawUI() {
   }
   ImGui::Text("focus: (%.0f, %.0f)", gamecam_.focus.x, gamecam_.focus.z);
   if (hover_valid_) {
-    const std::string_view bn = mapgen::biome_name(
-        terrain_map_.DominantBiomeAt(hover_point_.x, hover_point_.z));
+    const std::string_view bn = mapgen::cover_name(
+        terrain_map_.CoverAt(hover_point_.x, hover_point_.z));
     ImGui::Text("hover: (%.1f, %.1f, %.1f)  %.*s", hover_point_.x,
                 hover_point_.y, hover_point_.z, static_cast<int>(bn.size()),
                 bn.data());

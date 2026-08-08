@@ -129,9 +129,10 @@ VertexBlend ResolveVertexBlend(const BiomeWeights& weights) {
   return out;
 }
 
-bool RaycastTerrain(const MapData& map, const Ray& ray, glm::vec3& out_hit) {
+bool RaycastTerrain(const TerrainLattice& map, const Ray& ray,
+                    glm::vec3& out_hit) {
   if (map.empty()) return false;
-  const float step = map.spacing_m() * 0.5f;
+  const float step = map.spacing_m * 0.5f;
   const float max_t = 4.0f * std::max(map.size_x_m(), map.size_z_m());
 
   auto below = [&](const glm::vec3& p) {

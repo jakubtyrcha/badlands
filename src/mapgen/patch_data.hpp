@@ -38,9 +38,11 @@
 
 #include <glm/glm.hpp>
 
+#include "mapgen/cover.hpp"
 #include "mapgen/field2d.hpp"
 #include "mapgen/lake.hpp"
 #include "mapgen/river_network.hpp"
+#include "mapgen/terrain_class.hpp"
 
 namespace badlands::mapgen {
 
@@ -99,7 +101,16 @@ struct PatchData {
   Field2D<int32_t> lake_id;  // index into `lakes`, -1 where dry
   std::vector<LakeInfo> lakes;
 
-  Field2D<uint8_t> biome;  // mapgen::Biome values
+  // WHAT GROWS HERE (mapgen::Cover), not what the ground is made of and not
+  // what the sim's movement rules read. mapgen::Biome is a GAMEPLAY vocabulary
+  // -- walkability, move cost, habitat, animal spawning, frozen across the C
+  // ABI -- and deliberately does not appear in this contract.
+  //
+  // Ground material is NOT indexed off this. It is derived from slope,
+  // curvature and soil at the heightfield's own resolution, so material edges
+  // are not pinned to the cover source's much coarser lattice. That is also why
+  // Cover is under no 8-value cap, unlike the biome palette it replaced.
+  Field2D<uint8_t> cover;
 
   // Erodible cover over bedrock. Required, not optional: it is the physically
   // honest signal for how dissected a slope should look -- thin soil means bare
@@ -112,6 +123,16 @@ struct PatchData {
   // Clipped to this patch and culled to what is worth drawing, in patch-local
   // world metres.
   RiverGraph rivers;
+
+  // HOW THIS GROUND WAS CARVED, and therefore which rock and ground materials
+  // to paint with and which rock props to scatter. Low-frequency by nature, and
+  // per-PATCH rather than per-texel only because that is what the sources emit
+  // today; a raster replaces it without changing what it means.
+  //
+  // Elevation-derived classes are deliberately absent from the whole contract.
+  // "Hills" and "Mountain" are recoverable from `height`, so a label carrying
+  // them carries nothing a consumer could not already compute.
+  TerrainClass terrain_class = TerrainClass::Unknown;
 
   ElevationRange elevation_range;
 };

@@ -6,10 +6,33 @@ deleted; the name is now historical. What remains is the vocabulary every map
 source speaks, the on-disk form, and the river network algebra.
 
 - **`PatchRequest` → `PatchData` (`patch_data.hpp`, `patch_source.hpp`) is the
-  one frozen interface here.** Three providers implement it: `SyntheticPatchSource`
+  one frozen interface here.** Four providers implement it: `SyntheticPatchSource`
   (analytic, no sim and no files — the styling fixture), `FilePatchSource` (a
   patch directory), `CoarseWorldPatchSource` (an arbitrary cut out of a cached
-  coarse world). Adding a fourth should require touching nothing downstream.
+  coarse world), and `TerrainNetPatchSource` (a real-LiDAR bundle). The fourth
+  was added without touching anything downstream, which is what the interface is
+  for.
+- **The contract carries `cover` + `terrain_class`, NOT `biome`.**
+  `mapgen::Biome` is the SIMULATION's vocabulary — walkability, move cost,
+  habitat, animal spawning, frozen across the C ABI — and does not appear here.
+  `mapgen::Cover` says what GROWS; `mapgen::TerrainClass` says how the ground was
+  CARVED. They meet in exactly one place, `biome_cover.hpp`, in one direction.
+  Elevation-derived classes are gone: `height` already says "hills".
+- **Ground material is not indexed off any classification.** It is derived from
+  slope, curvature and soil at full resolution in `mapview/ground_splat.hpp` —
+  a named, replaceable seam whose slot meanings and palette are provisional.
+- **`nodata_fill.cpp`, `soil_estimate.cpp` and `standing_water.cpp` are pure
+  functions of rasters** and know nothing about patches or providers. The last
+  two are marked TEMPORARY: they stand in for the simulation's own soil and
+  bathymetry, and the header says what replaces them.
+- **Water extent and surface come from the DATA, never from terrain shape.**
+  `standing_water.cpp` reads the observed cover mask and the survey's own
+  elevation; the only thing it invents is the BED, lowered in proportion to the
+  distance from the nearest non-water texel. Priority-flood is deliberately not
+  used — it ponds behind every drystone wall, and the survey's value under water
+  is the SURFACE, whose rim sits above it. Filtering the extent by elevation is
+  the specific mistake to avoid: half a flat plate lies above its own median, so
+  it once turned one lake into ten and 13% water into 9.5%.
 - **`erosion.hpp` is only `ErosionParams`** now — a channel-hydraulics params
   block. `MapArtifacts`, `MapGenParams` and `generator.hpp` are gone.
 - **This directory is not a pipeline stage.** All three procgen stages sit on
@@ -58,7 +81,16 @@ by nature — it is a pure function of a graph and a heightfield.
 
 ./build/badlands_mapview --load <patch-dir>  # a finished patch (map.txt)
 ./build/badlands_mapview --test-map          # the synthetic 128 m forest fixture
+
+# real bare-earth LiDAR + land cover (terrain-net, --format raw). Its own
+# extent and resolution win; --patch-size/--patch-res are ignored.
+./build/badlands_mapview --load ~/repos/terrain-net/terrain-samples/lake-district/01 \
+                         --camera-height 400
 ```
+- **These patches sit at real elevations (253–316 m for lake-district), so the
+  default 42 m camera can start inside the terrain and render black.** The focus
+  already tracks `elevation_range`, but the HEIGHT above it does not — pass
+  `--camera-height 150` for a near shot and `400` for a landscape.
 
 **The stage-2 loop is two commands, and they share one `Fetch`.** Export the
 windows offline, then open the same origin in 3D:
@@ -76,7 +108,8 @@ windows offline, then open the same origin in 3D:
   decode formulas are in `src/executables/patch_export/README.md`.
 - Exactly one of `--synthetic` / `--load` / `--test-map` is required. `--load`
   detects which kind of directory it was handed: `world.txt` means a coarse
-  world, `map.txt` means a finished patch.
+  world, `map.txt` a finished patch, `raw.json` a terrain-net bundle. Detected,
+  never selected with a flag.
 - **`--patch-size` and `--patch-res` are independent.** Raising the resolution
   at a fixed extent is how you get finer relief; it is a config change, not a
   mode.
