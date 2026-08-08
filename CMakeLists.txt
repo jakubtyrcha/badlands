@@ -1339,6 +1339,25 @@ if(APPLE)
 endif()
 add_test(NAME badlands_material_requirements_tests COMMAND badlands_material_requirements_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# badlands_material_cache_key_tests: Catch2 suite for ComposeMaterialCacheKey
+# (engine/rendering/material/material_instance_cache.cpp). Pure CPU — an
+# integer mix, no device. Exists because a key collision is SILENT: the cache
+# returns the colliding entry's instance, so a shadow lookup can hand back a
+# G-buffer pipeline and the error surfaces only as a Dawn attachment-state
+# rejection at draw time.
+add_executable(badlands_material_cache_key_tests
+    src/engine/tests/material_cache_key_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_material_cache_key_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_link_libraries(badlands_material_cache_key_tests PRIVATE badlands_engine)
+if(APPLE)
+    target_link_options(badlands_material_cache_key_tests PRIVATE "-Wl,-ld_new")
+endif()
+add_test(NAME badlands_material_cache_key_tests COMMAND badlands_material_cache_key_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 # badlands_decal_math_tests: Catch2 suite for the projected-decal math
 # (engine/rendering/decal_math.hpp) — the CPU mirror of
 # shaders/passes/decals.wesl. Pure CPU (header-only math + glm), so it runs the
