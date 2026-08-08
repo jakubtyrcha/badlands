@@ -167,7 +167,7 @@ bool SelectPatchSource(
         std::printf("mapview:   area: %s\n", bundle->area().c_str());
       std::printf("mapview:   terrain class: %s, nodata filled: %.3f%%\n",
                   std::string(badlands::mapgen::terrain_class_name(
-                                  bundle->Fetch(request).terrain_class))
+                                  bundle->terrain_class()))
                       .c_str(),
                   bundle->nodata_fraction() * 100.0f);
       source = std::move(bundle);

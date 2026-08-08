@@ -65,6 +65,15 @@ class VisualMapData {
   // Nearest -- the class is categorical, so there is nothing between two of them.
   mapgen::Cover CoverAt(float wx, float wz) const;
 
+  // How much of the neighbourhood around (wx, wz) is `c`, in [0, 1]: bilinear
+  // over the four surrounding nodes' indicator.
+  //
+  // A hard 0/1 test would be the obvious thing and would give the foliage
+  // generator a blocky forest edge. This reproduces what bilinear coverage
+  // slices gave before cover became one class per node, so a boundary still
+  // ramps.
+  float CoverFractionAt(float wx, float wz, mapgen::Cover c) const;
+
   // The vocabulary-free view the terrain mesh builder takes. Borrows this
   // object's storage, so it must not outlive it.
   TerrainLattice Lattice() const;

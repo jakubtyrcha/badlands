@@ -184,6 +184,23 @@ std::optional<PatchData> load_patch(const std::string& dir, std::string* error) 
   std::vector<uint8_t> cover;
   if (!read_raster(dir + "/height.f32", count, height, error)) return std::nullopt;
   if (!read_raster(dir + "/level.f32", count, level, error)) return std::nullopt;
+  // A directory written before cover replaced biome fails the read below with
+  // "cannot open .../cover.u8", which does not say what to do about it. Worse,
+  // the obvious guess -- rename the file -- SILENTLY reinterprets the bytes:
+  // Biome::Lake=0 becomes Cover::Unknown, Plains=3 becomes Grass, Mountain=5
+  // becomes Built, all inside kCoverCount, so the range check below passes and
+  // nothing complains. Say so instead. There is no migration: the values mean
+  // different things and only the producer can restate them.
+  if (!std::filesystem::exists(std::filesystem::path(dir) / "cover.u8") &&
+      std::filesystem::exists(std::filesystem::path(dir) / "biome.u8")) {
+    if (error) {
+      *error = dir +
+               ": holds biome.u8, written before cover replaced biome. Renaming "
+               "it would silently reinterpret the values -- regenerate the "
+               "patch instead.";
+    }
+    return std::nullopt;
+  }
   if (!read_raster(dir + "/cover.u8", count, cover, error)) return std::nullopt;
   // Soil is optional ON DISK (see the header): a patch written before the
   // two-layer substrate is still perfectly renderable, and loads as zeros. A

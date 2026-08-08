@@ -47,6 +47,26 @@ mapgen::Cover VisualMapData::CoverAt(float wx, float wz) const {
   return static_cast<mapgen::Cover>(Lattice().ClassAt(wx, wz));
 }
 
+float VisualMapData::CoverFractionAt(float wx, float wz, mapgen::Cover c) const {
+  if (empty()) return 0.0f;
+  const float gx =
+      std::clamp(wx / spacing_m_, 0.0f, static_cast<float>(nodes_x_ - 1));
+  const float gz =
+      std::clamp(wz / spacing_m_, 0.0f, static_cast<float>(nodes_z_ - 1));
+  const float ffx = std::floor(gx), ffz = std::floor(gz);
+  const int i0 = static_cast<int>(ffx), j0 = static_cast<int>(ffz);
+  const int i1 = std::min(i0 + 1, nodes_x_ - 1);
+  const int j1 = std::min(j0 + 1, nodes_z_ - 1);
+  const float tx = gx - ffx, tz = gz - ffz;
+
+  const auto ind = [&](int i, int j) {
+    return cover(i, j) == c ? 1.0f : 0.0f;
+  };
+  const float a = ind(i0, j0) + (ind(i1, j0) - ind(i0, j0)) * tx;
+  const float b = ind(i0, j1) + (ind(i1, j1) - ind(i0, j1)) * tx;
+  return a + (b - a) * tz;
+}
+
 TerrainLattice VisualMapData::Lattice() const {
   TerrainLattice l;
   l.nodes_x = nodes_x_;

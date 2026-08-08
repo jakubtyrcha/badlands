@@ -86,6 +86,10 @@ PatchData TerrainNetPatchSource::Fetch(const PatchRequest&) const {
   return patch_;
 }
 
+TerrainClass TerrainNetPatchSource::terrain_class() const {
+  return patch_.terrain_class;
+}
+
 std::unique_ptr<TerrainNetPatchSource> LoadTerrainNetPatchSource(
     const std::string& dir, std::string* error) {
   const std::filesystem::path base(dir);
@@ -108,12 +112,17 @@ std::unique_ptr<TerrainNetPatchSource> LoadTerrainNetPatchSource(
   int w = 0, h = 0;
   double res_m = 0.0, nodata = -9999.0;
   bool landcover_present = false;
+  std::string row_order = "north_to_south";
   try {
     w = raw.at("width").get<int>();
     h = raw.at("height").get<int>();
     res_m = raw.at("res_m").get<double>();
     nodata = raw.value("height_nodata", -9999.0);
     landcover_present = raw.value("landcover_present", false);
+    // Inside the guard with everything else: value() still throws on a key
+    // that EXISTS with the wrong type, and this function promises to return
+    // nullptr with a reason rather than let one escape into main.
+    row_order = raw.value("row_order", std::string("north_to_south"));
   } catch (const nlohmann::json::exception& e) {
     fail(error, dir + "/raw.json: " + e.what());
     return nullptr;
@@ -156,8 +165,7 @@ std::unique_ptr<TerrainNetPatchSource> LoadTerrainNetPatchSource(
   // The bundle's rows run NORTH TO SOUTH; the patch lattice is zero-based with
   // +z increasing with the row index. Reading the sidecar's row_order rather
   // than assuming it is what keeps a future provider from loading mirrored.
-  const bool flip = raw.value("row_order", std::string("north_to_south")) ==
-                    std::string("north_to_south");
+  const bool flip = row_order == "north_to_south";
 
   p.texel_m = static_cast<float>(res_m);
   p.origin_m = glm::dvec2(0.0);  // provenance only; the survey's CRS is not ours
@@ -179,25 +187,43 @@ std::unique_ptr<TerrainNetPatchSource> LoadTerrainNetPatchSource(
   //    alike.
   const Field2D<uint8_t> filled =
       fill_nodata(p.height, static_cast<float>(nodata));
-  const size_t count = p.height.size();
-  size_t filled_count = 0;
-  for (uint8_t v : filled.data) filled_count += (v != 0);
+  // Counted over DRY LAND only. A hole over water is expected rather than
+  // broken: no survey measures a lake bottom, and several programmes leave open
+  // water as outright nodata by design. Counting those texels toward a
+  // "this bundle is mostly hole" limit would refuse a perfectly good lake-heavy
+  // patch for having a lake in it.
+  const auto water_class = static_cast<uint8_t>(Cover::Water);
+  size_t land_count = 0, filled_land = 0;
+  for (size_t i = 0; i < p.height.size(); ++i) {
+    if (p.cover.data[i] == water_class) continue;
+    ++land_count;
+    filled_land += (filled.data[i] != 0);
+  }
   src->nodata_fraction_ =
-      count > 0 ? static_cast<float>(filled_count) / static_cast<float>(count)
-                : 0.0f;
+      land_count > 0
+          ? static_cast<float>(filled_land) / static_cast<float>(land_count)
+          : 0.0f;
   if (src->nodata_fraction_ > kMaxNodataFraction) {
     std::ostringstream os;
     os << dir << ": " << (src->nodata_fraction_ * 100.0f)
-       << "% of the height raster is nodata, past the "
+       << "% of the DRY LAND is nodata, past the "
        << (kMaxNodataFraction * 100.0f) << "% limit";
     fail(error, os.str());
     return nullptr;
   }
-  // Filled ground is extrapolated, not surveyed. Saying so costs nothing and
-  // stops a consumer treating an invention as an observation.
-  for (size_t i = 0; i < count; ++i) {
-    if (filled.data[i]) p.cover.data[i] = static_cast<uint8_t>(Cover::Unknown);
-  }
+  // COVER IS NOT TOUCHED HERE, deliberately. An earlier revision marked every
+  // filled texel Cover::Unknown, reasoning that invented ground should not
+  // claim to know what grows on it. But cover comes from satellite land cover,
+  // which is a wholly independent observation and stays valid wherever the DEM
+  // happened to have a hole -- so overwriting it destroys real data.
+  //
+  // It was also a latent lake-eater. Several LiDAR programmes leave open water
+  // as outright nodata (the Netherlands does), and the water derivation below
+  // takes Cover::Water as the whole of its extent signal. Wiping cover on
+  // filled texels would erase the mask exactly where the water is and render
+  // the patch with no lake at all. The fetched samples are 100% valid so it
+  // never fired, which is precisely why it needed removing rather than
+  // reordering. `nodata_fraction()` still reports how much was filled.
 
   // 2. Standing water. The survey's value under water is the SURFACE, so this
   //    returns both the level and a bed carved beneath it -- see

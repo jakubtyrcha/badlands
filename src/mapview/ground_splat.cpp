@@ -48,17 +48,22 @@ Local sample_local(const mapgen::Field2D<float>& h, int x, int y,
                    float texel_m) {
   const int x0 = std::max(x - 1, 0), x1 = std::min(x + 1, h.width - 1);
   const int y0 = std::max(y - 1, 0), y1 = std::min(y + 1, h.height - 1);
-  const float dzdx = (h.at(x1, y) - h.at(x0, y)) /
-                     (static_cast<float>(x1 - x0) * texel_m);
-  const float dzdy = (h.at(x, y1) - h.at(x, y0)) /
-                     (static_cast<float>(y1 - y0) * texel_m);
+  // A one-texel-wide raster collapses the clamps and would divide by zero; a
+  // NaN slope then survives every bound test downstream, since NaN compares
+  // false against all of them.
+  const float dzdx = x1 == x0 ? 0.0f
+                              : (h.at(x1, y) - h.at(x0, y)) /
+                                    (static_cast<float>(x1 - x0) * texel_m);
+  const float dzdy = y1 == y0 ? 0.0f
+                              : (h.at(x, y1) - h.at(x, y0)) /
+                                    (static_cast<float>(y1 - y0) * texel_m);
   Local l;
   l.slope_deg =
       std::atan(std::hypot(dzdx, dzdy)) * (180.0f / 3.14159265358979f);
   // Laplacian, the sum of the two second derivatives.
   l.curvature = (h.at(x1, y) + h.at(x0, y) + h.at(x, y1) + h.at(x, y0) -
                  4.0f * h.at(x, y)) /
-                (texel_m * texel_m);
+                (texel_m * texel_m);  // texel_m > 0 is checked by the caller
   return l;
 }
 

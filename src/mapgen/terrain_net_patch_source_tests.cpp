@@ -160,7 +160,7 @@ TEST_CASE("rows load north-to-south, not mirrored", "[terrain_net]") {
   CHECK(p.height.at(4, 0) == Catch::Approx(100.0f));
 }
 
-TEST_CASE("nodata is filled and the filled ground is marked unknown",
+TEST_CASE("nodata is filled, and the fill is reported not hidden",
           "[terrain_net]") {
   Bundle b("nodata", 32, 32);
   b.set(10, 10, -9999.0f, 30);
@@ -173,10 +173,45 @@ TEST_CASE("nodata is filled and the filled ground is marked unknown",
 
   for (float z : p.height.data) CHECK(z == Catch::Approx(100.0f));
   CHECK(src->nodata_fraction() == Catch::Approx(2.0f / (32.0f * 32.0f)));
+}
 
-  int unknown = 0;
-  for (uint8_t c : p.cover.data) unknown += (c == uint8_t(Cover::Unknown));
-  CHECK(unknown == 2);
+TEST_CASE("a hole in the DEM does not erase the cover observed over it",
+          "[terrain_net]") {
+  // Cover comes from satellite land cover, which is a wholly independent
+  // observation and stays valid wherever the DEM happened to have a hole.
+  //
+  // This is also a lake-eater if got wrong: several LiDAR programmes leave open
+  // water as outright nodata, and Cover::Water is the whole of the water
+  // derivation's extent signal -- so marking filled texels Unknown would wipe
+  // the mask exactly where the water is.
+  Bundle b("nodata_water", 48, 48);
+  for (int y = 8; y < 40; ++y)
+    for (int x = 8; x < 40; ++x) b.set(x, y, -9999.0f, 80);  // water, no return
+  b.write();
+
+  const auto src = LoadTerrainNetPatchSource(b.dir.str());
+  REQUIRE(src);
+  const PatchData p = src->Fetch({});
+
+  CHECK(p.cover.at(24, 24) == uint8_t(Cover::Water));
+  REQUIRE(p.lakes.size() == 1);
+  CHECK(p.water_depth.at(24, 24) > 0.0f);
+}
+
+TEST_CASE("a sidecar key of the wrong type fails loudly, not fatally",
+          "[terrain_net]") {
+  // value() throws on a key that EXISTS with the wrong type, and this function
+  // promises a nullptr with a reason rather than an exception escaping into
+  // main, which has no handler.
+  Bundle b("badtype", 16, 16);
+  b.write();
+  std::ofstream(b.dir.path / "raw.json")
+      << "{\"width\": 16, \"height\": 16, \"res_m\": 1.0, "
+         "\"landcover_present\": true, \"row_order\": 3}";
+
+  std::string err;
+  CHECK_FALSE(LoadTerrainNetPatchSource(b.dir.str(), &err));
+  CHECK_FALSE(err.empty());
 }
 
 TEST_CASE("a bundle that is mostly hole is refused, not extrapolated",

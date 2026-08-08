@@ -30,6 +30,7 @@
 #include "game/geometry/terrain_mesh.hpp"  // RaycastTerrain(MapData)
 #include "game/map/forest_test_map_generator.hpp"
 #include "game/map/map_data_terrain_query.hpp"
+#include "game/map/visual_map_terrain_query.hpp"
 #include "game/visual/forest_catalog.hpp"
 #include "mapgen/biome_cover.hpp"
 #include "mapgen/biomes.hpp"
@@ -617,9 +618,12 @@ bool MapViewView::Initialize(const RenderContext& ctx) {
     return false;
   }
 
-  // Reads the GAMEPLAY map: only --test-map plants anything, and that fixture
-  // is authored in biomes. Empty (and free) on every other path.
-  const MapDataTerrainQuery forest_query(gameplay_map_, mapgen::Biome::Forest);
+  // Reads COVER off the visual map, so every source that reports tree cover
+  // plants: the synthetic fixture, a patch dir carrying it, and a terrain-net
+  // bundle (new-forest/00 is 93% tree). Reading the gameplay map instead would
+  // silently plant nothing anywhere except --test-map, which the coarse path
+  // never noticed only because ClassifyBiome cannot return Forest.
+  const VisualMapTerrainQuery forest_query(terrain_map_, mapgen::Cover::Tree);
   foliage::FoliageGenParams foliage_params;
   foliage_params.seed = foliage_seed_;
   foliage_params.origin_m = glm::vec2(0.0f);

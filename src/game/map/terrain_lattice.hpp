@@ -152,10 +152,13 @@ struct TerrainLatticeStorage {
   std::vector<uint8_t> class_id;
   TerrainLattice lattice;
 
-  // ALWAYS go through this rather than touching `lattice` directly. The view
-  // holds a raw pointer into `class_id`, and any assignment or relocation of
-  // this object leaves that pointer describing the wrong buffer. Re-seating it
-  // here is one instruction and removes a whole class of dangling view.
+  // Re-seats the view's `class_id` at THIS object's buffer, so assigning or
+  // relocating the storage cannot leave it describing an older one.
+  //
+  // It does NOT re-seat `height`, and cannot: that buffer belongs to the map
+  // this was built from, not to this struct. A storage outliving its source map
+  // still dangles there. Prefer going through this over touching `lattice`
+  // directly, but keep the map alive regardless -- that is the real rule.
   const TerrainLattice& View() {
     lattice.class_id = class_id.data();
     return lattice;

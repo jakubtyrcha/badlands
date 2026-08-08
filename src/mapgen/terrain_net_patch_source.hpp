@@ -35,13 +35,18 @@
 
 namespace badlands::mapgen {
 
-// Refuse a bundle whose survey missed more than this share of its own extent.
+// Refuse a bundle whose survey missed more than this share of its DRY LAND.
 //
 // The fill (nodata_fill.hpp) extends the nearest valid ground into a void, which
 // is right for the scattered metre-wide dropouts an England DTM is full of and
 // wrong for a bundle that is mostly hole -- there the "terrain" would be an
 // extrapolation artifact wearing a survey's name. The fetched bundles measure
 // 100.0% valid, so this only ever fires on something genuinely broken.
+//
+// DRY LAND, not the whole raster: a hole over WATER is expected, not broken. No
+// survey measures a lake bottom and several programmes leave open water as
+// outright nodata, so a whole-raster limit would refuse a good lake-heavy patch
+// for the offence of containing a lake.
 inline constexpr float kMaxNodataFraction = 0.05f;
 
 class TerrainNetPatchSource final : public PatchSource {
@@ -55,8 +60,14 @@ class TerrainNetPatchSource final : public PatchSource {
   // Area key and name from manifest.json, for logging. Provenance only.
   const std::string& area() const { return area_; }
 
-  // Share of the height raster that was nodata and had to be filled.
+  // Share of the DRY-LAND texels that were nodata and had to be filled. Water
+  // is excluded -- see kMaxNodataFraction.
   float nodata_fraction() const { return nodata_fraction_; }
+
+  // The morphology label, without going through Fetch -- which returns a whole
+  // PatchData BY VALUE and so copies every raster (~25 MB at 1072^2) for what
+  // is usually one log line.
+  TerrainClass terrain_class() const;
 
  private:
   friend std::unique_ptr<TerrainNetPatchSource> LoadTerrainNetPatchSource(
