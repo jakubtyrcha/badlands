@@ -291,6 +291,14 @@ if(APPLE)
 elseif(WIN32)
     target_sources(badlands_rhi_app PRIVATE
         src/engine/app/platform_surface_win.cpp)
+else()
+    # REFUSED HERE rather than at link. With neither arm compiled the target
+    # builds happily and then fails with undefined CreateNativeSurface and
+    # PlatformFrameScope -- a link error that names symbols instead of naming
+    # the missing platform.
+    message(FATAL_ERROR
+        "badlands_rhi_app has no platform arm for this OS. Add one beside "
+        "platform_surface_mac.mm / platform_surface_win.cpp.")
 endif()
 target_link_libraries(badlands_rhi_app PUBLIC
     badlands_rhi badlands_render_graph badlands_slang badlands_imgui_rhi
@@ -1993,25 +2001,53 @@ if(APPLE)
         set_tests_properties(${shot_app}_windowed_screenshot PROPERTIES
                              LABELS display TIMEOUT 120)
     endforeach()
+
+    # A screenshot that CANNOT be written must fail the run. badlands_write_png
+    # returned void and only printed to stderr, so this exited 0 announcing a
+    # file that was never created.
+    add_test(NAME object_viewer_unwritable_screenshot
+             COMMAND badlands_object_viewer --scene clear --frames 3
+                     --width 320 --height 240
+                     --screenshot /no/such/dir/x.png
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    set_tests_properties(object_viewer_unwritable_screenshot PROPERTIES
+                         WILL_FAIL TRUE LABELS display TIMEOUT 120)
+
+    # A view whose Initialize fails must exit CLEANLY. Three early returns used
+    # to skip ImGui's teardown, leaving backend-global RHI resources to be
+    # released at static-destruction time -- after the device that made them.
+    add_test(NAME object_viewer_failed_init_exits_clean
+             COMMAND badlands_object_viewer --scene spheres
+                     --env /nonexistent.hdr --frames 4
+                     --width 320 --height 240
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    set_tests_properties(object_viewer_failed_init_exits_clean PROPERTIES
+                         WILL_FAIL TRUE LABELS display TIMEOUT 120)
 endif()
 
 # badlands_imgui_rhi: the Dear ImGui renderer backend against the RHI, replacing
 # imgui_impl_wgpu_custom. Needs Slang (its shader) and the graph (it adds a
 # pass); the imgui SOURCES come from the same FetchContent the engine uses.
-if(APPLE)
-    add_library(badlands_imgui_rhi STATIC
-        src/engine/ui/imgui_impl_rhi.cpp
-        ${imgui_SOURCE_DIR}/imgui.cpp
-        ${imgui_SOURCE_DIR}/imgui_draw.cpp
-        ${imgui_SOURCE_DIR}/imgui_tables.cpp
-        ${imgui_SOURCE_DIR}/imgui_widgets.cpp
-    )
-    target_link_libraries(badlands_imgui_rhi PUBLIC
-        badlands_render_graph badlands_slang)
-    target_include_directories(badlands_imgui_rhi PUBLIC
-        ${imgui_SOURCE_DIR}
-        ${imgui_SOURCE_DIR}/backends)
+# NOT PLATFORM-GATED, and it cannot be: badlands_rhi_app links it and that
+# target builds on both OSes. While this sat inside if(APPLE) a Windows
+# configure -- the one this branch added platform_surface_win.cpp for -- failed
+# at generate time with "target not found", which made the claim above
+# badlands_rhi_app false. Its dependencies (render_graph, slang) are ungated
+# too; only its Metal test below is.
+add_library(badlands_imgui_rhi STATIC
+    src/engine/ui/imgui_impl_rhi.cpp
+    ${imgui_SOURCE_DIR}/imgui.cpp
+    ${imgui_SOURCE_DIR}/imgui_draw.cpp
+    ${imgui_SOURCE_DIR}/imgui_tables.cpp
+    ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+)
+target_link_libraries(badlands_imgui_rhi PUBLIC
+    badlands_render_graph badlands_slang)
+target_include_directories(badlands_imgui_rhi PUBLIC
+    ${imgui_SOURCE_DIR}
+    ${imgui_SOURCE_DIR}/backends)
 
+if(APPLE)
     # Pixels, not eyeballs: a fixed-coordinate draw list plus a readback turns
     # "the UI looks right" into numbers a regression can fail.
     add_executable(badlands_imgui_rhi_tests

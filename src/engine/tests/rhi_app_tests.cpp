@@ -190,6 +190,22 @@ TEST_CASE("frame clock: a stall cannot detonate the step count", "[rhiapp]") {
   CHECK(next.fixed_steps == 0);
 }
 
+TEST_CASE("frame clock: landing exactly on the cap keeps the remainder",
+          "[rhiapp]") {
+  // THE CAP AND AN EXACT LANDING ARE DIFFERENT THINGS, and `steps >= kMax`
+  // could not tell them apart. Here the accumulator runs out on its own AT the
+  // cap, leaving half a tick that is ordinary carried time -- not the arbitrary
+  // backlog of a stall, which is the only thing the drop rule is for.
+  FrameClock clock;
+  const float dt = float((badlands::kMaxSimTicksPerFrame + 0.5) * badlands::kTickDt);
+  const auto capped = clock.Advance(dt, 0, nullptr);
+  CHECK(capped.fixed_steps == uint32_t(badlands::kMaxSimTicksPerFrame));
+
+  // The half tick must still be there: half a tick more completes it.
+  const auto next = clock.Advance(float(badlands::kTickDt * 0.5), 1, nullptr);
+  CHECK(next.fixed_steps == 1);
+}
+
 TEST_CASE("frame clock: index and keys pass through", "[rhiapp]") {
   FrameClock clock;
   const bool keys[4] = {false, true, false, false};
@@ -622,6 +638,12 @@ TEST_CASE("ui composite: an extended-range surface gets LINEAR overlay colour",
   // opaque mid-grey panel is authored as the encoded byte 128; written into a
   // linear surface it must arrive as ~0.216, not 0.502. Alpha 1 so the surface
   // contributes nothing and the assertion is about the overlay alone.
+  //
+  // AND ALPHA 1 IS ALSO THIS TEST'S BLIND SPOT, which it did not survive: a
+  // premultiplied colour and a straight one are the same number there, so it
+  // passed against a shader that decoded the premultiplied value whole. The
+  // TRANSLUCENT case below is what actually pins the transfer function; this
+  // one pins the choice of space.
   const uint8_t grey[4] = {128, 128, 128, 255};
   const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
 
@@ -640,6 +662,49 @@ TEST_CASE("ui composite: an extended-range surface gets LINEAR overlay colour",
   REQUIRE(srgb.ran);
   INFO("8-bit grey -> " << srgb.r);
   CHECK(srgb.r == Catch::Approx(128.0f / 255.0f).margin(0.02));
+}
+
+TEST_CASE("ui composite: a TRANSLUCENT panel keeps its brightness on an "
+          "extended-range surface",
+          "[rhiapp][gpu]") {
+  // THE CASE THE TEST ABOVE CANNOT SEE, and the reason it could not: at alpha 1
+  // a premultiplied colour and a straight one are the same number, so the two
+  // forms agree by arithmetic and the assertion holds against either. The
+  // overlay is premultiplied in ENCODED space (imgui.slang returns
+  // `c.rgb * c.a`), so decoding it whole is not the same as decoding it and
+  // then premultiplying -- and the difference only exists between the
+  // endpoints.
+  //
+  // (128,128,128,128) is white at half alpha, premultiplied. Over black on a
+  // linear surface the composite passes src straight through, so the answer is
+  // SrgbToLinear(1.0) * 0.5 = 0.502. Decoding the premultiplied value instead
+  // gives SrgbToLinear(0.502) = 0.216 -- every translucent panel and every
+  // antialiased glyph at less than half brightness.
+  const uint8_t panel[4] = {128, 128, 128, 128};
+  const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+
+  const auto edr = RunComposite(rhi::Format::RGBA16Float,
+                                rhi::ColorSpace::ExtendedLinearDisplayP3,
+                                panel, black);
+  if (!edr.ran) return;
+  INFO("half-alpha white -> " << edr.r << " (decoding premultiplied gives 0.216)");
+  CHECK(edr.r == Catch::Approx(0.502f).margin(0.02));
+}
+
+TEST_CASE("ui composite: an additive overlay texel produces a real number",
+          "[rhiapp][gpu]") {
+  // alpha 0 with colour: undefined to un-premultiply, and the naive fix
+  // divides by zero. A NaN in a float target propagates through everything
+  // composited after it, so this pins the guard rather than the value.
+  const uint8_t glow[4] = {64, 64, 64, 0};
+  const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+
+  const auto edr = RunComposite(rhi::Format::RGBA16Float,
+                                rhi::ColorSpace::ExtendedLinearDisplayP3,
+                                glow, black);
+  if (!edr.ran) return;
+  CHECK(std::isfinite(edr.r));
+  CHECK(edr.r >= 0.0f);
 }
 
 TEST_CASE("ui composite: a half-alpha panel lands where it was authored",

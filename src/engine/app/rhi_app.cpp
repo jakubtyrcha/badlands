@@ -131,6 +131,39 @@ int ExitCodeFor(const RunOutcome& o) {
 
 namespace {
 
+// ImGui's lifetime, as a scope rather than as a sequence of calls.
+//
+// FOUR EARLY RETURNS SAT BETWEEN CreateContext AND THE SHUTDOWN, and each one
+// leaked the context and whichever backends were up. That is not a tidy-up
+// nicety: ImGui_ImplRHI holds RHI pipelines and buffers in backend-global
+// state, so a leaked backend releases them at static-destruction time -- after
+// the locally-owned device that made them is already gone. A view whose
+// Initialize legitimately fails is the ordinary way to reach that.
+//
+// Each stage is armed only once it has succeeded, so an early return unwinds
+// exactly what exists, in reverse.
+class ImGuiScope {
+ public:
+  ImGuiScope() {
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+  }
+  ~ImGuiScope() {
+    if (rhi_ready_) ImGui_ImplRHI_Shutdown();
+    if (sdl_ready_) ImGui_ImplSDL3_Shutdown();
+    ImGui::DestroyContext();
+  }
+  ImGuiScope(const ImGuiScope&) = delete;
+  ImGuiScope& operator=(const ImGuiScope&) = delete;
+
+  void SdlReady() { sdl_ready_ = true; }
+  void RhiReady() { rhi_ready_ = true; }
+
+ private:
+  bool sdl_ready_ = false;
+  bool rhi_ready_ = false;
+};
+
 // The host, implemented over the shell. A thin forwarder rather than exposing
 // AppShell itself, so a view cannot re-enter Run or reach the swapchain.
 class ShellHost final : public RhiAppHost {
@@ -198,13 +231,17 @@ int RhiApp::RunParsed(const RhiAppOptions& opt, const ViewFactory& factory,
                ToString(surface_cs));
 
   // --- ImGui, entirely the layer's ---------------------------------------
-  IMGUI_CHECKVERSION();
-  ImGui::CreateContext();
+  //
+  // SCOPED, so the early returns below cannot leave the context or a backend
+  // behind -- see ImGuiScope for why that is a use-after-free rather than a
+  // leak.
+  ImGuiScope imgui;
   ImGui::StyleColorsDark();
   if (!ImGui_ImplSDL3_InitForMetal(shell->Window())) {
     spdlog::error("rhi_app: ImGui_ImplSDL3_InitForMetal failed");
     return 1;
   }
+  imgui.SdlReady();
   if (!ImGui_ImplRHI_Init({.device = device,
                            .compiler = compiler.get(),
                            .target_format = kUiFormat,
@@ -212,6 +249,7 @@ int RhiApp::RunParsed(const RhiAppOptions& opt, const ViewFactory& factory,
                            .framebuffer_height = shell->Height()})) {
     return 1;
   }
+  imgui.RhiReady();
 
   auto compositor = UiCompositor::Create(*device, *compiler, surface_format,
                                         surface_cs, shell->Width(),
@@ -359,13 +397,22 @@ int RhiApp::RunParsed(const RhiAppOptions& opt, const ViewFactory& factory,
       if (EncodeSurfaceToRgba8(pending_shot->Data(), pending_shot->GetFormat(),
                                pending_shot->GetWidth(),
                                pending_shot->GetHeight(), rgba, &clipped)) {
-        badlands_write_png(opt.screenshot_path.c_str(), rgba.data(),
-                           pending_shot->GetWidth(), pending_shot->GetHeight());
-        outcome.screenshot_written = true;
-        spdlog::info("rhi_app: wrote {} ({}x{}){}", opt.screenshot_path,
-                     pending_shot->GetWidth(), pending_shot->GetHeight(),
-                     clipped ? " -- extended-range values were clipped to 8-bit"
-                             : "");
+        // CHECKED. The writer used to return void and only print to stderr,
+        // so this reported a file it had no idea whether it had written -- an
+        // unwritable path exited 0 saying "wrote out.png".
+        outcome.screenshot_written =
+            badlands_write_png(opt.screenshot_path.c_str(), rgba.data(),
+                               pending_shot->GetWidth(),
+                               pending_shot->GetHeight());
+        if (outcome.screenshot_written) {
+          spdlog::info("rhi_app: wrote {} ({}x{}){}", opt.screenshot_path,
+                       pending_shot->GetWidth(), pending_shot->GetHeight(),
+                       clipped
+                           ? " -- extended-range values were clipped to 8-bit"
+                           : "");
+        } else {
+          spdlog::error("rhi_app: could not write {}", opt.screenshot_path);
+        }
       }
     }
     pending_shot.reset();
@@ -373,12 +420,12 @@ int RhiApp::RunParsed(const RhiAppOptions& opt, const ViewFactory& factory,
   const int exit_code = ExitCodeFor(outcome);
 
   // Shutdown in reverse: the view's resources before the device that made
-  // them, and ImGui's backend before its context.
+  // them. ImGui's own teardown is ImGuiScope's, and must NOT be repeated here
+  // -- it runs when `imgui` leaves scope, after these two and before the
+  // device, which is the same order this used to spell out by hand on the one
+  // path that reached it.
   view.reset();
   compositor.reset();
-  ImGui_ImplRHI_Shutdown();
-  ImGui_ImplSDL3_Shutdown();
-  ImGui::DestroyContext();
 
   spdlog::info("rhi_app: {} frames, {} presented", stats.frames_begun,
                stats.frames_presented);

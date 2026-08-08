@@ -134,7 +134,15 @@ struct FrameClock {
       accumulator -= kTickDt;
       ++steps;
     }
-    if (steps >= uint32_t(kMaxSimTicksPerFrame)) accumulator = 0.0;
+    // DROPPED ONLY WHEN THE CAP IS WHAT STOPPED THE LOOP. `steps == kMax` on
+    // its own cannot tell a clamped stall from a frame that happened to land
+    // exactly on the cap with ordinary carried time left over -- and zeroing
+    // the latter throws away sub-tick time the accumulator exists to keep.
+    // A remainder still worth a whole tick is the backlog; anything less is
+    // the fraction every frame leaves behind.
+    if (steps >= uint32_t(kMaxSimTicksPerFrame) && accumulator >= kTickDt) {
+      accumulator = 0.0;
+    }
     return {.real_dt = dt,
             .elapsed = elapsed,
             .fixed_steps = steps,

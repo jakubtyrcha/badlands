@@ -2740,6 +2740,8 @@ class ObjectViewerView : public rhi_app::RhiAppView {
 
   bool Initialize(const rhi_app::RhiAppContext& ctx) override {
     device_ = ctx.device;
+    last_width_ = ctx.width;
+    last_height_ = ctx.height;
     surface_format_ = ctx.surface_format;
     present_ = ctx.surface_color_space;
     spdlog::info("object_viewer: presenting {} / {}",
@@ -2844,6 +2846,8 @@ class ObjectViewerView : public rhi_app::RhiAppView {
   }
 
   bool OnResize(uint32_t w, uint32_t h) override {
+    last_width_ = w;
+    last_height_ = h;
     scene_ = MakeSceneTarget(*device_, w, h);
     ui_ = MakeUiTarget(*device_, w, h);
     if (!scene_ || !ui_) {
@@ -2939,8 +2943,6 @@ class ObjectViewerView : public rhi_app::RhiAppView {
   }
 
   bool Render(ITextureView* target, const rhi_app::FrameInfo& f) override {
-    last_width_ = f.width;
-    last_height_ = f.height;
     const float aspect = float(f.width) / float(std::max(1u, f.height));
 
     if (lines_) {
@@ -3035,6 +3037,9 @@ class ObjectViewerView : public rhi_app::RhiAppView {
   DebugView view_ = DebugView::Lit;
   SunSettings sun_;
   SunSettings baked_sun_;
+  // THE SIZE THE PANEL SHOWS, tracked from Initialize and OnResize rather than
+  // from Render -- the layer calls DrawUI BEFORE Render, so a value written
+  // there is one frame stale and reads 0x0 on the first frame.
   uint32_t last_width_ = 0, last_height_ = 0;
 };
 

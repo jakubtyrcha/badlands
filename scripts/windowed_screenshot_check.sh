@@ -11,8 +11,13 @@ cd "$(dirname "$0")/.."
 
 app=${1:?usage: windowed_screenshot_check.sh <app> [args...]}
 shift
-out="$(mktemp -t badlands_shot).png"
-trap 'rm -f "$out"' EXIT
+# A DIRECTORY, not a file with a suffix bolted on. `mktemp -t x` followed by
+# "$(...).png" names two different paths: the trap removed the one with the
+# suffix and left mktemp's own file behind, one per run of each display test.
+# A directory makes the stray sibling unexpressible.
+tmpdir="$(mktemp -d -t badlands_shot)"
+trap 'rm -rf "$tmpdir"' EXIT
+out="$tmpdir/shot.png"
 
 "./build/$app" --frames 4 --width 320 --height 240 --screenshot "$out" "$@"
 

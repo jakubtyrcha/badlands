@@ -80,9 +80,28 @@ float4 fs_ui_composite(VOut i) : SV_Target
     // The two agree at alpha 0 and alpha 1 and differ only in between, which is
     // why the difference stays invisible until something translucent exists.
     if (OutputIsExtendedRange(mode)) {
-        // Premultiplied in, premultiplied out: decode the colour and keep the
-        // alpha, so the One/OneMinusSrcAlpha blend below is still correct.
-        return float4(SrgbToLinear(overlay.rgb), overlay.a);
+        // UN-PREMULTIPLY, DECODE, RE-PREMULTIPLY -- in that order, and the
+        // order is the whole thing.
+        //
+        // The overlay arrives premultiplied in ENCODED space: imgui.slang
+        // returns `c.rgb * c.a` where c.rgb is the authored encoded colour. The
+        // transfer function is not linear, so SrgbToLinear(c * a) is not
+        // SrgbToLinear(c) * a -- decoding the premultiplied value whole
+        // rendered a half-alpha white panel at 0.216 instead of 0.502, and
+        // every antialiased glyph with it. Only alpha 0 and alpha 1 agree,
+        // which is exactly where the first test for this looked.
+        //
+        // Saturated because 8-bit rounding can leave rgb a hair above a, and
+        // the authored straight colour is by definition no brighter than white.
+        if (overlay.a <= 0.0) {
+            // ADDITIVE, and there is nothing to undo: with One/OneMinusSrcAlpha
+            // an alpha of zero adds the colour outright. Dividing here is the
+            // obvious fix and the wrong one -- it puts a NaN in a float target,
+            // which then propagates through everything composited after it.
+            return float4(SrgbToLinear(overlay.rgb), 0.0);
+        }
+        let straight = saturate(overlay.rgb / overlay.a);
+        return float4(SrgbToLinear(straight) * overlay.a, overlay.a);
     }
     return overlay;
 }
