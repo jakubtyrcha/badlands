@@ -258,3 +258,315 @@ TEST_CASE("a hierarchy round-trips, parents and contacts intact") {
     CHECK(replayed.find(base)->parent.node == group);
     CHECK(replayed.find(detail)->contact.surface == base);
 }
+
+// --- History: keyframes, deltas, replay -------------------------------------
+
+namespace {
+
+// The app's job in miniature: bracket a gesture, do the work, close it.
+template <typename Fn>
+void interaction(History& history, SceneDocument& doc, const char* label, Fn&& body) {
+    history.begin_interaction(label, doc);
+    body();
+    history.end_interaction(doc, kInvalidNode);
+}
+
+int32_t spawn(SceneDocument& doc, float x) {
+    return doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{x, 0, 0});
+}
+
+} // namespace
+
+TEST_CASE("an edit inside an interaction can be undone") {
+    SceneDocument doc;
+    History history(doc, kInvalidNode);
+
+    interaction(history, doc, "Spawn", [&] { spawn(doc, 1); });
+    REQUIRE(doc.nodes().size() == 1);
+    REQUIRE(history.can_undo());
+
+    REQUIRE(history.undo(doc).has_value());
+    CHECK(doc.nodes().empty());
+    CHECK_FALSE(history.can_undo());
+}
+
+TEST_CASE("undo then redo restores the edit") {
+    SceneDocument doc;
+    History history(doc, kInvalidNode);
+    interaction(history, doc, "Spawn", [&] { spawn(doc, 1); });
+
+    history.undo(doc);
+    REQUIRE(doc.nodes().empty());
+    REQUIRE(history.can_redo());
+    REQUIRE(history.redo(doc).has_value());
+    CHECK(doc.nodes().size() == 1);
+}
+
+TEST_CASE("an interaction that changes nothing leaves no entry") {
+    SceneDocument doc;
+    spawn(doc, 1);
+    History history(doc, kInvalidNode);
+
+    interaction(history, doc, "Select", [] {});
+
+    CHECK_FALSE(history.can_undo());
+    CHECK(history.entry_count() == 1); // just the initial state
+}
+
+TEST_CASE("nested interactions produce exactly one entry") {
+    SceneDocument doc;
+    History history(doc, kInvalidNode);
+
+    history.begin_interaction("Outer", doc);
+    spawn(doc, 1);
+    history.begin_interaction("Inner", doc); // must not re-baseline
+    spawn(doc, 2);
+    history.end_interaction(doc, kInvalidNode);
+    CHECK(history.in_interaction());
+    history.end_interaction(doc, kInvalidNode);
+
+    CHECK(history.entry_count() == 2); // initial + one
+    history.undo(doc);
+    CHECK(doc.nodes().empty()); // BOTH spawns undone together
+}
+
+// THE ONE THAT PINS "the delta applies at drag end, not along the way".
+TEST_CASE("a drag's intermediate states are not recorded") {
+    SceneDocument doc;
+    const int32_t id = spawn(doc, 0);
+    History history(doc, kInvalidNode);
+
+    history.begin_interaction("Move", doc);
+    for (int i = 1; i <= 20; ++i) { // twenty mouse-moves
+        doc.find(id)->local_position = simd_float3{float(i), 0, 0};
+    }
+    history.end_interaction(doc, kInvalidNode);
+
+    CHECK(history.entry_count() == 2); // initial + ONE, not twenty-one
+    REQUIRE(history.undo(doc).has_value());
+    // Bound to a const first: doctest's CHECK binds the compared sub-expression
+    // to a reference, and Clang only allows that for const accesses of
+    // ext_vector_type components (the pattern scene_tests.cpp documents).
+    const simd_float3 restored = doc.find(id)->local_position;
+    CHECK(restored.x == doctest::Approx(0.0f));
+    CHECK_FALSE(history.can_undo());
+}
+
+TEST_CASE("a new edit truncates the redo stack") {
+    SceneDocument doc;
+    History history(doc, kInvalidNode);
+    interaction(history, doc, "A", [&] { spawn(doc, 1); });
+    interaction(history, doc, "B", [&] { spawn(doc, 2); });
+
+    history.undo(doc);
+    REQUIRE(history.can_redo());
+    interaction(history, doc, "C", [&] { spawn(doc, 3); });
+
+    CHECK_FALSE(history.can_redo());
+}
+
+TEST_CASE("selection is restored per entry") {
+    SceneDocument doc;
+    const int32_t id = spawn(doc, 0);
+    History history(doc, id);
+
+    history.begin_interaction("Delete", doc);
+    doc.remove_node(id, SceneDocument::OrphanPolicy::Reparent);
+    history.end_interaction(doc, kInvalidNode);
+
+    const std::optional<Entry> entry = history.undo(doc);
+    REQUIRE(entry.has_value());
+    CHECK(entry->selected == id); // the node comes back SELECTED
+    CHECK(doc.find(id) != nullptr);
+}
+
+TEST_CASE("labels report the pending entries") {
+    SceneDocument doc;
+    History history(doc, kInvalidNode);
+    interaction(history, doc, "Move", [&] { spawn(doc, 1); });
+
+    CHECK(history.undo_label() == "Move");
+    CHECK(history.redo_label().empty());
+
+    history.undo(doc);
+    CHECK(history.undo_label().empty());
+    CHECK(history.redo_label() == "Move");
+}
+
+// --- keyframe cadence and replay --------------------------------------------
+
+// Two rules decide a payload, and they are tested apart: the interval, and
+// "would a delta cost more than a snapshot anyway".
+TEST_CASE("a snapshot lands every interval") {
+    // A document big enough that ONE changed node is unambiguously the cheaper
+    // payload -- otherwise the size rule below fires first and the cadence is
+    // not what is under test.
+    SceneDocument doc;
+    for (int i = 0; i < 50; ++i) {
+        spawn(doc, float(i));
+    }
+    const int32_t id = doc.nodes()[0].id;
+
+    History history(doc, kInvalidNode);
+    history.set_snapshot_interval(4);
+
+    for (int i = 1; i <= 12; ++i) {
+        interaction(history, doc, "Move",
+                    [&] { doc.find(id)->local_position = simd_float3{float(i), 0, 0}; });
+    }
+
+    REQUIRE(history.entry_count() == 13); // initial + 12
+    for (size_t i = 0; i < history.entry_count(); ++i) {
+        CHECK(history.entry_is_snapshot(i) == (i % 4 == 0));
+    }
+}
+
+// The other rule. Spawning the first node into an empty document produces a
+// delta carrying that whole node PLUS its index, against a document that is
+// just the node -- so the snapshot is both smaller and faster to replay.
+TEST_CASE("a delta that would cost more than a snapshot is stored as a snapshot") {
+    SceneDocument doc;
+    History history(doc, kInvalidNode);
+    history.set_snapshot_interval(1000); // far out of reach, so only size decides
+
+    interaction(history, doc, "Spawn", [&] { spawn(doc, 0); });
+
+    REQUIRE(history.entry_count() == 2);
+    CHECK(history.entry_is_snapshot(1));
+}
+
+// And the converse, so the rule is not vacuously "always snapshot": a small
+// edit to a large document stays a delta.
+TEST_CASE("a small edit to a large document is stored as a delta") {
+    SceneDocument doc;
+    for (int i = 0; i < 50; ++i) {
+        spawn(doc, float(i));
+    }
+    const int32_t id = doc.nodes()[0].id;
+
+    History history(doc, kInvalidNode);
+    history.set_snapshot_interval(1000);
+
+    interaction(history, doc, "Move",
+                [&] { doc.find(id)->local_position = simd_float3{9, 9, 9}; });
+
+    REQUIRE(history.entry_count() == 2);
+    CHECK_FALSE(history.entry_is_snapshot(1));
+}
+
+// The replay-correctness test: undoing across a keyframe boundary has to land
+// on the same document a direct sequence of edits would have produced.
+TEST_CASE("undo across a snapshot boundary replays correctly") {
+    SceneDocument doc;
+    History history(doc, kInvalidNode);
+    history.set_snapshot_interval(4);
+
+    for (int i = 0; i < 10; ++i) {
+        interaction(history, doc, "Spawn", [&] { spawn(doc, float(i)); });
+    }
+
+    // A reference built by replaying the first 6 edits and nothing else.
+    SceneDocument reference;
+    for (int i = 0; i < 6; ++i) {
+        spawn(reference, float(i));
+    }
+
+    for (int i = 0; i < 4; ++i) { // 10 -> 6
+        history.undo(doc);
+    }
+
+    CHECK(same_document(doc, reference));
+}
+
+TEST_CASE("undoing all the way reaches the initial state") {
+    SceneDocument doc;
+    History history(doc, kInvalidNode);
+    history.set_snapshot_interval(3);
+
+    for (int i = 0; i < 10; ++i) {
+        interaction(history, doc, "Spawn", [&] { spawn(doc, float(i)); });
+    }
+    while (history.can_undo()) {
+        history.undo(doc);
+    }
+
+    CHECK(doc.nodes().empty());
+    CHECK(same_document(doc, SceneDocument{}));
+}
+
+TEST_CASE("redo forward retraces the same states") {
+    SceneDocument doc;
+    History history(doc, kInvalidNode);
+    history.set_snapshot_interval(3);
+
+    for (int i = 0; i < 8; ++i) {
+        interaction(history, doc, "Spawn", [&] { spawn(doc, float(i)); });
+    }
+    const SceneDocument expected = clone(doc);
+
+    while (history.can_undo()) history.undo(doc);
+    while (history.can_redo()) history.redo(doc);
+
+    CHECK(same_document(doc, expected));
+}
+
+// Undo past a REMOVAL is where an inverse-based scheme would have to restore a
+// node at its index; replaying forward from a keyframe gets it for free.
+TEST_CASE("undo restores a removed node at its original index") {
+    SceneDocument doc;
+    History history(doc, kInvalidNode);
+    history.set_snapshot_interval(8);
+    for (int i = 0; i < 5; ++i) {
+        interaction(history, doc, "Spawn", [&] { spawn(doc, float(i)); });
+    }
+    const SceneDocument before = clone(doc);
+    const int32_t middle = doc.nodes()[2].id;
+
+    interaction(history, doc, "Delete", [&] {
+        doc.remove_node(middle, SceneDocument::OrphanPolicy::Reparent);
+    });
+    history.undo(doc);
+
+    CHECK(same_document(doc, before));
+    CHECK(doc.nodes()[2].id == middle); // back where it was, not merely back
+}
+
+TEST_CASE("the entry cap drops the oldest and keeps a replayable base") {
+    SceneDocument doc;
+    History history(doc, kInvalidNode);
+    history.set_snapshot_interval(8);
+
+    for (size_t i = 0; i < History::kMaxEntries + 10; ++i) {
+        interaction(history, doc, "Spawn", [&] { spawn(doc, float(i)); });
+    }
+
+    CHECK(history.entry_count() == History::kMaxEntries);
+    // Entry 0 must carry a Snapshot, or every replay has no base.
+    CHECK(history.entry_is_snapshot(0));
+    // And undo still works all the way back through the surviving range.
+    const SceneDocument expected = clone(doc);
+    while (history.can_undo()) history.undo(doc);
+    while (history.can_redo()) history.redo(doc);
+    CHECK(same_document(doc, expected));
+}
+
+TEST_CASE("an unbalanced end_interaction is ignored") {
+    SceneDocument doc;
+    History history(doc, kInvalidNode);
+
+    history.end_interaction(doc, kInvalidNode); // never begun
+    spawn(doc, 1);
+    history.end_interaction(doc, kInvalidNode);
+
+    CHECK_FALSE(history.can_undo());
+}
+
+TEST_CASE("undo and redo at the ends return nullopt and touch nothing") {
+    SceneDocument doc;
+    spawn(doc, 1);
+    History history(doc, kInvalidNode);
+
+    CHECK_FALSE(history.undo(doc).has_value());
+    CHECK_FALSE(history.redo(doc).has_value());
+    CHECK(doc.nodes().size() == 1);
+}
