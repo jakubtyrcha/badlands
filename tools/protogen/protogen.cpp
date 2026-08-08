@@ -760,7 +760,8 @@ void Cascade(Grid& g, const Params& p, int x, int y, float max_diff) {
 //      (speed < kLakeSeedSpeedMPerS) starts a region.
 //   2. GROW: from each unvisited seed, a 4-connected flood fill over the wet
 //      component (h > eps_wet), crossing a neighbour only when its water
-//      surface is within kLakeSurfaceContinuityM of the cell it came from.
+//      surface is within kLakeSurfaceContinuityM of the SEED's surface --
+//      not of the cell it came from (see the fix note below the loop).
 //
 // DETERMINISM. The seed scan is row-major, but the RESULT does not depend on
 // that order: the "surface within tolerance" relation is symmetric, so the
@@ -801,6 +802,19 @@ std::vector<float> ClassifyBoundaryWater(const Grid& g, const Params& p) {
           g.h[i] > kLakeSeedDepthM && speed < kLakeSeedSpeedMPerS;
       if (!is_seed) continue;
 
+      // Bound growth against the SEED's surface, not the immediate
+      // predecessor's (finding from code review: the old per-HOP check let a
+      // near-flat wet reach drift arbitrarily far from the lake one
+      // centimetre at a time -- a long, gently-sloped backwater draining a
+      // lake never exceeds the tolerance between any two ADJACENT cells, so
+      // it walked straight into the mask with nothing to stop it, however
+      // far downstream it went. Comparing every candidate to the fixed
+      // seed_surface instead makes the bound a TOTAL one, which is also the
+      // physically correct reading of "a lake's surface is one equipotential
+      // to within tolerance" -- that is a statement about the whole lake
+      // against ONE reference level, not a chain of pairwise agreements that
+      // can each individually pass while the ends disagree by any amount.
+      const float seed_surface = surface[i];
       visited[i] = 1;
       stack.clear();
       stack.push_back(int32_t(i));
@@ -814,8 +828,8 @@ std::vector<float> ClassifyBoundaryWater(const Grid& g, const Params& p) {
           const size_t j = g.idx(nx, ny);
           if (visited[j]) continue;
           if (!(g.h[j] > p.eps_wet)) continue;  // dry: not part of any lake
-          if (std::fabs(surface[j] - surface[cur]) > kLakeSurfaceContinuityM)
-            continue;  // discontinuous surface: a channel head, not a shore
+          if (std::fabs(surface[j] - seed_surface) > kLakeSurfaceContinuityM)
+            continue;  // too far from the seed's level: not this lake
           visited[j] = 1;
           stack.push_back(int32_t(j));
         }
@@ -1233,7 +1247,11 @@ void RunSim(const Params& p, Grid& g, SimStats& st, bool verbose) {
 
     auto tE = clk::now(); t_settle += secs(tD, tE);
 
-    if (verbose && (step % p.snapshot_every == 0 || step == p.steps)) {
+    // Guarded the same way phase 1's cadence is (main(), `std::max(1, ...)`):
+    // `--snapshot-every 0` must throttle to "every step", not SIGFPE on the
+    // modulo -- integer division/modulo by zero is undefined behaviour, and
+    // on this hardware that is a hardware trap, not a graceful default.
+    if (verbose && (step % std::max(1, p.snapshot_every) == 0 || step == p.steps)) {
       char tag[64];
       std::snprintf(tag, sizeof(tag), "%04d-step", step);
       Dump(g, p, tag);
@@ -1259,6 +1277,55 @@ void RunSim(const Params& p, Grid& g, SimStats& st, bool verbose) {
                   v.empty() ? 0u : v.back());
       std::fflush(stdout);
     }
+  }
+
+  // TERMINAL FLUSH (code review finding). SettleSus only drains a FRACTION
+  // of a cell's suspended load each call (`settle_fraction`, the rest
+  // diffusing to neighbours to settle over FUTURE steps -- see its own
+  // comment) -- fine while the sim keeps iterating, but RunSim has no next
+  // step, so a finite run always ends with some nonzero remainder still
+  // parked in `sus` (~0.13% of deposited mass, measured on a
+  // production-scale run). The IN-MEMORY ledger already counts that as
+  // real, unsettled mass (MassConservation's SumSus adds `sus` to `height`
+  // on the "still on the map" side), but the ON-DISK artifacts --
+  // height/soil rasters, and world.txt's soil quantiles, both built from
+  // `g.height`/`g.soil` alone -- never see it, so whatever is still in
+  // `sus` when the run ends silently never reaches disk.
+  //
+  // A DIRECT final deposit, not a bounded number of extra SettleSus passes:
+  // SettleSus's gradual drain-and-diffuse behaviour only means something
+  // because there ARE future steps for the remainder to keep settling over.
+  // There are none here, so "gradual" buys nothing, and a fixed pass count
+  // would still leave an arbitrary nonzero remainder -- SettleSus decays
+  // `sus` geometrically (by `1 - settle_fraction` each call), which never
+  // reaches exactly zero in finitely many passes. That residual is exactly
+  // what this fix exists to close, so leaving one by construction would
+  // defeat it. Depositing the WHOLE remaining load in place instead --
+  // one Deposit per cell, exactly where its `sus` currently sits, no
+  // diffusion -- is exact in a single pass (nothing left over to argue a
+  // pass count for) and reuses the same conservative Deposit() every other
+  // erosion/settling path in this file already goes through (soil-first,
+  // and a no-op below its own `amount <= 0.f` guard).
+  //
+  // Cell-local, like SettleSus's own Deposit call (see its header comment
+  // for the argument in full): each thread owns index `i` alone, so this is
+  // safe inside a parallel body.
+  badlands::ParallelFor(size_t(p.res), [&](size_t yy) {
+    const size_t base = yy * size_t(p.res);
+    for (int x = 0; x < p.res; ++x) {
+      const size_t i = base + x;
+      Deposit(g, i, g.sus[i]);
+      g.sus[i] = 0.0f;
+    }
+  });
+  if (verbose && p.steps > 0) {
+    // Re-dump the FINAL tag so the on-disk snapshot reflects the flush too
+    // -- the in-loop Dump() above already wrote this exact tag one step
+    // ago, before `sus` was zeroed; overwriting it here is what makes the
+    // artifact match the in-memory ledger MassConservation already checks.
+    char tag[64];
+    std::snprintf(tag, sizeof(tag), "%04d-step", p.steps);
+    Dump(g, p, tag);
   }
 
   st.t_drops = t_drops; st.t_grid = t_grid; st.t_settle = t_settle;
@@ -1412,6 +1479,28 @@ bool WriteWorldArtifacts(const WorldArtifactInputs& in, const std::string& out_d
   }
   std::printf("protogen: wrote %s/world.txt + rivers.bin (%zu nodes, %zu edges)\n",
               out_dir.c_str(), graph.nodes.size(), graph.edges.size());
+  return true;
+}
+
+// Code review finding: an aborted phase-1 run must not silently write
+// world.txt/rasters off a POISONED grid (a NaN/Inf tripwire is exactly what
+// aborted it) -- see main()'s abort branch for the write side of this. A
+// plain serial scan is fine here: this only ever runs once, on the abort
+// path, never in a hot loop, so it does not need DeterministicMaxDepth's
+// chunked-parallel-reduction machinery -- it only needs the same
+// `std::isfinite` check that machinery uses, over every field
+// BuildInputsFromGrid/DumpPhase1 below actually reads: `height` and `soil`
+// feed the on-disk bed/cover rasters and SoilCutoffs' quantile sort (which
+// has no defined behaviour for a NaN input); `h`/`velx`/`vely` feed
+// ClassifyBoundaryWater's depth/speed test, which is what the lake/river
+// split and `water.f32` are built from.
+bool GridFinite(const Grid& g) {
+  for (size_t i = 0; i < g.cells; ++i) {
+    if (!std::isfinite(g.height[i]) || !std::isfinite(g.soil[i]) ||
+        !std::isfinite(g.h[i]) || !std::isfinite(g.velx[i]) ||
+        !std::isfinite(g.vely[i]))
+      return false;
+  }
   return true;
 }
 
@@ -1750,6 +1839,87 @@ void WritePerfReport(const Grid& g, const Params& p, const SimStats& st,
 
 }  // namespace
 
+namespace pg {
+
+// Handles a phase-1 abort's OUTPUT-BOUNDARY consequences (code review
+// finding): decides whether to rebuild world.txt/rasters off the live grid
+// or write an ABORTED marker instead, and does it. Extracted from main() so
+// a test can drive it directly on a tiny fixture -- the same reason
+// RunSim/RunSweCycles are their own functions rather than inline code in
+// main() (see RunSim's own comment).
+//
+// Leaving this branch empty (the pre-fix behaviour) is what let an aborted
+// run leave its directory self-CONTRADICTORY: completed "%04d-cycle"
+// snapshots past what world.txt claims, since world.txt's `cycles` field is
+// otherwise only ever advanced by the SUCCESS path (main()'s own
+// WriteWorldArtifacts call once the whole requested cycle count completes).
+// FindLatestTag (src/mapgen/coarse_world_patch_source.cpp) and
+// RunExtractRivers (this file) both trust that field to pick the right tag;
+// a stale one makes either silently render the wrong bed with no
+// diagnostic.
+//
+// Two cases, handled differently on purpose:
+//
+//   FINITE (a dt-floor trip, a sediment-mass-audit trip, or the
+//   soil-production config guard): `g` is a perfectly good, physically
+//   sensible bed -- the run merely cannot CONTINUE (dt collapsed below the
+//   floor, the ledger stopped balancing, or a config combination the sim
+//   refuses to run), which says nothing against the state already reached.
+//   Treated exactly like a normal batch boundary that happens to be the
+//   last one: dump a "%04d-cycle" snapshot and rewrite world.txt off it, at
+//   `cycles_run` (the caller's own conservative count of trustworthy
+//   cycles -- see SweRunResult::aborted_cycle's header comment). A snapshot
+//   at that exact tag was never written by the batching loop (aborting a
+//   batch skips its DumpPhase1 call), so there is nothing to collide with;
+//   if `cycles_run` happens to equal an earlier batch's own tag (the guard
+//   fires before this call's first cycle), this re-dumps the identical,
+//   unchanged state under the same name -- harmless.
+//
+//   NON-FINITE (a NaN/Inf tripwire): `g` IS the poisoned state that
+//   aborted the run, by definition. Writing height/soil/water rasters off
+//   it would put NaN/Inf on disk under a name indistinguishable from a good
+//   snapshot -- and SoilCutoffs' quantile sort has no defined ordering for
+//   a NaN input either. So world.txt is left exactly as the last
+//   TRUSTWORTHY write (phase 0, or an earlier successful batch) left it,
+//   and a plain marker file records what happened instead: a human or a
+//   downstream consumer sees unambiguously that this directory's newest
+//   work never reached disk, and why, rather than inferring it from an
+//   unusually stale `cycles` field.
+//
+// Returns false only on an I/O failure while trying to make the directory
+// self-consistent (never because of the abort itself) -- main() propagates
+// that as an exit code, same as every other WriteWorldArtifacts call site.
+bool HandlePhase1Abort(const Grid& g, const Params& p, int cycles_run,
+                       const std::string& abort_reason) {
+  if (GridFinite(g)) {
+    char tag[64];
+    std::snprintf(tag, sizeof(tag), "%04d-cycle", cycles_run);
+    DumpPhase1(g, p, tag);
+    if (!WriteWorldArtifacts(BuildInputsFromGrid(g, p, cycles_run), p.out))
+      return false;
+    std::printf("protogen: abort state is finite -- wrote snapshot '%s' "
+                "and updated world.txt at the aborted cycle count\n",
+                tag);
+    return true;
+  }
+  const std::string marker_path = p.out + "/ABORTED";
+  FILE* fp = std::fopen(marker_path.c_str(), "w");
+  if (!fp) {
+    std::fprintf(stderr, "protogen: cannot write %s\n", marker_path.c_str());
+    return false;
+  }
+  std::fprintf(fp,
+               "protogen: phase 1 aborted at cycle %d of %d requested with "
+               "NON-FINITE state -- world.txt was left at its last "
+               "trustworthy provenance; no rasters were written from this "
+               "cycle.\nreason: %s\n",
+               cycles_run, p.cycles, abort_reason.c_str());
+  std::fclose(fp);
+  return true;
+}
+
+}  // namespace pg
+
 int main(int argc, char** argv) {
   for (int i = 1; i < argc; ++i)
     if (std::string(argv[i]) == "--test") return test::RunAll();
@@ -1926,6 +2096,7 @@ int main(int argc, char** argv) {
     const int cadence = std::max(1, p.snapshot_every);
     SweAuditBaseline audit;
     bool aborted = false;
+    std::string abort_reason;
     while (cycles_run < p.cycles) {
       const int batch = std::min(cadence, p.cycles - cycles_run);
       const SweRunResult r =
@@ -1943,6 +2114,7 @@ int main(int argc, char** argv) {
         // (protogen_swe.cpp's WriteAbortSnapshot), named with the SAME
         // global cycle number this message reports.
         cycles_run = r.aborted_cycle;
+        abort_reason = r.reason;
         std::fprintf(stderr,
                      "protogen: phase 1 ABORTED at cycle %d of %d requested: "
                      "%s\n",
@@ -1967,6 +2139,14 @@ int main(int argc, char** argv) {
       if (!WriteWorldArtifacts(BuildInputsFromGrid(g, p, cycles_run), p.out))
         return 1;
       PrintRunDiagnostics(g, "phase-1");
+    } else {
+      // Code review finding: leaving THIS branch empty is what let an
+      // aborted run leave the directory self-contradictory -- see
+      // HandlePhase1Abort's own comment for the finite/non-finite split and
+      // why each side does what it does. Factored out (rather than inlined
+      // here) so a test can drive it directly on a tiny fixture, same as
+      // RunSim/RunSweCycles.
+      if (!HandlePhase1Abort(g, p, cycles_run, abort_reason)) return 1;
     }
 
     WritePerfReport(g, p, st, cycles_run);

@@ -852,6 +852,19 @@ SweRunResult RunSweCycles(Grid& g, const Params& p, int cycles,
                           SweAuditBaseline* audit = nullptr,
                           int cycle_offset = 0);
 
+// Makes `p.out` self-consistent after a phase-1 abort (code review finding,
+// Task 7): a run that stops early via a RunSweCycles tripwire must not leave
+// world.txt's `cycles` field pointing at stale (phase-0, or an
+// earlier-batch) provenance while the directory also holds `cycles_run`
+// worth of real phase-1 progress -- see the .cpp definition for the
+// finite/non-finite split this makes and why. `abort_reason` is the
+// SweRunResult::reason that named the trip; `cycles_run` is the caller's own
+// count of trustworthy cycles (SweRunResult::aborted_cycle, or main()'s
+// derivation of it across a batched run). Returns false only on an I/O
+// failure while doing this, never because of the abort itself.
+bool HandlePhase1Abort(const Grid& g, const Params& p, int cycles_run,
+                       const std::string& abort_reason);
+
 // ONE OF THE TWO PLACES `p.morfac` IS EVER APPLIED (the other is the talus
 // pair's bed-clock interval in RunSweCycles -- see
 // Params::talus_relaxation_per_yr). Both are the SAME operation, converting a
@@ -908,17 +921,22 @@ constexpr float kLakeSeedDepthM = 1.0f;
 constexpr float kLakeSeedSpeedMPerS = 0.05f;
 // GROWTH threshold, once a seed exists: a 4-connected flood fill over the
 // wet component, crossing into a neighbour only when its WATER SURFACE
-// (bed + h) is within this of the cell it came from. A lake's surface is
-// flat by construction, so two adjacent lake cells always pass however
-// different their bed elevation (a shallow margin next to the deep centre
-// included -- this is what makes the margins join the region without
-// needing a depth test of their own). A channel cannot: SweFlux's own
-// acceleration term (dt*g*A_over_L*dhead) needs a real head DIFFERENCE
-// between adjacent cells to drive flow at all, and at production cell
-// sizes that runs in the DECIMETRE range per cell -- an order of magnitude
-// or more above this CENTIMETRE bound -- so growth stops at the true
-// shoreline without ever asking "is this a channel", only "is the surface
-// still flat".
+// (bed + h) is within this of the SEED cell's surface -- a TOTAL bound, not
+// a per-hop one (code review: comparing against the immediate predecessor
+// instead let a long, near-flat wet reach drift arbitrarily far from the
+// lake one hop at a time, since no single hop need exceed the tolerance
+// even though the accumulated drift over many hops does). A lake's surface
+// is flat by construction, so two lake cells always pass however different
+// their bed elevation (a shallow margin next to the deep centre included --
+// this is what makes the margins join the region without needing a depth
+// test of their own) and however many hops of flood fill separate them,
+// since both are being measured against the SAME fixed reference. A channel
+// cannot: SweFlux's own acceleration term (dt*g*A_over_L*dhead) needs a real
+// head DIFFERENCE between adjacent cells to drive flow at all, and at
+// production cell sizes that runs in the DECIMETRE range per cell -- an
+// order of magnitude or more above this CENTIMETRE bound -- so growth stops
+// at the true shoreline without ever asking "is this a channel", only "is
+// the surface still within tolerance of the lake's own level".
 constexpr float kLakeSurfaceContinuityM = 0.01f;
 
 // Returns a depth raster, `g.cells` long: `g.h[i]` where cell `i` was

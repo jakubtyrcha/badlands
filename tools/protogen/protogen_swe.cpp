@@ -295,6 +295,12 @@ namespace pg {
 void SweFlux(Grid& g, const Params& p, float dt) {
   const int n = g.n;
   const float cell_m = p.world_m / float(p.res);
+  // Hoisted out of the per-cell loop below (efficiency finding, code
+  // review): Manning's B = g*n^2/depth^(4/3) is g*n^2 the SAME for every
+  // wet cell in this pass (p.swe_manning_n does not vary per cell), so
+  // multiplying it out once here rather than twice per wet cell removes
+  // dead, repeated work from the hottest loop in the whole solver.
+  const float manning_gn2 = kGravityMS2 * p.swe_manning_n * p.swe_manning_n;
   badlands::ParallelFor(size_t(n), [&](size_t yy) {
     const int y = int(yy);
     for (int x = 0; x < n; ++x) {
@@ -335,8 +341,18 @@ void SweFlux(Grid& g, const Params& p, float dt) {
       // v -> v_free exactly; bd large gives v -> sqrt(v_free/bd)), so it
       // needs no bd > 0 special case either -- the denominator is always
       // >= 2.
-      const float B = kGravityMS2 * p.swe_manning_n * p.swe_manning_n /
-                      std::pow(own_h, 4.0f / 3.0f);
+      // own_h^(4/3) == own_h * own_h^(1/3) == own_h * cbrt(own_h) exactly,
+      // and cbrt is a far narrower special function than a general pow with
+      // a non-integer exponent -- worth it here since this runs on every
+      // wet cell of the hottest pass in the solver (see the perf report for
+      // the measured delta). May differ from std::pow(own_h, 4.0f/3.0f) in
+      // the last representable bit (a different, algebraically equivalent
+      // evaluation path); SweDeterminism only compares run-vs-run of the
+      // SAME build, so it is unaffected either way, and every tolerance-
+      // based test that exercises this drag term (SweManningConvergence,
+      // WarmStartProximity, ...) still holds well inside its existing
+      // margin -- see the report.
+      const float B = manning_gn2 / (own_h * std::cbrt(own_h));
       // Froude bound, PER FACE (see the loop below for why the /sqrt(2)):
       // `flux[i][k]` carries momentum forward from whatever substep set it,
       // and `A_pipe` above is built from `own_h` as it stands THIS substep
@@ -1116,6 +1132,35 @@ void SedAdvect(Grid& g, const Params& p, float dt_morpho) {
     substeps = std::min(kMaxAdvectSubsteps, int(std::ceil(max_disp_cells)));
   const float dt_sub = dt_morpho / float(substeps);
 
+  // CACHE, COMPUTED ONLY ON THE FIRST SUBSTEP, WHAT IS LOOP-INVARIANT ACROSS
+  // EVERY SUBSTEP (efficiency finding, code review). Every input to the
+  // transverse-deflection closure and the backtrace displacement -- own/
+  // neighbour `velx`/`vely`/`height`, `dt_sub`, `cell_m` -- is FIXED for the
+  // whole of this call: SedAdvect never writes any of them, only `sus`
+  // (which the substep loop's own gather-then-swap advances). The original
+  // loop recomputed this same, sqrt-heavy closure (three sqrts: `speed`, the
+  // deflection renormalisation, and the displacement-clamp `dist`) from
+  // IDENTICAL inputs on every substep and threw the result away each time
+  // except for `src_x`/`src_y`/the export dt -- at the substep cap
+  // (kMaxAdvectSubsteps == 8) that is 7/8 of it wasted.
+  //
+  // NOT hoisted into its own SEPARATE pass over the grid: measured on a
+  // production-shaped fixture (256 res, 100 morfac-10 cycles), an actual
+  // extra full ParallelFor pass cost MORE than it saved -- this workload's
+  // `substeps` sits at 2-3, nowhere near the cap of 8, and a whole extra
+  // dispatch-plus-memory-round-trip pass outweighs skipping the deflection
+  // math on only one of two or three substeps. Folding the cache-fill into
+  // the FIRST substep's own pass instead costs nothing beyond what that pass
+  // was already going to touch (same cell, same row, already resident) and
+  // still removes the fully redundant recomputation on every substep after
+  // the first -- see the report for the measured delta either way.
+  //
+  // BIT-IDENTICAL BY CONSTRUCTION: the arithmetic is exactly what the
+  // substep loop used to do inline, on exactly the same inputs, so IEEE 754
+  // determinism guarantees the same result computed once and read `substeps`
+  // times equals the same result recomputed `substeps` times.
+  std::vector<float> src_x(g.cells), src_y(g.cells), dt_eff(g.cells);
+
   // Border export accumulates across the sub-steps, per row inside each and
   // combined serially afterwards (SweDepth's ledger construction, and the
   // same reproducibility reason).
@@ -1123,85 +1168,99 @@ void SedAdvect(Grid& g, const Params& p, float dt_morpho) {
   double export_raw_m3 = 0.0;
 
   for (int sub = 0; sub < substeps; ++sub) {
+    const bool first_substep = (sub == 0);
     badlands::ParallelFor(size_t(n), [&](size_t yy) {
       const int y = int(yy);
       double export_acc = 0.0;
       for (int x = 0; x < n; ++x) {
         const size_t i = g.idx(x, y);
-        float vx = g.velx[i], vy = g.vely[i];
-        const float speed = std::sqrt(vx * vx + vy * vy);
-        if (speed > 0.f) {
-          // Transverse bed slope, central difference on the BED (not the
-          // water surface: this is about which way a grain rolls, which is
-          // gravity acting on the bed, not the pressure gradient driving the
-          // water).
-          const int xm = std::max(x - 1, 0), xp = std::min(x + 1, n - 1);
-          const int ym = std::max(y - 1, 0), yp = std::min(y + 1, n - 1);
-          const float span_x = float(xp - xm) * cell_m;
-          const float span_y = float(yp - ym) * cell_m;
-          const float bx =
-              span_x > 0.f
-                  ? (ToMetres(g.height[g.idx(xp, y)], p) -
-                     ToMetres(g.height[g.idx(xm, y)], p)) / span_x
-                  : 0.f;
-          const float by =
-              span_y > 0.f
-                  ? (ToMetres(g.height[g.idx(x, yp)], p) -
-                     ToMetres(g.height[g.idx(x, ym)], p)) / span_y
-                  : 0.f;
-          // Downslope direction, minus the part already along the flow --
-          // what remains is the TRANSVERSE downslope component, a
-          // dimensionless slope.
-          const float ux = vx / speed, uy = vy / speed;
-          const float dsx = -bx, dsy = -by;
-          const float along = dsx * ux + dsy * uy;
-          const float tx = dsx - along * ux, ty = dsy - along * uy;
-          // tan(deviation) = coeff * transverse slope, so the lateral speed
-          // is coeff * |v| * (transverse slope), in the transverse direction.
-          float latx = p.transverse_slope_coeff * speed * tx;
-          float laty = p.transverse_slope_coeff * speed * ty;
-          const float latmag = std::sqrt(latx * latx + laty * laty);
-          // Bounded at 45 degrees of deflection. A transverse slope steep
-          // enough to demand more is a cliff, not a bank, and the
-          // small-angle closure has nothing to say about it.
-          if (latmag > speed) {
-            const float s = speed / latmag;
-            latx *= s;
-            laty *= s;
+        if (first_substep) {
+          float vx = g.velx[i], vy = g.vely[i];
+          const float speed = std::sqrt(vx * vx + vy * vy);
+          if (speed > 0.f) {
+            // Transverse bed slope, central difference on the BED (not the
+            // water surface: this is about which way a grain rolls, which
+            // is gravity acting on the bed, not the pressure gradient
+            // driving the water).
+            const int xm = std::max(x - 1, 0), xp = std::min(x + 1, n - 1);
+            const int ym = std::max(y - 1, 0), yp = std::min(y + 1, n - 1);
+            const float span_x = float(xp - xm) * cell_m;
+            const float span_y = float(yp - ym) * cell_m;
+            const float bx =
+                span_x > 0.f
+                    ? (ToMetres(g.height[g.idx(xp, y)], p) -
+                       ToMetres(g.height[g.idx(xm, y)], p)) / span_x
+                    : 0.f;
+            const float by =
+                span_y > 0.f
+                    ? (ToMetres(g.height[g.idx(x, yp)], p) -
+                       ToMetres(g.height[g.idx(x, ym)], p)) / span_y
+                    : 0.f;
+            // Downslope direction, minus the part already along the flow --
+            // what remains is the TRANSVERSE downslope component, a
+            // dimensionless slope.
+            const float ux = vx / speed, uy = vy / speed;
+            const float dsx = -bx, dsy = -by;
+            const float along = dsx * ux + dsy * uy;
+            const float tx = dsx - along * ux, ty = dsy - along * uy;
+            // tan(deviation) = coeff * transverse slope, so the lateral
+            // speed is coeff * |v| * (transverse slope), in the transverse
+            // direction.
+            float latx = p.transverse_slope_coeff * speed * tx;
+            float laty = p.transverse_slope_coeff * speed * ty;
+            const float latmag = std::sqrt(latx * latx + laty * laty);
+            // Bounded at 45 degrees of deflection. A transverse slope steep
+            // enough to demand more is a cliff, not a bank, and the
+            // small-angle closure has nothing to say about it.
+            if (latmag > speed) {
+              const float s = speed / latmag;
+              latx *= s;
+              laty *= s;
+            }
+            vx += latx;
+            vy += laty;
+            // RENORMALISE BACK TO THE ORIGINAL SPEED. This closure is a
+            // ROTATION of the sediment flux, not an amplification of it:
+            // Ikeda's and Struiksma's result says transport DEVIATES from
+            // the flow direction on a laterally tilted bed, and says
+            // nothing about it going faster. Adding a perpendicular
+            // component without rescaling lengthens the vector by
+            // sqrt(1 + (coeff*slope)^2) -- up to 1.414x at the 45-degree
+            // bound, which binds exactly at steep banks, i.e. exactly where
+            // the meandering mechanism lives and exactly where a spurious
+            // 41% transport boost would be least visible and most
+            // damaging. One sqrt buys the semantics the comment above
+            // already claimed.
+            const float defl_mag = std::sqrt(vx * vx + vy * vy);
+            if (defl_mag > 0.f) {
+              const float renorm = speed / defl_mag;
+              vx *= renorm;
+              vy *= renorm;
+            }
           }
-          vx += latx;
-          vy += laty;
-          // RENORMALISE BACK TO THE ORIGINAL SPEED. This closure is a
-          // ROTATION of the sediment flux, not an amplification of it:
-          // Ikeda's and Struiksma's result says transport DEVIATES from the
-          // flow direction on a laterally tilted bed, and says nothing about
-          // it going faster. Adding a perpendicular component without
-          // rescaling lengthens the vector by sqrt(1 + (coeff*slope)^2) --
-          // up to 1.414x at the 45-degree bound, which binds exactly at
-          // steep banks, i.e. exactly where the meandering mechanism lives
-          // and exactly where a spurious 41% transport boost would be least
-          // visible and most damaging. One sqrt buys the semantics the
-          // comment above already claimed.
-          const float defl_mag = std::sqrt(vx * vx + vy * vy);
-          if (defl_mag > 0.f) {
-            const float renorm = speed / defl_mag;
-            vx *= renorm;
-            vy *= renorm;
+
+          float dxc = -vx * dt_sub / cell_m;  // backtrace, in CELLS
+          float dyc = -vy * dt_sub / cell_m;
+          const float dist = std::sqrt(dxc * dxc + dyc * dyc);
+          float step_scale = 1.f;
+          if (dist > kMaxBacktraceCells) {
+            step_scale = kMaxBacktraceCells / dist;
+            dxc *= step_scale;
+            dyc *= step_scale;
           }
+          src_x[i] = float(x) + 0.5f + dxc;
+          src_y[i] = float(y) + 0.5f + dyc;
+          // THE SAME `dt_sub * step_scale` the border-export estimate below
+          // uses every substep -- see SedAdvect's own header comment on why
+          // sharing one clock with the backtrace matters.
+          dt_eff[i] = dt_sub * step_scale;
         }
 
-        float dxc = -vx * dt_sub / cell_m;  // backtrace, in CELLS
-        float dyc = -vy * dt_sub / cell_m;
-        const float dist = std::sqrt(dxc * dxc + dyc * dyc);
-        float step_scale = 1.f;
-        if (dist > kMaxBacktraceCells) {
-          step_scale = kMaxBacktraceCells / dist;
-          dxc *= step_scale;
-          dyc *= step_scale;
-        }
-        const float src_x = float(x) + 0.5f + dxc;
-        const float src_y = float(y) + 0.5f + dyc;
-        float v = CatmullRomSample(g.sus, n, src_x, src_y);
+        // The deflected backtrace source and effective dt are loop-
+        // invariant across substeps -- cached above on the first substep
+        // only. Every substep, first or not, GATHERS from them (plus
+        // `sus`, `flux`, `h`, which genuinely do vary substep to substep).
+        float v = CatmullRomSample(g.sus, n, src_x[i], src_y[i]);
         if (!(v > 0.f)) v = 0.f;  // also catches NaN, which cannot be a mass
         g.sus_b[i] = v;
 
@@ -1210,12 +1269,13 @@ void SedAdvect(Grid& g, const Params& p, float dt_morpho) {
         // cell's concentration (`sus` is an equivalent solid DEPTH, so sus/h
         // is a dimensionless volumetric concentration).
         //
-        // THE TIME USED IS THIS SUB-STEP'S OWN `dt_sub * step_scale`, the
-        // same effective step the backtrace just took. Sharing one clock is
-        // what keeps the export estimate and the field's implicit border
-        // loss consistent; when they were allowed to differ (a nominal
-        // whole-cycle export against a clamped backtrace) the mass fixer had
-        // to absorb the gap and grew to |f-1| ~ 0.19.
+        // THE TIME USED IS THIS SUB-STEP'S OWN `dt_sub * step_scale`
+        // (`dt_eff[i]`, precomputed above), the same effective step the
+        // backtrace just took. Sharing one clock is what keeps the export
+        // estimate and the field's implicit border loss consistent; when
+        // they were allowed to differ (a nominal whole-cycle export against
+        // a clamped backtrace) the mass fixer had to absorb the gap and
+        // grew to |f-1| ~ 0.19.
         float border_flux = 0.f;
         for (int k = 0; k < 4; ++k) {
           const int nx = x + kDx[k], ny = y + kDy[k];
@@ -1226,7 +1286,7 @@ void SedAdvect(Grid& g, const Params& p, float dt_morpho) {
         const float sus_m = ToMetres(g.sus[i], p);
         if (border_flux > 0.f && h_m > p.eps_wet && sus_m > 0.f) {
           const double vol = double(border_flux) *
-                             double(dt_sub * step_scale) * double(sus_m / h_m);
+                             double(dt_eff[i]) * double(sus_m / h_m);
           export_acc += std::min(vol, double(sus_m) * double(cell_area));
         }
       }

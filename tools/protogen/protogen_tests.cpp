@@ -11,11 +11,20 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <string>
 #include <vector>
 
 #include "protogen.hpp"
+
+// Only HandlePhase1AbortFinalizesDirectory needs this -- everything else in
+// this file runs with `p.out = ""` specifically to avoid the filesystem
+// (see MorphoBase's own comment). coarse_io.cpp is already one of the TUs
+// this binary links (see README's build line; RunExtractRivers/
+// WriteWorldArtifacts pull it in too), so this adds no new link dependency.
+#include "mapgen/coarse_io.hpp"
 
 using namespace pg;
 
@@ -127,6 +136,17 @@ void MassConservation() {
   const double rel = std::fabs(residual) / std::max(std::fabs(before), 1e-9);
   Check("mass conservation", rel < 0.01,
         F("residual %.3e of %.3e (%.4f%%)", residual, before, 100 * rel));
+
+  // Code review finding: RunSim's terminal flush (see its own comment)
+  // deposits whatever is left in `sus` directly, so NOTHING should still be
+  // sitting there once the run returns -- which is what makes the ON-DISK
+  // artifacts (height/soil rasters, built from this same `g`) close too,
+  // not merely the in-memory ledger `after` above (which counted `sus`
+  // toward the total regardless of whether it had actually settled).
+  const double sus_after = SumSus(g);
+  Check("mass conservation: sus is fully flushed to the bed by the time "
+        "RunSim returns, so the ON-DISK artifacts close too",
+        sus_after == 0.0, F("sum(sus) %.3e (want exactly 0)", sus_after));
 }
 
 // --- 2. flat plane does nothing -------------------------------------------
@@ -3494,6 +3514,32 @@ void BoundaryClassification() {
   // is likewise isolated, so nothing grows into it either.
   g.h[g.idx(5, 40)] = 0.3f;
 
+  // Code-review finding: a long, near-flat backwater channel draining the
+  // lake -- x=12, y=[0,23], directly north of and 4-connected to the
+  // margin row at y=24 (x=12 sits at x-lx0=2, so it is NOT itself part of
+  // the margin box; a fresh column outside it). Shallow (h=0.5 m, under
+  // kLakeSeedDepthM) so it never seeds on its own -- exactly like the
+  // steep channel above, growth is the only way it could ever get tagged.
+  // Its surface descends from the lake's own 6.0 m at a ~1e-4 slope (16 m
+  // texel * 1e-4 = 1.6 mm/cell, two orders under kLakeSurfaceContinuityM's
+  // 1 cm): the OLD per-hop check compared each cell only to its immediate
+  // predecessor and never saw more than 1.6 mm of disagreement, so it
+  // walked the entire 24-cell reach into the lake mask. The accumulated
+  // drop over the whole reach is 23 * 1.6 mm = 3.68 cm, well past the 1 cm
+  // tolerance -- which is exactly what the FIXED seed-relative check must
+  // catch: the far end must NOT be annexed, while cells close enough to the
+  // seed's level still may be.
+  const int bx = 12, by0 = 0, by1 = 23;
+  for (int y = by0; y <= by1; ++y) {
+    const int k = by1 - y;  // 0 at the lake end, 23 at the far end
+    const float surf = 6.0f - float(k) * 0.0016f;
+    const size_t i = g.idx(bx, y);
+    g.h[i] = 0.5f;
+    g.height[i] = surf - g.h[i];
+    g.velx[i] = 0.0f;
+    g.vely[i] = 0.0f;
+  }
+
   const std::vector<float> water = ClassifyBoundaryWater(g, p);
 
   bool core_tagged = true, margin_tagged = true;
@@ -3513,16 +3559,33 @@ void BoundaryClassification() {
   const bool pulse_clear = water[g.idx(5, 5)] == 0.0f;
   const bool puddle_clear = water[g.idx(5, 40)] == 0.0f;
 
+  // Near end (k=2, y=21): 2 * 1.6 mm = 3.2 mm off the seed's surface, well
+  // inside the 1 cm tolerance either way -- must still be annexed (growth
+  // from a flat lake into a barely-sloped reach right at its mouth is
+  // legitimate; this is not what the fix is supposed to change).
+  const bool backwater_near_tagged = water[g.idx(bx, 21)] > 0.0f;
+  // Far end (k=10, y=13, and k=23, y=0): 1.6 cm and 3.68 cm off the seed's
+  // surface respectively, both past the 1 cm tolerance. The OLD per-hop
+  // check never saw more than 1.6 mm between any two ADJACENT cells here and
+  // so annexed the whole column regardless of length; the FIXED check must
+  // cut it off once the accumulated drop from the seed exceeds tolerance.
+  const bool backwater_far_clear =
+      water[g.idx(bx, 13)] == 0.0f && water[g.idx(bx, 0)] == 0.0f;
+
   const bool ok = core_tagged && margin_tagged && channel_clear &&
-                  pulse_clear && puddle_clear;
-  char buf[260];
+                  pulse_clear && puddle_clear && backwater_near_tagged &&
+                  backwater_far_clear;
+  char buf[380];
   std::snprintf(buf, sizeof(buf),
                 "lake core tagged=%d, shallow margin tagged=%d, channel "
-                "clear=%d, flood-pulse cell clear=%d, puddle cell clear=%d",
+                "clear=%d, flood-pulse cell clear=%d, puddle cell clear=%d, "
+                "backwater near end tagged=%d, backwater far end clear=%d",
                 core_tagged, margin_tagged, channel_clear, pulse_clear,
-                puddle_clear);
+                puddle_clear, backwater_near_tagged, backwater_far_clear);
   Check("BoundaryClassification: whole lake incl. margins tagged, channel "
-        "and isolated deep/fast + shallow/slow cells are not",
+        "and isolated deep/fast + shallow/slow cells are not, and a "
+        "near-flat backwater is annexed only up to the seed's total "
+        "surface tolerance, not indefinitely by per-hop continuity",
         ok, buf);
 }
 
@@ -3683,6 +3746,162 @@ void BatchedMassAuditFiresOnNonMultipleCadence() {
         ok, buf);
 }
 
+// --- M23. an aborted phase-1 run leaves its directory self-consistent -----
+// Code review finding: main()'s abort branch used to be empty, so world.txt
+// kept whatever provenance the LAST successful write left it at (phase 0,
+// or an earlier --snapshot-every batch) while the directory could also hold
+// real phase-1 progress past that point -- a manifest-driven reader
+// (RunExtractRivers, or coarse_world_patch_source.cpp's FindLatestTag once
+// it prefers the `cycles` field) would then silently pick the WRONG bed.
+//
+// HandlePhase1Abort (factored out of main() for exactly this reason -- see
+// its own comment, protogen.hpp/.cpp) is exercised directly here, the same
+// way SweTripwire drives RunSweCycles directly rather than through main():
+// both are driver/output-boundary glue with no CLI of their own to go
+// through. This is also the one test in this file that touches the
+// filesystem on purpose (TestTempDir), since the whole point is checking
+// what ends up ON DISK.
+struct TestTempDir {
+  std::filesystem::path path;
+  explicit TestTempDir(const std::string& name)
+      : path(std::filesystem::temp_directory_path() / ("bl_protogen_" + name)) {
+    std::filesystem::remove_all(path);
+    std::filesystem::create_directories(path);
+  }
+  ~TestTempDir() {
+    std::error_code ec;
+    std::filesystem::remove_all(path, ec);
+  }
+  std::string str() const { return path.string(); }
+};
+
+void HandlePhase1AbortFinalizesDirectory() {
+  namespace mg = badlands::mapgen;
+
+  // --- FINITE: a sediment-mass-audit trip, using the SAME inert fixture
+  // and leak-injection technique as BatchedMassAuditCatchesLeak (two
+  // RunSweCycles calls sharing one SweAuditBaseline -- the first batch
+  // completes clean, giving a nonzero `cycles_run` to check the tag/
+  // manifest against; the leak injected between them trips the second).
+  // `g` is a perfectly good bed when RunSweCycles returns -- HandlePhase1Abort
+  // must rebuild world.txt AND a "%04d-cycle" snapshot off it, named with
+  // the aborted cycle.
+  bool finite_ok = false;
+  std::string finite_detail;
+  {
+    TestTempDir dir("abort_finite");
+    Params p = MorphoBase(24, 16.f);
+    p.out = dir.str();
+    Grid g(p.res);
+    for (size_t i = 0; i < g.cells; ++i) {
+      g.height[i] = 5.0f;
+      g.h[i] = 3.0f;
+      g.soil[i] = 1.0f;
+    }
+    SweAuditBaseline audit;
+    const SweRunResult r1 = RunSweCycles(g, p, 10, nullptr, &audit, 0);
+    const float leak_m3 = 5.0f;
+    const float cell_area = 16.0f * 16.0f;
+    g.sus[g.idx(p.res / 2, p.res / 2)] += leak_m3 / cell_area;
+    const SweRunResult r2 = RunSweCycles(g, p, 10, nullptr, &audit, 10);
+
+    const bool handled = HandlePhase1Abort(g, p, r2.aborted_cycle, r2.reason);
+
+    char tag[64];
+    std::snprintf(tag, sizeof(tag), "%04d-cycle", r2.aborted_cycle);
+    const bool raster_written =
+        std::filesystem::exists(dir.str() + "/" + std::string(tag) + "-height.f32");
+    const bool no_marker = !std::filesystem::exists(dir.str() + "/ABORTED");
+
+    std::string err;
+    const auto man = mg::load_coarse_manifest(dir.str(), &err);
+    const bool manifest_ok = man.has_value();
+    const bool cycles_match = manifest_ok && man->cycles == r2.aborted_cycle;
+    const bool cycles_nonzero = r2.aborted_cycle > 0;
+
+    finite_ok = r1.ok && !r2.ok && handled && raster_written && no_marker &&
+               manifest_ok && cycles_match && cycles_nonzero;
+    char buf[440];
+    std::snprintf(buf, sizeof(buf),
+                 "batch1 ok=%d, batch2 ok=%d (aborted at cycle %d, want >0), "
+                 "handled=%d, raster '%s' written=%d, no ABORTED marker=%d, "
+                 "manifest loaded=%d, manifest cycles=%d (want %d)",
+                 r1.ok, r2.ok, r2.aborted_cycle, handled, tag, raster_written,
+                 no_marker, manifest_ok, manifest_ok ? man->cycles : -1,
+                 r2.aborted_cycle);
+    finite_detail = buf;
+  }
+  Check("HandlePhase1Abort: a FINITE abort (sediment-mass audit) rebuilds "
+        "world.txt and a snapshot at the aborted cycle",
+        finite_ok, finite_detail);
+
+  // --- NON-FINITE: a seeded NaN (SweTripwire's own recipe). `g` IS the
+  // poisoned state -- world.txt must be left untouched (whatever a prior
+  // TRUSTWORTHY write left it at -- simulated here by pre-seeding a known
+  // manifest, as if an earlier successful batch already wrote one) and an
+  // ABORTED marker must appear instead, naming the cycle and the reason.
+  bool nonfinite_ok = false;
+  std::string nonfinite_detail;
+  {
+    TestTempDir dir("abort_nonfinite");
+    Params p = MorphoBase(24, 16.f);
+    p.out = dir.str();
+
+    mg::CoarseManifest seed_man;
+    seed_man.resolution = p.res;
+    seed_man.world_size_m = p.world_m;
+    seed_man.cycles = 1234;  // a value nothing in this test would coincide with
+    std::string werr;
+    const bool seeded = mg::write_coarse_manifest(dir.str(), seed_man, &werr);
+
+    Grid g(p.res);
+    InitTerrain(g, p);
+    g.h[g.idx(12, 12)] = std::numeric_limits<float>::quiet_NaN();
+    const SweRunResult r = RunSweCycles(g, p, 5);
+
+    const bool handled = HandlePhase1Abort(g, p, r.aborted_cycle, r.reason);
+
+    std::string err;
+    const auto man = mg::load_coarse_manifest(dir.str(), &err);
+    const bool manifest_unchanged = man.has_value() && man->cycles == 1234;
+
+    char tag[64];
+    std::snprintf(tag, sizeof(tag), "%04d-cycle", r.aborted_cycle);
+    const bool no_raster =
+        !std::filesystem::exists(dir.str() + "/" + std::string(tag) + "-height.f32");
+
+    const std::string marker_path = dir.str() + "/ABORTED";
+    const bool marker_exists = std::filesystem::exists(marker_path);
+    std::string marker_text;
+    if (marker_exists) {
+      std::ifstream mf(marker_path);
+      marker_text.assign(std::istreambuf_iterator<char>(mf),
+                         std::istreambuf_iterator<char>());
+    }
+    const bool marker_names_cycle =
+        marker_text.find(std::to_string(r.aborted_cycle)) != std::string::npos;
+    const bool marker_names_reason =
+        marker_text.find("non-finite") != std::string::npos;
+
+    nonfinite_ok = seeded && !r.ok && handled && manifest_unchanged &&
+                  no_raster && marker_exists && marker_names_cycle &&
+                  marker_names_reason;
+    char buf[520];
+    std::snprintf(buf, sizeof(buf),
+                 "seeded manifest=%d, aborted=%d, handled=%d, manifest "
+                 "unchanged (cycles still 1234)=%d, no raster written=%d, "
+                 "ABORTED marker exists=%d, names cycle %d=%d, names "
+                 "reason=%d",
+                 seeded, !r.ok, handled, manifest_unchanged, no_raster,
+                 marker_exists, r.aborted_cycle, marker_names_cycle,
+                 marker_names_reason);
+    nonfinite_detail = buf;
+  }
+  Check("HandlePhase1Abort: a NON-FINITE abort (seeded NaN) leaves world.txt "
+        "untouched and writes an ABORTED marker instead",
+        nonfinite_ok, nonfinite_detail);
+}
+
 int RunAll() {
   std::printf("protogen sanity tests (small grids, production 16 m cells)\n");
   MassConservation();
@@ -3758,6 +3977,7 @@ int RunAll() {
   BoundaryClassification();
   BatchedMassAuditCatchesLeak();
   BatchedMassAuditFiresOnNonMultipleCadence();
+  HandlePhase1AbortFinalizesDirectory();
 
   std::printf("\n  %d passed, %d failed, %d pending", g_pass, g_fail, g_pending);
   if (g_pending_ready)

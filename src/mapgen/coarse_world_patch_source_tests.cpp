@@ -530,3 +530,118 @@ TEST_CASE(
   const PatchData cd = deep->Fetch(req);
   REQUIRE(max_interior_diff(ct.height, cd.height, 0) == 0.0f);
 }
+
+// Writes a coarse world's world.txt directly (not via write_coarse_world,
+// which never sets `cycles`) plus a `<tag>-{height,water,soil}.f32` set at a
+// flat, distinguishable height -- so a test can tell which of several tag
+// families on disk actually got loaded by checking ONE fetched value against
+// `flat_height_m`, rather than reasoning about a resample.
+void write_flat_tagged_world(const std::string& dir, int res, float world_size_m,
+                             int cycles, const std::string& tag,
+                             float flat_height_m) {
+  CoarseManifest man;
+  man.resolution = res;
+  man.world_size_m = world_size_m;
+  man.seed = 1;
+  man.runoff_m_per_yr = 1.0f;
+  man.steps = 1;
+  man.soil_cut_mountain_m = 0.35f;
+  man.soil_cut_hills_m = 1.40f;
+  man.cycles = cycles;
+  std::string err;
+  REQUIRE(write_coarse_manifest(dir, man, &err));
+
+  const size_t count = static_cast<size_t>(res) * res;
+  std::vector<float> height(count, flat_height_m), water(count, 0.0f),
+      soil(count, 2.0f);
+  write_raw(dir + "/" + tag + "-height.f32", height);
+  write_raw(dir + "/" + tag + "-water.f32", water);
+  write_raw(dir + "/" + tag + "-soil.f32", soil);
+}
+
+TEST_CASE(
+    "CoarseWorldPatchSource: an empty tag with cycles > 0 in the manifest "
+    "prefers the %04d-cycle family over a same-numbered %04d-step one",
+    "[patch]") {
+  // Finding from code review (coarse_world_patch_source.cpp's FindLatestTag):
+  // `--steps 3000 --cycles 3000` leaves BOTH "3000-step-*" (phase 0's own
+  // final dump, always written regardless of --snapshot-every) and
+  // "3000-cycle-*" (phase 1's final dump) on disk at the SAME numeric
+  // prefix. The OLD tie-break (numeric-then-lexical over every
+  // "*-height.f32") could not tell them apart and picked "-step" over
+  // "-cycle" purely because 's' > 'c' lexicographically -- rendering the
+  // phase-0 bed under phase-1 rivers/cutoffs with no diagnostic. The fixed
+  // loader goes straight to the manifest's own `cycles` field instead of
+  // scanning.
+  TempDir dir("cycle_tag_wins");
+  // Write the "-cycle" tag (the right answer) FIRST and the "-step" tag
+  // (the wrong one) second -- the fixed loader goes straight to the
+  // manifest's `cycles` field rather than scanning the directory, so write
+  // order must not matter; this ordering is chosen so a regression back to
+  // a directory scan would have to get lucky (iteration order is not
+  // guaranteed to be creation order) rather than fail outright.
+  write_flat_tagged_world(dir.str(), 32, 512.0f, /*cycles=*/3000,
+                          "3000-cycle", /*flat_height_m=*/200.0f);
+  {
+    // Second write_coarse_manifest call below would fail REQUIRE if this
+    // helper insisted on creating the directory fresh -- write_raw alone is
+    // enough for the second tag family, world.txt already carries `cycles`.
+    const int res = 32;
+    const size_t count = static_cast<size_t>(res) * res;
+    std::vector<float> height(count, 100.0f), water(count, 0.0f), soil(count, 2.0f);
+    write_raw(dir.str() + "/3000-step-height.f32", height);
+    write_raw(dir.str() + "/3000-step-water.f32", water);
+    write_raw(dir.str() + "/3000-step-soil.f32", soil);
+  }
+
+  std::string err;
+  auto source = LoadCoarseWorldPatchSource(dir.str(), "", &err);
+  REQUIRE(source != nullptr);
+  CHECK(err.empty());
+
+  PatchRequest req;
+  req.origin_m = glm::dvec2(0.0, 0.0);
+  req.world_size_m = 512.0f;
+  req.resolution = 32;
+  const PatchData p = source->Fetch(req);
+  REQUIRE_FALSE(empty(p));
+  // 200 (the "-cycle" tag's flat height), not 100 (the "-step" tag's) --
+  // the whole point of the fix.
+  CHECK(p.height.at(16, 16) == Catch::Approx(200.0f).margin(1e-3));
+}
+
+TEST_CASE(
+    "CoarseWorldPatchSource: an empty tag with no cycles in the manifest "
+    "still falls back to the numeric-then-lexical scan",
+    "[patch]") {
+  // The pre-fix behaviour must survive for manifests with no phase-1
+  // provenance (predating it, or a genuinely phase-0-only run) -- both read
+  // `cycles == 0`, which is the "there is no phase-1 snapshot to prefer"
+  // case the fix's own comment carves out.
+  TempDir dir("cycles_absent_fallback");
+  write_flat_tagged_world(dir.str(), 32, 512.0f, /*cycles=*/0, "0001-step",
+                          /*flat_height_m=*/100.0f);
+  // A second, numerically LATER step tag -- FindLatestTag's numeric compare
+  // must still pick this one over "0001-step".
+  {
+    const int res = 32;
+    const size_t count = static_cast<size_t>(res) * res;
+    std::vector<float> height(count, 300.0f), water(count, 0.0f), soil(count, 2.0f);
+    write_raw(dir.str() + "/0002-step-height.f32", height);
+    write_raw(dir.str() + "/0002-step-water.f32", water);
+    write_raw(dir.str() + "/0002-step-soil.f32", soil);
+  }
+
+  std::string err;
+  auto source = LoadCoarseWorldPatchSource(dir.str(), "", &err);
+  REQUIRE(source != nullptr);
+  CHECK(err.empty());
+
+  PatchRequest req;
+  req.origin_m = glm::dvec2(0.0, 0.0);
+  req.world_size_m = 512.0f;
+  req.resolution = 32;
+  const PatchData p = source->Fetch(req);
+  REQUIRE_FALSE(empty(p));
+  CHECK(p.height.at(16, 16) == Catch::Approx(300.0f).margin(1e-3));
+}
