@@ -10,6 +10,7 @@
 #include "camera.h"
 #include "camera_controller.h"
 #include "gizmo.h"
+#include "history.h"
 #include "navigation.h"
 #include "picking.h"
 #include "rhi_renderer.h"
@@ -91,7 +92,28 @@ struct Editor::Impl {
     void markSceneLinesDirty() {
         if (renderer) renderer->set_scene_lines_dirty();
     }
+
+    // Restores a replayed entry. The hover pointed at a gizmo belonging to a
+    // document that no longer exists; the app re-derives it from the cursor on
+    // the next mouse move.
+    void applyHistoryEntry(const Entry& entry) {
+        selected = entry.selected;
+        hover = GizmoHit{GizmoSlot::Placement, GizmoHandle::None};
+        markSceneLinesDirty();
+    }
+
+    // Unwinds however many interaction levels the app left open. A loop rather
+    // than a single call because the boundaries are refcounted and nesting is
+    // legal.
+    void closeOpenInteractions() {
+        while (history.in_interaction()) {
+            history.end_interaction(scene, selected);
+        }
+    }
     SceneDocument scene;
+    // Seeded from the scene as it stands at construction (empty), so entry 0 is
+    // a real starting point and undo always has somewhere to land.
+    History history{SceneDocument{}, kInvalidNode};
     CameraController controller;
     float viewportWidthPts = 0.0f;  // for pick()'s ray_through_view_point
     float viewportHeightPts = 0.0f; // for the camera gestures, gizmo picking and pick()
@@ -505,6 +527,70 @@ void Editor::deleteSelectedNode() {
     // impl_->scene.find(impl_->selected), which is null once selected is
     // kInvalidNode, regardless of gizmo_visible — no separate flag to clear.
     impl_->markSceneLinesDirty();
+}
+
+// --- interactions and history ----------------------------------------------
+
+void Editor::beginInteraction(const char* label) {
+    impl_->history.begin_interaction(label != nullptr ? label : "", impl_->scene);
+}
+
+void Editor::endInteraction() {
+    impl_->history.end_interaction(impl_->scene, impl_->selected);
+}
+
+// An active drag holds a captured GizmoFrame and start_* values belonging to
+// the document state about to be discarded, so the gesture ends BEFORE anything
+// is restored. Closing any open interaction matters just as much: the app's
+// matching endInteraction would otherwise decompose the RESTORED document
+// against a baseline from a timeline that no longer exists, recording the undo
+// itself as an edit.
+void Editor::undo() {
+    endDrag();
+    impl_->closeOpenInteractions();
+    if (const std::optional<Entry> entry = impl_->history.undo(impl_->scene)) {
+        impl_->applyHistoryEntry(*entry);
+    }
+}
+
+void Editor::redo() {
+    endDrag();
+    impl_->closeOpenInteractions();
+    if (const std::optional<Entry> entry = impl_->history.redo(impl_->scene)) {
+        impl_->applyHistoryEntry(*entry);
+    }
+}
+
+bool Editor::canUndo() const { return impl_->history.can_undo(); }
+bool Editor::canRedo() const { return impl_->history.can_redo(); }
+
+namespace {
+
+// The NUL-terminated fill nodeName established, shared by both label getters.
+void fillLabel(const std::string& text, char* buf, int32_t bufLen) {
+    if (buf == nullptr || bufLen <= 0) {
+        return;
+    }
+    const int32_t n = std::min<int32_t>(bufLen - 1, static_cast<int32_t>(text.size()));
+    if (n > 0) {
+        std::memcpy(buf, text.data(), static_cast<size_t>(n));
+    }
+    buf[n] = '\0';
+}
+
+} // namespace
+
+void Editor::undoLabel(char* buf, int32_t bufLen) const {
+    fillLabel(impl_->history.undo_label(), buf, bufLen);
+}
+
+void Editor::redoLabel(char* buf, int32_t bufLen) const {
+    fillLabel(impl_->history.redo_label(), buf, bufLen);
+}
+
+GizmoHit Editor::activeDragHandle() const {
+    return impl_->drag.active ? GizmoHit{impl_->drag.slot, impl_->drag.handle}
+                              : GizmoHit{GizmoSlot::Placement, GizmoHandle::None};
 }
 
 void Editor::nodeName(int32_t nodeId, char* buf, int32_t bufLen) const {

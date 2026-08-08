@@ -181,9 +181,51 @@ public:
     // spawning (creates node, selects it, refreshes line colors)
     SpawnResult spawn(Shape shape, Op op, float x, float y);   // view points, top-left origin
 
-    // deletes the selected node (permanent, no undo); no-op without a
-    // selection; clears selection and refreshes line colors
+    // deletes the selected node; no-op without a selection; clears selection
+    // and refreshes line colors. Undoable like every other edit, provided the
+    // caller brackets it in an interaction (see below).
     void deleteSelectedNode();
+
+    // --- interactions and history ------------------------------------------
+    //
+    // An INTERACTION is a user gesture, and the unit of undo. THE APP DECLARES
+    // EVERY BOUNDARY, uniformly -- a drag, a dial turn, a click that spawns, a
+    // key that deletes -- because the app is what owns gestures. Core decides
+    // none of them, and beginDrag/endDrag are about GIZMO STATE only; they
+    // touch history not at all.
+    //
+    // Everything mutated between the outermost begin and end becomes ONE undo
+    // entry. The intermediate states a drag writes are temporary and are never
+    // recorded: at endInteraction the live document is decomposed against the
+    // baseline captured at begin, so what lands is the gesture's net result
+    // rather than the path the cursor took.
+    //
+    // Refcounted, so a nested pair cannot split one gesture in two. An
+    // interaction that changes nothing leaves no entry, which is what makes a
+    // click that merely selects, and a dial press that turns nothing, free.
+    //
+    // `label` is what the Edit menu shows ("Move", "Delete"). Not copied beyond
+    // the call.
+    void beginInteraction(const char* label);
+    void endInteraction();
+
+    void undo();
+    void redo();
+    bool canUndo() const;
+    bool canRedo() const;
+    // NUL-terminated fill, "" when there is nothing to undo/redo -- the same
+    // contract nodeName follows.
+    void undoLabel(char* buf, int32_t bufLen) const;
+    void redoLabel(char* buf, int32_t bufLen) const;
+
+    // Which handle the running drag grabbed, so the app can name the
+    // interaction "Move" / "Rotate" / "Scale" without guessing. `.handle` is
+    // None when no drag is active.
+    //
+    // Safe to call right after a successful beginDrag: that call captures gizmo
+    // state and mutates the document not at all, so opening the interaction
+    // AFTER it still brackets every edit the gesture makes.
+    GizmoHit activeDragHandle() const;
 
     // Manipulators — core owns all gizmo math. beginDrag hit-tests BOTH gizmos
     // and returns whether a drag activated; off-handle presses return false,

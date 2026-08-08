@@ -570,3 +570,220 @@ TEST_CASE("undo and redo at the ends return nullopt and touch nothing") {
     CHECK_FALSE(history.redo(doc).has_value());
     CHECK(doc.nodes().size() == 1);
 }
+
+// --- Editor-level: interactions as the app will drive them -------------------
+//
+// Headless, no device: every path below is spawn/select/drag arithmetic, which
+// the editor supports with no renderer at all.
+
+namespace {
+
+// A viewport and a camera aimed down -Z at the origin, matching drag_tests.
+sq::Editor* editor_with_viewport() {
+    sq::Editor* editor = sq::Editor::create();
+    editor->setViewportSize(800.0f, 600.0f, 2.0f);
+    return editor;
+}
+
+std::string label_of(void (sq::Editor::*getter)(char*, int32_t) const, const sq::Editor& editor) {
+    char buf[64] = {};
+    (editor.*getter)(buf, 64);
+    return std::string(buf);
+}
+
+} // namespace
+
+TEST_CASE("Editor: a spawn inside an interaction is one undo step") {
+    sq::Editor* editor = editor_with_viewport();
+
+    editor->beginInteraction("Spawn");
+    const SpawnResult spawned = editor->spawn(Shape::Cube, Op::Add, 400.0f, 300.0f);
+    editor->endInteraction();
+    REQUIRE(spawned.node_id != kInvalidNode);
+    REQUIRE(editor->canUndo());
+
+    editor->undo();
+    CHECK(editor->selectedNode() == kInvalidNode);
+    CHECK_FALSE(editor->canUndo());
+    CHECK(editor->canRedo());
+}
+
+TEST_CASE("Editor: a drag gesture produces exactly one undo entry") {
+    sq::Editor* editor = editor_with_viewport();
+    editor->beginInteraction("Spawn");
+    const SpawnResult spawned = editor->spawn(Shape::Cube, Op::Add, 400.0f, 300.0f);
+    editor->endInteraction();
+    REQUIRE(spawned.node_id != kInvalidNode);
+    editor->setGizmoVisible(true);
+
+    const Vec3f before = editor->nodePosition(spawned.node_id);
+
+    // Grab the gizmo's Y axis and drag it. The exact handle does not matter --
+    // what matters is that twenty updates make one entry.
+    const ScreenPoint anchor = editor->projectSelectedAnchor();
+    REQUIRE(anchor.visible);
+    bool grabbed = false;
+    float grab_y = 0.0f;
+    for (float dy = 10.0f; dy < 160.0f && !grabbed; dy += 2.0f) {
+        if (editor->beginDrag(anchor.x, anchor.y - dy)) {
+            grabbed = true;
+            grab_y = anchor.y - dy;
+        }
+    }
+    REQUIRE(grabbed);
+
+    editor->beginInteraction("Move");
+    for (int i = 1; i <= 20; ++i) {
+        editor->updateDrag(anchor.x, grab_y - float(i));
+    }
+    editor->endDrag();
+    editor->endInteraction();
+
+    const Vec3f after = editor->nodePosition(spawned.node_id);
+    REQUIRE(after.y != before.y); // the drag actually did something
+
+    editor->undo();
+    const Vec3f restored = editor->nodePosition(spawned.node_id);
+    CHECK(restored.y == doctest::Approx(before.y));
+    // ONE entry for the whole gesture: the next undo is the spawn.
+    CHECK(editor->canUndo());
+    CHECK(label_of(&sq::Editor::undoLabel, *editor) == "Spawn");
+}
+
+TEST_CASE("Editor: an interaction that only selects leaves no entry") {
+    sq::Editor* editor = editor_with_viewport();
+    editor->beginInteraction("Spawn");
+    editor->spawn(Shape::Cube, Op::Add, 400.0f, 300.0f);
+    editor->endInteraction();
+
+    editor->beginInteraction("Select");
+    editor->select(kInvalidNode);
+    editor->endInteraction();
+
+    // Selection is not a document edit, so undo goes straight past it.
+    CHECK(label_of(&sq::Editor::undoLabel, *editor) == "Spawn");
+}
+
+TEST_CASE("Editor: undo after delete restores the node and the selection") {
+    sq::Editor* editor = editor_with_viewport();
+    editor->beginInteraction("Spawn");
+    const SpawnResult spawned = editor->spawn(Shape::Cube, Op::Add, 400.0f, 300.0f);
+    editor->endInteraction();
+    REQUIRE(editor->selectedNode() == spawned.node_id);
+
+    editor->beginInteraction("Delete");
+    editor->deleteSelectedNode();
+    editor->endInteraction();
+    REQUIRE(editor->selectedNode() == kInvalidNode);
+
+    editor->undo();
+    CHECK(editor->selectedNode() == spawned.node_id); // back, and SELECTED
+}
+
+TEST_CASE("Editor: labels drive the Edit menu") {
+    sq::Editor* editor = editor_with_viewport();
+    CHECK(label_of(&sq::Editor::undoLabel, *editor).empty());
+    CHECK(label_of(&sq::Editor::redoLabel, *editor).empty());
+
+    editor->beginInteraction("Spawn");
+    editor->spawn(Shape::Cube, Op::Add, 400.0f, 300.0f);
+    editor->endInteraction();
+
+    CHECK(label_of(&sq::Editor::undoLabel, *editor) == "Spawn");
+    CHECK(label_of(&sq::Editor::redoLabel, *editor).empty());
+    editor->undo();
+    CHECK(label_of(&sq::Editor::undoLabel, *editor).empty());
+    CHECK(label_of(&sq::Editor::redoLabel, *editor) == "Spawn");
+}
+
+TEST_CASE("Editor: nested interactions are one entry") {
+    sq::Editor* editor = editor_with_viewport();
+
+    editor->beginInteraction("Outer");
+    editor->spawn(Shape::Cube, Op::Add, 400.0f, 300.0f);
+    editor->beginInteraction("Inner");
+    editor->spawn(Shape::Sphere, Op::Add, 200.0f, 200.0f);
+    editor->endInteraction();
+    editor->endInteraction();
+
+    editor->undo();
+    CHECK(editor->selectedNode() == kInvalidNode);
+    CHECK_FALSE(editor->canUndo()); // BOTH spawns went together
+}
+
+// The hazard the plan named: Impl::drag captures a GizmoFrame and start_*
+// values belonging to a document state undo is about to discard.
+TEST_CASE("Editor: undo mid-gesture ends the drag rather than applying stale state") {
+    sq::Editor* editor = editor_with_viewport();
+    editor->beginInteraction("Spawn");
+    const SpawnResult spawned = editor->spawn(Shape::Cube, Op::Add, 400.0f, 300.0f);
+    editor->endInteraction();
+    editor->setGizmoVisible(true);
+
+    const ScreenPoint anchor = editor->projectSelectedAnchor();
+    REQUIRE(anchor.visible);
+    bool grabbed = false;
+    float grab_y = 0.0f;
+    for (float dy = 10.0f; dy < 160.0f && !grabbed; dy += 2.0f) {
+        if (editor->beginDrag(anchor.x, anchor.y - dy)) {
+            grabbed = true;
+            grab_y = anchor.y - dy;
+        }
+    }
+    REQUIRE(grabbed);
+
+    editor->beginInteraction("Move");
+    editor->updateDrag(anchor.x, grab_y - 20.0f);
+    editor->undo(); // mid-gesture
+
+    // The drag is over; further updates must not move anything.
+    const Vec3f after_undo = editor->nodePosition(spawned.node_id);
+    editor->updateDrag(anchor.x, grab_y - 200.0f);
+    const Vec3f after_stale = editor->nodePosition(spawned.node_id);
+    CHECK(after_stale.x == doctest::Approx(after_undo.x));
+    CHECK(after_stale.y == doctest::Approx(after_undo.y));
+    CHECK(after_stale.z == doctest::Approx(after_undo.z));
+}
+
+TEST_CASE("Editor: activeDragHandle reports None with no drag running") {
+    sq::Editor* editor = editor_with_viewport();
+    CHECK(editor->activeDragHandle().handle == GizmoHandle::None);
+}
+
+TEST_CASE("Editor: an op toggle round-trips through undo") {
+    sq::Editor* editor = editor_with_viewport();
+    editor->beginInteraction("Spawn");
+    const SpawnResult spawned = editor->spawn(Shape::Cube, Op::Add, 400.0f, 300.0f);
+    editor->endInteraction();
+
+    editor->beginInteraction("Change Op");
+    editor->setNodeOp(spawned.node_id, Op::Subtract);
+    editor->endInteraction();
+    REQUIRE(editor->nodeOp(spawned.node_id) == Op::Subtract);
+
+    editor->undo();
+    CHECK(editor->nodeOp(spawned.node_id) == Op::Add);
+    editor->redo();
+    CHECK(editor->nodeOp(spawned.node_id) == Op::Subtract);
+}
+
+// The dial fires setNodeShapeParam per mouse-move; the interaction is what
+// collapses the whole turn into one step.
+TEST_CASE("Editor: a dial turn is one undo entry") {
+    sq::Editor* editor = editor_with_viewport();
+    editor->beginInteraction("Spawn");
+    const SpawnResult spawned = editor->spawn(Shape::Cube, Op::Add, 400.0f, 300.0f);
+    editor->endInteraction();
+    const float before = editor->nodeShapeParam(spawned.node_id);
+
+    editor->beginInteraction("Shape");
+    for (int i = 1; i <= 10; ++i) {
+        editor->setNodeShapeParam(spawned.node_id, float(i) * 0.1f);
+    }
+    editor->endInteraction();
+    REQUIRE(editor->nodeShapeParam(spawned.node_id) != before);
+
+    editor->undo();
+    CHECK(editor->nodeShapeParam(spawned.node_id) == doctest::Approx(before));
+    CHECK(label_of(&sq::Editor::undoLabel, *editor) == "Spawn"); // ten calls, ONE entry
+}
