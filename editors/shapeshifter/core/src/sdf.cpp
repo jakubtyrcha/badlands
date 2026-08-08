@@ -52,6 +52,13 @@ void pack_scene(const SceneDocument& doc, std::vector<SdfNode>& out) {
     out.reserve(count); // no-op once out's capacity already covers count
     for (size_t i = 0; i < count; ++i) {
         const Node& node = nodes[i];
+        // A Group carries a frame, not geometry. Skipped rather than packed
+        // with a zero extent, because sdf_eval_node floors half-extents at
+        // SDF_MIN_HALF_EXTENT -- so a "zero-size" node would render as a speck
+        // and, if it were a Subtract, quietly punch a hole.
+        if (node.kind != NodeKind::Shape) {
+            continue;
+        }
         // WHERE the node is comes from the document, never from the node's own
         // fields. Frame is position + rotation + one uniform scalar by
         // construction, so what lands in an SdfNode below is representable no
@@ -105,15 +112,22 @@ struct Aabb {
 // the cube, loosely for the rest), which is what the cross-section contraction
 // in sdf_eval_node guarantees. Rotation is NOT accounted for -- a pre-existing
 // looseness, and the reason this is only used by the dormant DCSDD sampler.
+// Over SHAPE nodes only: a Group has no box, and folding its zero extent in at
+// its own origin would drag the bound out to wherever the frame happens to sit.
+// `first` tracks whether anything has been folded yet, since the first shape is
+// not necessarily nodes[0].
 Aabb scene_aabb(const SceneDocument& doc) {
-    const std::vector<Node>& nodes = doc.nodes();
-    const NodePlacement first = doc.placement(nodes[0].id);
-    Aabb box{first.frame.position - first.half_extents,
-             first.frame.position + first.half_extents};
-    for (size_t i = 1; i < nodes.size(); ++i) {
-        const NodePlacement p = doc.placement(nodes[i].id);
-        box.min = simd_min(box.min, p.frame.position - p.half_extents);
-        box.max = simd_max(box.max, p.frame.position + p.half_extents);
+    Aabb box{};
+    bool first = true;
+    for (const Node& node : doc.nodes()) {
+        if (node.kind != NodeKind::Shape) {
+            continue;
+        }
+        const NodePlacement p = doc.placement(node.id);
+        const simd_float3 lo = p.frame.position - p.half_extents;
+        const simd_float3 hi = p.frame.position + p.half_extents;
+        box = first ? Aabb{lo, hi} : Aabb{simd_min(box.min, lo), simd_max(box.max, hi)};
+        first = false;
     }
     return box;
 }

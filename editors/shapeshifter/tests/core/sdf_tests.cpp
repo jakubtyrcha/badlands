@@ -131,7 +131,7 @@ TEST_CASE("evaluate_scene_sdf: two overlapping Add spheres combine via min") {
     a.id = 1;
     a.shape = Shape::Sphere;
     a.op = Op::Add;
-    a.position = {0.0f, 0.0f, 0.0f};
+    a.local_position = {0.0f, 0.0f, 0.0f};
     a.scale = {2.0f, 2.0f, 2.0f};
     doc.add(a);
 
@@ -139,7 +139,7 @@ TEST_CASE("evaluate_scene_sdf: two overlapping Add spheres combine via min") {
     b.id = 2;
     b.shape = Shape::Sphere;
     b.op = Op::Add;
-    b.position = {1.0f, 0.0f, 0.0f};
+    b.local_position = {1.0f, 0.0f, 0.0f};
     b.scale = {2.0f, 2.0f, 2.0f};
     doc.add(b);
 
@@ -177,14 +177,14 @@ TEST_CASE("evaluate_scene_sdf: Add sphere then Subtract box carves the box out; 
     sphere.id = 1;
     sphere.shape = Shape::Sphere;
     sphere.op = Op::Add;
-    sphere.position = {0.0f, 0.0f, 0.0f};
+    sphere.local_position = {0.0f, 0.0f, 0.0f};
     sphere.scale = {4.0f, 4.0f, 4.0f};
 
     Node box;
     box.id = 2;
     box.shape = Shape::Cube;
     box.op = Op::Subtract;
-    box.position = {1.0f, 0.0f, 0.0f};
+    box.local_position = {1.0f, 0.0f, 0.0f};
     box.scale = {2.0f, 2.0f, 2.0f};
 
     SUBCASE("Add sphere, then Subtract box: carved region reads positive (outside)") {
@@ -236,9 +236,9 @@ TEST_CASE("evaluate_scene_sdf: a rotated box is measured in its own frame") {
     box.id = 1;
     box.shape = Shape::Cube;
     box.op = Op::Add;
-    box.position = {0.0f, 0.0f, 0.0f};
+    box.local_position = {0.0f, 0.0f, 0.0f};
     box.scale = {2.0f, 1.0f, 6.0f};
-    box.rotation = simd_quaternion(static_cast<float>(M_PI_4), simd_float3{0.0f, 1.0f, 0.0f});
+    box.local_rotation = simd_quaternion(static_cast<float>(M_PI_4), simd_float3{0.0f, 1.0f, 0.0f});
     doc.add(box);
 
     struct Case { simd_float3 p; float expected; float blind; };
@@ -269,9 +269,9 @@ TEST_CASE("evaluate_scene_sdf: a rotated ellipsoid is measured in its own frame"
     ellipsoid.id = 1;
     ellipsoid.shape = Shape::Sphere;
     ellipsoid.op = Op::Add;
-    ellipsoid.position = {0.0f, 0.0f, 0.0f};
+    ellipsoid.local_position = {0.0f, 0.0f, 0.0f};
     ellipsoid.scale = {1.0f, 3.0f, 2.0f}; // radii = (0.5, 1.5, 1.0)
-    ellipsoid.rotation =
+    ellipsoid.local_rotation =
         simd_quaternion(0.7f, simd_normalize(simd_float3{1.0f, 2.0f, 3.0f}));
     doc.add(ellipsoid);
 
@@ -298,10 +298,10 @@ TEST_CASE("evaluate_scene_sdf: identity rotation is exactly the unrotated result
     Node n;
     n.id = 1;
     n.shape = Shape::Cube;
-    n.position = {0.5f, -1.0f, 2.0f};
+    n.local_position = {0.5f, -1.0f, 2.0f};
     n.scale = {2.0f, 4.0f, 6.0f};
     plain.add(n);
-    n.rotation = simd_quaternion(0.0f, simd_float3{0.0f, 1.0f, 0.0f}); // explicit identity
+    n.local_rotation = simd_quaternion(0.0f, simd_float3{0.0f, 1.0f, 0.0f}); // explicit identity
     rotated.add(n);
 
     const simd_float3 probe = {1.25f, 0.5f, 3.0f};
@@ -326,7 +326,7 @@ TEST_CASE("evaluate_scene_sdf: a 129-node document evaluates ALL nodes, includin
         // Spaced 10 apart (half-extent 0.5 each): no two nodes' influence
         // overlaps, so a probe at one node's center is unambiguously inside
         // ONLY that node.
-        n.position = {static_cast<float>(i) * 10.0f, 0.0f, 0.0f};
+        n.local_position = {static_cast<float>(i) * 10.0f, 0.0f, 0.0f};
         n.scale = {1.0f, 1.0f, 1.0f};
         doc.add(n);
     }
@@ -378,14 +378,14 @@ TEST_CASE("sample_scene: pinned two-node scene -> expected AABB-derived cube sid
     Node n1;
     n1.id = 1;
     n1.shape = Shape::Cube;
-    n1.position = {0.0f, 0.0f, 0.0f};
+    n1.local_position = {0.0f, 0.0f, 0.0f};
     n1.scale = {2.0f, 2.0f, 2.0f};
     doc.add(n1);
 
     Node n2;
     n2.id = 2;
     n2.shape = Shape::Sphere;
-    n2.position = {3.0f, 1.0f, 0.0f};
+    n2.local_position = {3.0f, 1.0f, 0.0f};
     n2.scale = {1.0f, 4.0f, 1.0f};
     doc.add(n2);
 
@@ -438,7 +438,7 @@ TEST_CASE("sample_scene: flat index<->(x,y,z) is the documented x-fastest biject
     Node node;
     node.id = 1;
     node.shape = Shape::Sphere;
-    node.position = {1.0f, 0.0f, 0.0f};
+    node.local_position = {1.0f, 0.0f, 0.0f};
     node.scale = {1.0f, 1.0f, 1.0f};
     doc.add(node);
 

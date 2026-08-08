@@ -64,6 +64,17 @@ struct NodePlacement {
 // it is stopped here rather than re-established per node per frame.
 Frame compose(const Frame& parent, const Frame& local);
 
+// A POINT through a frame: rotated, scaled, and translated. Exactly what
+// compose does to a child's local position, factored out so the contact point --
+// which rides its PARENT's frame rather than the node's own -- cannot drift from
+// the rule the transform chain uses.
+simd_float3 transform_point(const Frame& f, simd_float3 p);
+
+// A DIRECTION through a frame: rotated only. No translation, and no scale
+// either, so a unit normal stays unit -- which the contact normal must, since
+// the gizmo builds a tangent basis from it.
+simd_float3 transform_direction(const Frame& f, simd_float3 d);
+
 // The inverse of compose: the local frame that, composed with `parent`, yields
 // `world`. What attach() solves to keep a node's world pose while changing
 // whose frame its transform is expressed in.

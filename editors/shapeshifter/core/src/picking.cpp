@@ -119,6 +119,9 @@ std::optional<RayHit> raycast_node(const Node& node, const NodePlacement& placem
 std::optional<PickHit> raycast_scene(const SceneDocument& doc, const Ray& world) {
     std::optional<PickHit> best;
     for (const Node& node : doc.nodes()) {
+        if (node.kind != NodeKind::Shape) {
+            continue; // a Group is a frame, not a surface: nothing to hit
+        }
         const std::optional<RayHit> hit = raycast_node(node, doc.placement(node.id), world);
         if (hit && (!best || hit->t < best->hit.t)) {
             best = PickHit{node.id, *hit};

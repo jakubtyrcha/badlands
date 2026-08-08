@@ -89,12 +89,12 @@ TEST_CASE("SceneDocument::spawn_snapped: the node is CENTRED on the surface, not
     // position == hit. This used to be hit + normal * 0.5, which left the
     // shape sitting on top of its parent instead of half-embedded in it, and
     // put the node's centre permanently half a unit off its own snap point.
-    check_float3_approx(node->position, hit);
-    check_float3_approx(node->position, node->snap_point); // the coincidence the gizmos rely on
-    CHECK(node->snapped == true);
-    check_float3_approx(node->snap_point, hit);
-    check_float3_approx(node->snap_normal, normal);
-    CHECK(node->snap_parent == 7);
+    check_float3_approx(node->local_position, hit);
+    check_float3_approx(node->local_position, node->contact.point); // the coincidence the gizmos rely on
+    CHECK(node->contact.valid == true);
+    check_float3_approx(node->contact.point, hit);
+    check_float3_approx(node->contact.normal, normal);
+    CHECK(node->contact.surface == 7);
 }
 
 TEST_CASE("SceneDocument::spawn_snapped: an oblique normal does not displace the node either") {
@@ -109,11 +109,11 @@ TEST_CASE("SceneDocument::spawn_snapped: an oblique normal does not displace the
     const Node* node = doc.find(id);
     REQUIRE(node != nullptr);
 
-    check_float3_approx(node->position, hit);
-    CHECK(node->snapped == true);
-    check_float3_approx(node->snap_point, hit);
-    check_float3_approx(node->snap_normal, normal);
-    CHECK(node->snap_parent == 3);
+    check_float3_approx(node->local_position, hit);
+    CHECK(node->contact.valid == true);
+    check_float3_approx(node->contact.point, hit);
+    check_float3_approx(node->contact.normal, normal);
+    CHECK(node->contact.surface == 3);
 }
 
 // --- spawn_unsnapped ---------------------------------------------------------
@@ -127,9 +127,9 @@ TEST_CASE("SceneDocument::spawn_unsnapped: position passed through unmodified, n
     const Node* node = doc.find(id);
     REQUIRE(node != nullptr);
 
-    check_float3_approx(node->position, position);
-    CHECK(node->snapped == false);
-    CHECK(node->snap_parent == kInvalidNode);
+    check_float3_approx(node->local_position, position);
+    CHECK(node->contact.valid == false);
+    CHECK(node->contact.surface == kInvalidNode);
 }
 
 // --- remove_node -------------------------------------------------------------
@@ -175,25 +175,25 @@ TEST_CASE("SceneDocument::remove_node: survivors snapped onto the removed node h
     const int32_t a = doc.spawn_unsnapped(Shape::Cube, Op::Add, {0.0f, 0.0f, 0.0f});
     const simd_float3 normal = {1.0f, 0.0f, 0.0f};
     const int32_t b = doc.spawn_snapped(Shape::Sphere, Op::Add, {0.5f, 0.0f, 0.0f}, normal, a);
-    REQUIRE(doc.find(b)->snapped == true);
-    REQUIRE(doc.find(b)->snap_parent == a);
+    REQUIRE(doc.find(b)->contact.valid == true);
+    REQUIRE(doc.find(b)->contact.surface == a);
 
     // Unrelated snapped pair (C onto D) that must survive A's removal untouched.
     const int32_t d = doc.spawn_unsnapped(Shape::Cube, Op::Add, {5.0f, 0.0f, 0.0f});
     const int32_t c = doc.spawn_snapped(Shape::Sphere, Op::Add, {5.5f, 0.0f, 0.0f}, normal, d);
-    REQUIRE(doc.find(c)->snapped == true);
-    REQUIRE(doc.find(c)->snap_parent == d);
+    REQUIRE(doc.find(c)->contact.valid == true);
+    REQUIRE(doc.find(c)->contact.surface == d);
 
     doc.remove_node(a);
 
     REQUIRE(doc.find(b) != nullptr);
-    CHECK(doc.find(b)->snapped == false);
-    CHECK(doc.find(b)->snap_parent == kInvalidNode);
+    CHECK(doc.find(b)->contact.valid == false);
+    CHECK(doc.find(b)->contact.surface == kInvalidNode);
 
     // Unrelated pair (C/D) untouched by A's removal.
     REQUIRE(doc.find(c) != nullptr);
-    CHECK(doc.find(c)->snapped == true);
-    CHECK(doc.find(c)->snap_parent == d);
+    CHECK(doc.find(c)->contact.valid == true);
+    CHECK(doc.find(c)->contact.surface == d);
 }
 
 TEST_CASE("SceneDocument::remove_node: per-shape name counters continue after removal, never reused") {
@@ -483,8 +483,8 @@ TEST_CASE("placement carries a node's rotation and non-uniform scale") {
     Node n;
     n.id = 7;
     n.shape = Shape::Cube;
-    n.position = simd_float3{0, 1, 0};
-    n.rotation = simd_quaternion(float(M_PI_2), simd_float3{0, 1, 0});
+    n.local_position = simd_float3{0, 1, 0};
+    n.local_rotation = simd_quaternion(float(M_PI_2), simd_float3{0, 1, 0});
     n.scale = simd_float3{2, 4, 8};
     doc.add(n);
 
@@ -528,7 +528,7 @@ TEST_CASE("placement's contact does not follow the node's position") {
     const int32_t base = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
     const int32_t detail = doc.spawn_snapped(Shape::Sphere, Op::Add, simd_float3{0, 0.5f, 0},
                                              simd_float3{0, 1, 0}, base);
-    doc.find(detail)->position = simd_float3{0, 3, 0};
+    doc.find(detail)->local_position = simd_float3{0, 3, 0};
 
     const NodePlacement p = doc.placement(detail);
     check_float3_approx(p.frame.position, simd_float3{0, 3, 0});

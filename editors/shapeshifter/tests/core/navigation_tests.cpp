@@ -23,7 +23,7 @@ Node make_sphere(int32_t id, simd_float3 position, simd_float3 scale) {
     Node node;
     node.id = id;
     node.shape = Shape::Sphere;
-    node.position = position;
+    node.local_position = position;
     node.scale = scale;
     return node;
 }

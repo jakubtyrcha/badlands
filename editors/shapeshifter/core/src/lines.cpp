@@ -683,6 +683,9 @@ void append_pivot_crosshair(std::vector<LineVertex>& out, simd_float3 center, fl
 std::vector<LineVertex> build_scene_lines(const SceneDocument& doc, int32_t selected_id, simd_float3 eye_world) {
     std::vector<LineVertex> out;
     for (const Node& node : doc.nodes()) {
+        if (node.kind != NodeKind::Shape) {
+            continue; // a Group has no box to outline
+        }
         simd_float4 color;
         if (node.id == selected_id) {
             color = kColorSelected; // selected override always wins, either op

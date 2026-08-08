@@ -46,10 +46,10 @@ Camera editor_test_camera() {
 GizmoFrame frame_for(Editor* editor, int32_t node_id, bool snapped,
                      simd_float3 snap_point = {}, simd_float3 snap_normal = {0.0f, 1.0f, 0.0f}) {
     Node stub;
-    stub.position = to_simd(editor->nodePosition(node_id));
-    stub.snapped = snapped;
-    stub.snap_point = snap_point;
-    stub.snap_normal = snap_normal;
+    stub.local_position = to_simd(editor->nodePosition(node_id));
+    stub.contact.valid = snapped;
+    stub.contact.point = snap_point;
+    stub.contact.normal = snap_normal;
     return gizmo_frame_for_node(stub, editor_test_camera(), GizmoSlot::Placement);
 }
 

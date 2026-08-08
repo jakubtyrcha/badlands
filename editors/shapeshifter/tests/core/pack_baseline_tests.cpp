@@ -104,8 +104,8 @@ TEST_CASE("pack_scene pins the conjugate and non-uniform half-extents") {
     n.id = 1;
     n.shape = Shape::Cube;
     n.op = Op::Add;
-    n.position = simd_float3{0, 0, 0};
-    n.rotation = simd_quaternion(float(M_PI_2), simd_float3{0, 1, 0}); // +90 degrees about Y
+    n.local_position = simd_float3{0, 0, 0};
+    n.local_rotation = simd_quaternion(float(M_PI_2), simd_float3{0, 1, 0}); // +90 degrees about Y
     n.scale = simd_float3{2.0f, 1.0f, 0.5f};
     doc.add(n);
 

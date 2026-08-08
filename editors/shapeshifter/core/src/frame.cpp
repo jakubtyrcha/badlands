@@ -31,6 +31,14 @@ Frame compose(const Frame& parent, const Frame& local) {
     return out;
 }
 
+simd_float3 transform_point(const Frame& f, simd_float3 p) {
+    return f.position + simd_act(f.rotation, f.uniform_scale * p);
+}
+
+simd_float3 transform_direction(const Frame& f, simd_float3 d) {
+    return simd_act(f.rotation, d);
+}
+
 Frame relative_to(const Frame& parent, const Frame& world) {
     // simd_inverse rather than simd_conjugate: the two agree only for a unit
     // quaternion, and this is a public entry point that cannot assume its

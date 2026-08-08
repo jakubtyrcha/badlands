@@ -666,7 +666,7 @@ TEST_CASE("append_node_wireframe: every shape draws, and stays inside its own bo
         node.id = 1;
         node.shape = c.shape;
         node.shape_param = c.param;
-        node.position = position;
+        node.local_position = position;
         node.scale = scale;
 
         std::vector<LineVertex> lines;

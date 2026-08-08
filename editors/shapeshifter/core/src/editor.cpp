@@ -37,6 +37,38 @@ inline constexpr float kOriginMarkerHeight = 3.0f;       // world units
 inline constexpr float kOriginMarkerHalfWidthPts = 1.0f; // ~2pt shaft
 inline constexpr float kOriginPipHalfSizePts = 2.5f;
 
+namespace {
+
+// Stores a WORLD pose on a node.
+//
+// Every gizmo drag solves in world space -- the gizmo frame is world, the ray
+// is world, the plane and axis solutions are world -- but a node's transform is
+// stored relative to whatever it hangs off. This is the one place the two meet,
+// so no solver has to know which frame it is writing into.
+//
+// The conversion is exactly the identity for a world-rooted node, which is
+// every node today. That is the point: the drags become CORRECT under
+// parenting rather than accidentally correct only while the scene is flat.
+void set_world_pose(SceneDocument& scene, Node& node, simd_float3 position,
+                    simd_quatf rotation) {
+    Frame world;
+    world.position = position;
+    world.rotation = rotation;
+    // Scale is not what a move or a rotate changes, so the node's current
+    // resolved scale rides through and relative_to hands its own contribution
+    // back untouched.
+    world.uniform_scale = scene.placement(node.id).frame.uniform_scale;
+
+    const Frame local = relative_to(scene.parent_frame(node.id), world);
+    node.local_position = local.position;
+    // Renormalised because pack_scene conjugates rather than inverts, which is
+    // only the same thing for a unit quaternion (see sdf.cpp). relative_to
+    // already normalises; this states the precondition where it is stored.
+    node.local_rotation = simd_normalize(local.rotation);
+}
+
+} // namespace
+
 struct Editor::Impl {
     // The device, the shader compiler and the renderer are all created at
     // attachLayer, because a Metal device is only worth creating once there is
@@ -593,7 +625,9 @@ bool Editor::beginDrag(float x, float y) {
             return false; // edge-on or degenerate: the solver has no angle to offer
         }
         impl_->drag.start_ring_dir = *dir;
-        impl_->drag.start_rotation = node->rotation;
+        // WORLD, matching the frame the solver works in. set_world_pose puts
+        // the result back into whatever frame the node is stored in.
+        impl_->drag.start_rotation = impl_->scene.placement(node->id).frame.rotation;
     } else if (gizmo_handle_is_axis(handle)) {
         const std::optional<float> s = ray_axis_param(ray, frame.origin, gizmo_axis_dir(frame, handle));
         if (!s) {
@@ -612,7 +646,8 @@ bool Editor::beginDrag(float x, float y) {
     impl_->drag.slot = slot;
     impl_->drag.handle = handle;
     impl_->drag.start_y = y;
-    impl_->drag.start_pos = node->position;
+    impl_->drag.start_pos = impl_->scene.placement(node->id).frame.position; // WORLD, like the frame
+
     impl_->drag.node_id = node->id;
     impl_->drag.active = true;
     return true;
@@ -682,19 +717,16 @@ void Editor::updateDrag(float x, float y) {
         // price of an angle that cannot mis-count a winding on a fast flick.
         const float theta = signed_angle_about(impl_->drag.start_ring_dir, *dir, axis);
         const simd_quatf q = simd_quaternion(theta, axis);
-        // Renormalised because pack_scene conjugates rather than inverts, which
-        // is only the same thing for a unit quaternion (see sdf.cpp). This is
-        // the one place rotation is produced, so it is the one place that has
-        // to hold up the precondition.
-        node->rotation = simd_normalize(simd_mul(q, impl_->drag.start_rotation));
         // Swing the node AROUND the anchor rather than spinning it in place:
         // for an attached detail the anchor is its contact point, so this is
         // what keeps it touching the surface. A free node's anchor is its own
         // centre, making the second term zero -- one formula, both cases.
-        node->position = impl_->drag.frame.origin +
-                         simd_act(q, impl_->drag.start_pos - impl_->drag.frame.origin);
-        // snap_point and snap_normal are deliberately untouched: the surface
-        // did not move, and the contact point is what we just rotated about.
+        set_world_pose(impl_->scene, *node, impl_->drag.frame.origin +
+                                                simd_act(q, impl_->drag.start_pos -
+                                                                impl_->drag.frame.origin),
+                       simd_mul(q, impl_->drag.start_rotation));
+        // The contact is deliberately untouched: the surface did not move, and
+        // its point is what we just rotated about.
         impl_->markSceneLinesDirty();
         return;
     }
@@ -724,8 +756,9 @@ void Editor::updateDrag(float x, float y) {
         delta = *hit - impl_->drag.start_hit;
     }
 
-    node->position = impl_->drag.start_pos + delta;
-    // snap_point deliberately does NOT follow. The attachment point is a fact
+    set_world_pose(impl_->scene, *node, impl_->drag.start_pos + delta,
+                   impl_->scene.placement(node->id).frame.rotation);
+    // The contact deliberately does NOT follow. The attachment point is a fact
     // about the surface the detail was placed on, not about where the detail
     // has since been dragged to -- so pulling a node along its normal leaves
     // the attachment on the skin and opens a visible offset between the two
@@ -749,11 +782,11 @@ void Editor::endDrag() {
 }
 
 Vec3f Editor::nodePosition(int32_t nodeId) const {
-    const Node* node = impl_->scene.find(nodeId);
-    if (node == nullptr) {
-        return Vec3f{0.0f, 0.0f, 0.0f};
-    }
-    return Vec3f{node->position.x, node->position.y, node->position.z};
+    // WORLD, which is what a caller asking "where is this node" means. An
+    // unknown id needs no separate branch: placement's own miss case is a
+    // default frame, whose position is already the {0,0,0} this promises.
+    const simd_float3 p = impl_->scene.placement(nodeId).frame.position;
+    return Vec3f{p.x, p.y, p.z};
 }
 
 ScreenPoint Editor::projectSelectedAnchor() const {
@@ -768,7 +801,8 @@ ScreenPoint Editor::projectSelectedAnchor() const {
     // ViewPoint already returns {0,0,false} when the point is behind the
     // camera (clip.w <= 0), so this is a direct field-for-field mapping.
     const ViewPoint vp = impl_->controller.to_camera().project(
-        node->position, impl_->viewportWidthPts, impl_->viewportHeightPts);
+        impl_->scene.placement(node->id).frame.position, impl_->viewportWidthPts,
+        impl_->viewportHeightPts);
     return ScreenPoint{vp.x, vp.y, vp.visible};
 }
 
@@ -804,7 +838,7 @@ Vec4f Editor::nodeRotation(int32_t nodeId) const {
     if (node == nullptr) {
         return Vec4f{0.0f, 0.0f, 0.0f, 1.0f}; // identity, not zero: a zero quaternion is not a rotation
     }
-    const simd_float4 q = node->rotation.vector;
+    const simd_float4 q = impl_->scene.placement(node->id).frame.rotation.vector; // WORLD
     return Vec4f{q.x, q.y, q.z, q.w};
 }
 

@@ -76,7 +76,7 @@ TEST_CASE("pack_scene: 3-node document (cube add / sphere subtract / cube add, "
     n1.id = 1;
     n1.shape = Shape::Cube;
     n1.op = Op::Add;
-    n1.position = {1.0f, 2.0f, 3.0f};
+    n1.local_position = {1.0f, 2.0f, 3.0f};
     n1.scale = {2.0f, 4.0f, 6.0f}; // half = (1, 2, 3)
     doc.add(n1);
 
@@ -84,7 +84,7 @@ TEST_CASE("pack_scene: 3-node document (cube add / sphere subtract / cube add, "
     n2.id = 2;
     n2.shape = Shape::Sphere;
     n2.op = Op::Subtract;
-    n2.position = {-1.0f, 0.5f, 2.0f};
+    n2.local_position = {-1.0f, 0.5f, 2.0f};
     n2.scale = {1.0f, 3.0f, 5.0f}; // half = (0.5, 1.5, 2.5)
     doc.add(n2);
 
@@ -92,7 +92,7 @@ TEST_CASE("pack_scene: 3-node document (cube add / sphere subtract / cube add, "
     n3.id = 3;
     n3.shape = Shape::Cube;
     n3.op = Op::Add;
-    n3.position = {0.0f, 0.0f, 0.0f};
+    n3.local_position = {0.0f, 0.0f, 0.0f};
     n3.scale = {3.0f, 3.0f, 3.0f}; // half = (1.5, 1.5, 1.5)
     doc.add(n3);
 
@@ -135,17 +135,17 @@ TEST_CASE("pack_scene: inv_rotation is the CONJUGATE of the node's rotation, not
     n.id = 1;
     n.shape = Shape::Cube;
     n.scale = {1.0f, 1.0f, 1.0f};
-    n.rotation = simd_quaternion(0.5f, simd_normalize(simd_float3{1.0f, 2.0f, 3.0f}));
+    n.local_rotation = simd_quaternion(0.5f, simd_normalize(simd_float3{1.0f, 2.0f, 3.0f}));
     doc.add(n);
 
     const std::vector<SdfNode> packed = pack_scene(doc);
     REQUIRE(packed.size() == 1u);
 
-    const simd_float4 expected = simd_conjugate(n.rotation).vector;
+    const simd_float4 expected = simd_conjugate(n.local_rotation).vector;
     check_float3_approx(packed[0].inv_rotation.xyz, expected.xyz);
     CHECK(packed[0].inv_rotation.w == doctest::Approx(expected.w));
     // And it really is the opposite handedness from the rotation itself.
-    CHECK(packed[0].inv_rotation.x == doctest::Approx(-n.rotation.vector.x));
+    CHECK(packed[0].inv_rotation.x == doctest::Approx(-n.local_rotation.vector.x));
 }
 
 // --- pack_scene: no cap (fka >128-node cap) ---------------------------------
@@ -159,7 +159,7 @@ TEST_CASE("pack_scene: a 129-node document packs every node, in document order -
         n.id = i + 1;
         n.shape = Shape::Cube;
         n.op = Op::Add;
-        n.position = {static_cast<float>(i), 0.0f, 0.0f}; // x == spawn order, for identification
+        n.local_position = {static_cast<float>(i), 0.0f, 0.0f}; // x == spawn order, for identification
         n.scale = {1.0f, 1.0f, 1.0f};
         doc.add(n);
     }
@@ -183,7 +183,7 @@ TEST_CASE("pack_scene(doc, out): matches the return-by-value overload, and "
         n.id = i + 1;
         n.shape = Shape::Cube;
         n.op = Op::Add;
-        n.position = {static_cast<float>(i), 0.0f, 0.0f};
+        n.local_position = {static_cast<float>(i), 0.0f, 0.0f};
         n.scale = {1.0f, 1.0f, 1.0f};
         doc3.add(n);
     }
@@ -207,7 +207,7 @@ TEST_CASE("pack_scene(doc, out): matches the return-by-value overload, and "
     n1.id = 1;
     n1.shape = Shape::Sphere;
     n1.op = Op::Add;
-    n1.position = {9.0f, 9.0f, 9.0f};
+    n1.local_position = {9.0f, 9.0f, 9.0f};
     n1.scale = {2.0f, 2.0f, 2.0f};
     doc1.add(n1);
 

@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+#include <spdlog/spdlog.h>
+
 #include "math_util.h"
 
 namespace sq {
@@ -78,10 +80,6 @@ float snap_shape_param(const ShapeParamSpec& spec, float value) {
     return std::clamp(snapped, spec.min_value, spec.max_value);
 }
 
-simd_float4x4 Node::world_from_local() const {
-    return trs_matrix(position, rotation, scale);
-}
-
 Node* SceneDocument::find(int32_t id) {
     for (Node& node : nodes_) {
         if (node.id == id) return &node;
@@ -96,6 +94,73 @@ const Node* SceneDocument::find(int32_t id) const {
     return nullptr;
 }
 
+Frame SceneDocument::local_frame(const Node& node) const {
+    Frame f;
+    f.position = node.local_position;
+    f.rotation = node.local_rotation;
+    // THE PROPAGATION RULE, in one ternary. A Group contributes its uniform
+    // scale, which reaches every descendant's offset and box. A Shape
+    // contributes exactly 1, because its scale is the size of its own box and
+    // stretching a skull must not smear the horn attached to it.
+    f.uniform_scale = (node.kind == NodeKind::Group) ? node.scale.x : 1.0f;
+    return f;
+}
+
+Frame SceneDocument::resolve_parent_frame(const Node& node, bool& binding_resolved,
+                                          bool& cyclic) const {
+    binding_resolved = true;
+    cyclic = false;
+
+    // Walk UP collecting the chain, then compose DOWNWARD. Iterative rather
+    // than recursive so the cycle guard is a plain loop bound and a corrupt
+    // document cannot blow the stack.
+    const Node* chain[kMaxParentDepth];
+    int depth = 0;
+    for (const Node* cur = &node;;) {
+        if (cur->parent.kind == ParentRef::Kind::World) {
+            break;
+        }
+        if (cur->parent.kind == ParentRef::Kind::Attachment) {
+            // No FrameProvider is wired up yet, so an attachment-named parent
+            // cannot resolve and the node falls back to world-rooted. Reported
+            // rather than silent, so a later UI can say the binding is broken
+            // instead of leaving the node at the origin unexplained.
+            binding_resolved = false;
+            break;
+        }
+        const Node* parent = find(cur->parent.node);
+        if (parent == nullptr) {
+            break; // dangling parent id: fall back to world-rooted
+        }
+        if (depth >= kMaxParentDepth) {
+            // Only a cycle reaches this: attach() rejects them, so arriving here
+            // means parent fields were written directly. Reported to the caller
+            // rather than papered over, because a frame composed from half a
+            // cycle is worse than no frame at all.
+            cyclic = true;
+            return Frame{};
+        }
+        chain[depth++] = parent;
+        cur = parent;
+    }
+
+    Frame f;
+    for (int i = depth - 1; i >= 0; --i) {
+        f = compose(f, local_frame(*chain[i]));
+    }
+    return f;
+}
+
+Frame SceneDocument::parent_frame(int32_t id) const {
+    const Node* node = find(id);
+    if (node == nullptr) {
+        return Frame{};
+    }
+    bool binding_resolved = true;
+    bool cyclic = false;
+    return resolve_parent_frame(*node, binding_resolved, cyclic);
+}
+
 NodePlacement SceneDocument::placement(int32_t id) const {
     NodePlacement out;
     const Node* node = find(id);
@@ -103,17 +168,52 @@ NodePlacement SceneDocument::placement(int32_t id) const {
         return out; // unknown id: identity frame, no box, no contact
     }
 
-    out.frame.position = node->position;
-    out.frame.rotation = node->rotation;
-    out.frame.uniform_scale = 1.0f;
+    bool cyclic = false;
+    // The parent's frame, kept in hand rather than folded straight in, because
+    // the CONTACT rides it -- not the node's own frame.
+    const Frame parent_frame = resolve_parent_frame(*node, out.binding_resolved, cyclic);
+    if (cyclic) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            spdlog::error("shapeshifter: node {} exceeds the parent-depth guard ({}); "
+                          "the chain is cyclic and the node will not be placed",
+                          id, kMaxParentDepth);
+        }
+        return NodePlacement{};
+    }
+    out.frame = compose(parent_frame, local_frame(*node));
+
+    // A Group has no box and contributes no SDF, so it reports no extent.
     // simd_abs, matching append_node_wireframe and sdf_safe_half_extents: the
     // evaluator measures against abs(half_extents), so a negative component
     // mirrors the solid rather than inverting the box.
-    out.half_extents = 0.5f * simd_abs(node->scale);
-    if (node->snapped) {
-        out.contact = WorldContact{node->snap_point, node->snap_normal};
+    if (node->kind == NodeKind::Shape) {
+        out.half_extents = 0.5f * simd_abs(node->scale) * out.frame.uniform_scale;
+    }
+
+    if (node->contact.valid) {
+        // The contact is a fact about the SURFACE, expressed in the parent's
+        // frame -- so it rides the parent and is untouched by anything the node
+        // itself does. Dragging a detail off the skin it was placed on leaves
+        // the attachment behind, which is what the tether reports.
+        out.contact = WorldContact{transform_point(parent_frame, node->contact.point),
+                                   transform_direction(parent_frame, node->contact.normal)};
     }
     return out;
+}
+
+void SceneDocument::set_node_scale(int32_t id, simd_float3 scale) {
+    Node* node = find(id);
+    if (node == nullptr) {
+        return;
+    }
+    // Forced uniform for a Group rather than merely asked to be: compose has no
+    // meaning for a Group with {1,2,1}, and a rule kept only in a comment is a
+    // rule that gets broken by the next caller.
+    node->scale = (node->kind == NodeKind::Group)
+                      ? simd_float3{scale.x, scale.x, scale.x}
+                      : scale;
 }
 
 Node& SceneDocument::add(Node node) {
@@ -138,35 +238,47 @@ int32_t SceneDocument::spawn_snapped(Shape shape, Op op, simd_float3 hit, simd_f
     // Centred ON the surface, not resting on it. A detail added to a face is
     // meant to be half-embedded -- that is what an Add node unions into, and a
     // Subtract node carves from. It also puts the node's centre exactly on its
-    // snap point, so the placement and shape gizmos coincide until the detail
+    // contact point, so the placement and shape gizmos coincide until the detail
     // is deliberately lifted off.
-    node.position = hit;
-    node.snapped = true;
-    node.snap_point = hit;
-    node.snap_normal = unit_normal;
-    node.snap_parent = parent_id;
+    //
+    // `parent` is left at Kind::World, deliberately. The node RESTS ON the
+    // surface it was placed against without being expressed in its frame, so
+    // nothing propagates and dragging that surface still leaves this behind --
+    // the same behaviour as before the hierarchy existed. Since the node is
+    // world-rooted, the contact's parent-frame coordinates are world
+    // coordinates, which is exactly what snap_point used to hold.
+    node.local_position = hit;
+    node.contact.valid = true;
+    node.contact.surface = parent_id;
+    node.contact.point = hit;
+    node.contact.normal = unit_normal;
+    return add(std::move(node)).id;
+}
+
+int32_t SceneDocument::add_group() {
+    Node node;
+    node.id = next_id_++;
+    node.kind = NodeKind::Group;
+    node.name = "Group " + std::to_string(++group_count_);
     return add(std::move(node)).id;
 }
 
 int32_t SceneDocument::spawn_unsnapped(Shape shape, Op op, simd_float3 position) {
     Node node = make_node(shape, op);
-    node.position = position;
-    node.snapped = false;
-    node.snap_parent = kInvalidNode;
-    return add(std::move(node)).id;
+    node.local_position = position;
+    return add(std::move(node)).id; // world-rooted, resting on nothing
 }
 
 void SceneDocument::remove_node(int32_t id) {
     std::erase_if(nodes_, [id](const Node& node) { return node.id == id; });
 
-    // Fix up survivors that were snapped onto the just-removed node: leaving
-    // snap_parent pointing at a dead id would be a dangling reference. The
-    // gizmo frame keys off `snapped`, so clearing it here drops the orphan back
-    // to its own local axes, exactly like a node that was never snapped.
+    // Fix up survivors that were resting ON the just-removed node: leaving
+    // contact.surface pointing at a dead id would be a dangling reference. The
+    // gizmo frame keys off contact.valid, so clearing it here drops the orphan
+    // back to its own local axes, exactly like a node that rested on nothing.
     for (Node& node : nodes_) {
-        if (node.snap_parent == id) {
-            node.snapped = false;
-            node.snap_parent = kInvalidNode;
+        if (node.contact.surface == id) {
+            node.contact = Contact{};
         }
     }
 }

@@ -2558,6 +2558,7 @@ add_executable(shapeshifter_core_tests
     ${SHAPESHIFTER_DIR}/tests/core/frame_tests.cpp
     ${SHAPESHIFTER_DIR}/tests/core/gizmo_tests.cpp
     ${SHAPESHIFTER_DIR}/tests/core/ground_grid_tests.cpp
+    ${SHAPESHIFTER_DIR}/tests/core/hierarchy_tests.cpp
     ${SHAPESHIFTER_DIR}/tests/core/lines_tests.cpp
     ${SHAPESHIFTER_DIR}/tests/core/mesh_job_tests.cpp
     ${SHAPESHIFTER_DIR}/tests/core/navigation_tests.cpp
