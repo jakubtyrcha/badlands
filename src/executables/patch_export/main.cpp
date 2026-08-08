@@ -14,7 +14,7 @@
 //                              (--patch-origin X,Y | --window NAME=X,Y ...
 //                               | --windows FILE)
 //                              --out DIR
-//                              [--layers height,biome,hillshade]
+//                              [--layers height,cover,hillshade]
 //                              [--height-range LO,HI] [--dump-patch]
 //
 //   --load DIR         a coarse world directory (world.txt). Unlike mapview
@@ -27,7 +27,7 @@
 //   --window NAME=X,Y  a named window; repeatable.
 //   --windows FILE     a window list, `name x y` per line, `#` comments.
 //   --out DIR          where the images go (created if absent).
-//   --layers a,b,c     any of height, biome, hillshade (default: all three).
+//   --layers a,b,c     any of height, cover, hillshade (default: all three).
 //   --height-range LO,HI
 //                      force the metre range the height channel maps over, so
 //                      windows are comparable against each other. Default is
@@ -70,7 +70,7 @@ constexpr const char* kUsage =
     "usage: badlands_patch_export --load DIR [--tag NAME] "
     "[--patch-size M] [--patch-res N] "
     "(--patch-origin X,Y | --window NAME=X,Y ... | --windows FILE) --out DIR "
-    "[--layers height,biome,hillshade] [--height-range LO,HI] [--dump-patch]\n";
+    "[--layers height,cover,hillshade] [--height-range LO,HI] [--dump-patch]\n";
 
 struct Window {
   std::string name;
@@ -208,7 +208,7 @@ int main(int argc, char** argv) {
   float patch_size_m = 256.0f;
   int patch_res = 256;
   std::vector<Window> windows;
-  bool want_height = true, want_biome = true, want_hillshade = true;
+  bool want_height = true, want_cover = true, want_hillshade = true;
   std::optional<ExportRange> forced_range;
   bool dump_patch = false;
 
@@ -280,25 +280,25 @@ int main(int argc, char** argv) {
     } else if (a == "--layers") {
       auto v = next("--layers");
       if (!v) return 2;
-      want_height = want_biome = want_hillshade = false;
+      want_height = want_cover = want_hillshade = false;
       std::string item;
       std::istringstream items(*v);
       while (std::getline(items, item, ',')) {
         if (item == "height") want_height = true;
-        else if (item == "biome") want_biome = true;
+        else if (item == "cover") want_cover = true;
         else if (item == "hillshade") want_hillshade = true;
         else {
           std::fprintf(stderr,
-                       "patch_export: unknown layer '%s' (want height, biome, "
+                       "patch_export: unknown layer '%s' (want height, cover, "
                        "or hillshade)\n",
                        item.c_str());
           return 2;
         }
       }
-      if (!want_height && !want_biome && !want_hillshade) {
+      if (!want_height && !want_cover && !want_hillshade) {
         std::fprintf(stderr,
                      "patch_export: --layers '%s' selects nothing (want any of "
-                     "height, biome, hillshade)\n",
+                     "height, cover, hillshade)\n",
                      v->c_str());
         return 2;
       }
@@ -422,7 +422,7 @@ int main(int argc, char** argv) {
 
     // Each layer declares the dimensions of the field it was encoded FROM.
     // Fetch makes them all n x n today, but a future provider handing back a
-    // shorter biome raster must not be described by the height raster's size.
+    // shorter cover raster must not be described by the height raster's size.
     if (want_height) {
       all_ok &= write_png_checked(
           base / (stem + "-height.png"),
@@ -430,10 +430,10 @@ int main(int argc, char** argv) {
               f.patch.height, f.patch.water_depth, range, water_scale_m),
           f.patch.height.width, f.patch.height.height);
     }
-    if (want_biome) {
-      all_ok &= write_png_checked(base / (stem + "-biome.png"),
-                                  badlands::mapgen::encode_biome_rgba(f.patch.biome),
-                                  f.patch.biome.width, f.patch.biome.height);
+    if (want_cover) {
+      all_ok &= write_png_checked(base / (stem + "-cover.png"),
+                                  badlands::mapgen::encode_cover_rgba(f.patch.cover),
+                                  f.patch.cover.width, f.patch.cover.height);
     }
     if (want_hillshade) {
       all_ok &= write_png_checked(base / (stem + "-hillshade.png"),

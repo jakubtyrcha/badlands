@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <string_view>
 
+#include "mapgen/rgb.hpp"
+
 namespace badlands::mapgen {
 
 // The map biomes. Ordered low-elevation -> high-elevation, which the
@@ -30,10 +32,6 @@ inline constexpr int kBiomeCount = 6;
 static_assert(kBiomeCount <= 8,
               "terrain_blend.wesl has only 8 weight slots, indexed by biome; see "
               "the note above before growing the palette past 8");
-
-struct Rgb {
-  uint8_t r, g, b;
-};
 
 // Debug palette for biome.png (indexed color per biome).
 inline constexpr std::array<Rgb, kBiomeCount> kBiomePalette{{

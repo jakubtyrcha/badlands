@@ -2,20 +2,28 @@
 
 // Build-side of the Nanite-style terrain cluster-LOD DAG (see
 // docs/superpowers/specs/2026-07-19-terrain-cluster-lod-design.md). Pure CPU,
-// game-layer: it tessellates the frozen MapData lattice into grid-tile leaf
+// game-layer: it tessellates a TerrainLattice into grid-tile leaf
 // clusters and repeatedly groups + boundary-locked-simplifies (meshoptimizer) +
 // splits them into a level hierarchy, recording per-group LOD error + bounding
 // sphere. The output DAG feeds runtime screen-space-error cluster selection
 // (SelectClusters) and per-cluster indexed draws. No engine/GPU dependency
 // beyond the header-only Aabb.
 //
-// Input is a `const MapData&` (the frozen contract, game/map/map_data.hpp): the
-// leaf vertex grid IS the map lattice (nodes_x x nodes_z nodes at spacing_m),
-// heights are map.height(i,j), per-vertex color is the palette of the node's
-// DOMINANT biome. The map's spacing_m may differ from 1 m, so world positions
-// are node_index * spacing_m; the screen-space metric already works in world
-// meters. This is the "decimating / nanite-style builder" the MapData header
-// reserves the seam for.
+// Input is a `const TerrainLattice&` (game/map/terrain_lattice.hpp): the leaf
+// vertex grid IS that lattice (nodes_x x nodes_z nodes at spacing_m), heights
+// are HeightAtNode(i,j), per-vertex colour is the palette entry of the node's
+// class byte.
+//
+// THE LATTICE CARRIES NO VOCABULARY, and that is the point. There are two
+// classification vocabularies -- mapgen::Biome for gameplay, mapgen::Cover for
+// rendering -- and this builder serves maps of both kinds without being able to
+// tell which it was handed. It is a class byte and a palette; what the byte
+// MEANS is the map's business.
+//
+// The lattice's spacing_m may differ from 1 m, so world positions are
+// node_index * spacing_m; the screen-space metric already works in world
+// meters. This is the "decimating / nanite-style builder" the map headers
+// reserve the seam for.
 //
 // Seamlessness is a build invariant, not a runtime rule: a vertex on the
 // boundary between two groups of a level is LOCKED in both groups' simplify
@@ -32,7 +40,7 @@
 #include <glm/glm.hpp>
 
 #include "engine/rendering/geometry/aabb.hpp"
-#include "game/map/map_data.hpp"
+#include "game/map/terrain_lattice.hpp"
 
 namespace badlands {
 
@@ -191,7 +199,7 @@ struct TerrainDetailField {
   std::function<float(float wx, float wz)> height_at;
 };
 
-// Build the DAG from the frozen MapData contract. The leaf vertex grid is the
+// Build the DAG from a TerrainLattice. The leaf vertex grid is the
 // map lattice: nodes_x x nodes_z nodes at map.spacing_m() (world meters), so
 // (nodes_x-1) x (nodes_z-1) quads span the map and ceil(quads/tile_quads) tiles
 // cover each axis. Height = map.height(i,j); per-vertex color = the palette of
@@ -201,7 +209,7 @@ struct TerrainDetailField {
 // TerrainDetailField). A tile containing refined quads emits MULTIPLE leaf
 // clusters (packed to the triangle budget), so regions can start with more than
 // one cluster.
-TerrainClusterDag BuildTerrainClusterDag(const MapData& map,
+TerrainClusterDag BuildTerrainClusterDag(const TerrainLattice& map,
                                          const TerrainClusterParams& params = {},
                                          const TerrainDetailField* detail = nullptr);
 

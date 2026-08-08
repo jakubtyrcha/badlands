@@ -1,5 +1,5 @@
 // Tests for the image encodings of PatchData: the height/water channel packing,
-// the biome palette, and the hillshade that stage-2 iteration is judged from.
+// the cover palette, and the hillshade that stage-2 iteration is judged from.
 //
 // These link badlands_patch_providers and NOTHING else -- no `assets` crate, no
 // engine. That is the point of keeping the encoders buffer-returning, so this
@@ -11,7 +11,7 @@
 #include <cstdint>
 #include <vector>
 
-#include "mapgen/biomes.hpp"
+#include "mapgen/cover.hpp"
 #include "mapgen/patch_export.hpp"
 
 using namespace badlands::mapgen;
@@ -168,19 +168,19 @@ TEST_CASE("a mismatched water field is treated as dry, not read out of bounds",
 TEST_CASE("an empty field encodes to an empty buffer", "[export]") {
   const Field2D<float> empty;
   CHECK(encode_height_water_rgba(empty, empty, {0.0f, 1.0f}, 1.0f).empty());
-  CHECK(encode_biome_rgba(Field2D<uint8_t>{}).empty());
+  CHECK(encode_cover_rgba(Field2D<uint8_t>{}).empty());
 }
 
-TEST_CASE("biome ids encode to the shared palette byte for byte", "[export]") {
-  Field2D<uint8_t> biome(kBiomeCount, 1, 0);
-  for (int i = 0; i < kBiomeCount; ++i)
-    biome.at(i, 0) = static_cast<uint8_t>(i);
+TEST_CASE("cover ids encode to the shared palette byte for byte", "[export]") {
+  Field2D<uint8_t> cover(kCoverCount, 1, 0);
+  for (int i = 0; i < kCoverCount; ++i)
+    cover.at(i, 0) = static_cast<uint8_t>(i);
 
-  const std::vector<uint8_t> rgba = encode_biome_rgba(biome);
-  REQUIRE(rgba.size() == static_cast<size_t>(kBiomeCount) * 4);
-  for (int i = 0; i < kBiomeCount; ++i) {
-    const Texel t = texel_at(rgba, kBiomeCount, i, 0);
-    const Rgb want = kBiomePalette[i];
+  const std::vector<uint8_t> rgba = encode_cover_rgba(cover);
+  REQUIRE(rgba.size() == static_cast<size_t>(kCoverCount) * 4);
+  for (int i = 0; i < kCoverCount; ++i) {
+    const Texel t = texel_at(rgba, kCoverCount, i, 0);
+    const Rgb want = kCoverPalette[i];
     CHECK(t.r == want.r);
     CHECK(t.g == want.g);
     CHECK(t.b == want.b);
@@ -188,13 +188,13 @@ TEST_CASE("biome ids encode to the shared palette byte for byte", "[export]") {
   }
 }
 
-TEST_CASE("an out-of-range biome id does not read past the palette",
+TEST_CASE("an out-of-range cover id does not read past the palette",
           "[export]") {
-  Field2D<uint8_t> biome(2, 1, 0);
-  biome.at(0, 0) = static_cast<uint8_t>(kBiomeCount);  // one past the end
-  biome.at(1, 0) = 200;
+  Field2D<uint8_t> cover(2, 1, 0);
+  cover.at(0, 0) = static_cast<uint8_t>(kCoverCount);  // one past the end
+  cover.at(1, 0) = 200;
 
-  const std::vector<uint8_t> rgba = encode_biome_rgba(biome);
+  const std::vector<uint8_t> rgba = encode_cover_rgba(cover);
   for (int x = 0; x < 2; ++x) {
     const Texel t = texel_at(rgba, 2, x, 0);
     CHECK(t.r == 0);

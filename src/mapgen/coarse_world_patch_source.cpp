@@ -11,6 +11,8 @@
 #include <vector>
 
 #include "mapgen/biomes.hpp"
+#include "mapgen/biome_cover.hpp"
+#include "mapgen/cover.hpp"
 #include "mapgen/cubic_sample.hpp"
 #include "mapgen/patch_io.hpp"
 #include "mapgen/relief_filter.hpp"
@@ -150,6 +152,11 @@ Biome ClassifyBiome(float soil_m, bool wet, const CoarseManifest& man) {
   if (soil_m < man.soil_cut_hills_m) return Biome::Hills;
   return Biome::Plains;
 }
+
+// Biome stays INTERNAL here: the relief filter's per-class erosion strengths
+// are tuned against it, and the coarse world has no other classification. What
+// leaves through the contract is Cover -- translated by mapgen/biome_cover.hpp,
+// the one place the two vocabularies are allowed to meet.
 
 std::vector<Tap> BuildAxisTaps(ResampleKind kind, double origin_axis_m,
                                float out_texel_m, int j, float src_texel_m,
@@ -520,12 +527,17 @@ PatchData CoarseWorldPatchSource::Fetch(const PatchRequest& req) const {
   // second truth.
   derive_water(out.height, out.level, out_texel_m, out.water_depth, out.lake_id, out.lakes);
 
-  // --- biome, from the WHOLE-WORLD manifest cutoffs, never a per-patch
-  // quantile -- see coarse_io.hpp on why the cutoffs live on the manifest.
-  out.biome = Field2D<uint8_t>(n, n);
+  // --- cover, via the biome rule, from the WHOLE-WORLD manifest cutoffs and
+  // never a per-patch quantile -- see coarse_io.hpp on why the cutoffs live on
+  // the manifest.
+  out.cover = Field2D<uint8_t>(n, n);
   for (int i = 0; i < n * n; ++i)
-    out.biome.data[i] = static_cast<uint8_t>(ClassifyBiome(
-        out.soil.data[i], out.water_depth.data[i] > 0.0f, manifest_));
+    out.cover.data[i] = static_cast<uint8_t>(CoverForBiome(ClassifyBiome(
+        out.soil.data[i], out.water_depth.data[i] > 0.0f, manifest_)));
+
+  // The coarse world carries no morphology label; it is a substrate simulation,
+  // not a survey of anywhere in particular.
+  out.terrain_class = TerrainClass::Unknown;
 
   // --- rivers: clip to the request rect, THEN rebase to patch-local, THEN
   // cull -- order matters (see river_clip.hpp / river_prune.hpp).

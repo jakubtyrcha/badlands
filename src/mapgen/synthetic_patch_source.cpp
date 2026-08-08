@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <cmath>
 
-#include "mapgen/biomes.hpp"
+#include "mapgen/cover.hpp"
 #include "mapgen/erosion.hpp"
 #include "mapgen/patch_io.hpp"
 #include "mapgen/river_graph.hpp"
@@ -85,11 +85,11 @@ PatchData SyntheticPatchSource::Fetch(const PatchRequest& req) const {
   derive_water(out.height, out.level, texel_m, out.water_depth, out.lake_id,
                out.lakes);
 
-  // --- soil, then biome ------------------------------------------------------
+  // --- soil, then cover ------------------------------------------------------
   // Soil thins with slope, which is the same physical story the real substrate
   // tells: steep ground sheds its cover and reads as rock.
   out.soil = Field2D<float>(n, n, 0.0f);
-  out.biome = Field2D<uint8_t>(n, n, static_cast<uint8_t>(Biome::Plains));
+  out.cover = Field2D<uint8_t>(n, n, static_cast<uint8_t>(Cover::Grass));
   const float slope_ref = std::tan(params_.soil_slope_ref_deg * 3.14159265f / 180.0f);
   for (int j = 0; j < n; ++j) {
     for (int i = 0; i < n; ++i) {
@@ -100,24 +100,27 @@ PatchData SyntheticPatchSource::Fetch(const PatchRequest& req) const {
       const float dz = (out.height.at(i, jp) - out.height.at(i, jm)) /
                        (static_cast<float>(jp - jm) * texel_m);
       const float slope = std::sqrt(dx * dx + dz * dz);
-      const float cover =
+      const float soil_m =
           params_.soil_max_m * std::clamp(1.0f - slope / std::max(1e-4f, slope_ref),
                                           0.0f, 1.0f);
-      out.soil.at(i, j) = cover;
+      out.soil.at(i, j) = soil_m;
 
-      Biome b;
+      // The same soil thresholds as before, now naming what GROWS rather than
+      // an elevation band. The two thin classes both read as ground rather than
+      // vegetation, which is what thin cover over bedrock actually looks like.
+      Cover c;
       if (out.water_depth.at(i, j) > 0.0f) {
-        b = Biome::Lake;
-      } else if (cover < params_.soil_cut_mountain_m) {
-        b = Biome::Mountain;
-      } else if (cover < params_.soil_cut_hills_m) {
-        b = Biome::Hills;
-      } else if (cover < params_.soil_cut_forest_m) {
-        b = Biome::Plains;
+        c = Cover::Water;
+      } else if (soil_m < params_.soil_cut_mountain_m) {
+        c = Cover::Bare;
+      } else if (soil_m < params_.soil_cut_hills_m) {
+        c = Cover::Shrub;
+      } else if (soil_m < params_.soil_cut_forest_m) {
+        c = Cover::Grass;
       } else {
-        b = Biome::Forest;
+        c = Cover::Tree;
       }
-      out.biome.at(i, j) = static_cast<uint8_t>(b);
+      out.cover.at(i, j) = static_cast<uint8_t>(c);
     }
   }
 

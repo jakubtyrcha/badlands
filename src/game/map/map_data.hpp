@@ -4,14 +4,29 @@
 // FROZEN MAP-DATA CONTRACT
 // ============================================================================
 //
+// THIS IS THE GAMEPLAY MAP. Its vocabulary is mapgen::Biome -- walkability,
+// movement cost, habitat, animal spawning -- and the simulation reads it across
+// the C ABI (badlands_sim.hpp's BiomeAt), which is what makes that vocabulary
+// expensive to change.
+//
+// The RENDER path has its own map, game/map/visual_map_data.hpp, speaking
+// mapgen::Cover. Keeping them apart is deliberate: they describe the same
+// ground and answer different questions, and one type carrying both would put
+// two meanings on a single `slice(k)`.
+//
+// (The name has not caught up yet -- this is GameplayMapData in everything but
+// spelling. Renaming it touches badlands_game and the sim's plumbing, which is
+// why the split landed first and the rename follows.)
+//
 // The map is DATA, not behaviour: per-biome coverage slices + a heightmap, both
 // sampled on one shared regular lattice. Everything downstream reads only this.
 //
 // Two consumers, both served by what is below:
 //   * GAME LOGIC       -- queries biome + height at an arbitrary 2D world
 //                         position (HeightAt / BiomesAt / DominantBiomeAt).
-//   * TERRAIN VISUAL   -- reads the raw lattice: slices become texture/colour
-//     LAYER              lookups, the heightmap becomes vertices.
+//   * TERRAIN VISUAL   -- through TerrainLattice (game/map/terrain_lattice.hpp),
+//     LAYER              which is vocabulary-free, so the mesh builder never
+//                        sees a Biome.
 //
 // STABILITY: this shape is the contract. What sits on either side of it is
 // explicitly NOT part of it and is expected to be replaced:
@@ -40,6 +55,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "game/map/terrain_lattice.hpp"
 #include "mapgen/biomes.hpp"
 
 namespace badlands {
@@ -93,6 +109,11 @@ class MapData {
   float HeightAt(float wx, float wz) const;
   BiomeWeights BiomesAt(float wx, float wz) const;
   mapgen::Biome DominantBiomeAt(float wx, float wz) const;
+
+  // The vocabulary-free view the terrain mesh builder takes. Slices have to be
+  // reduced to one class per node to build it, so the result OWNS that buffer
+  // and the lattice inside it borrows from the storage, not from this map.
+  TerrainLatticeStorage Lattice() const;
 
  private:
   std::size_t index(int i, int j) const {

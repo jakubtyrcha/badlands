@@ -35,6 +35,7 @@
 #include "engine/rendering/water_material.hpp"
 #include "game/map/cluster_terrain.hpp"
 #include "game/map/map_data.hpp"
+#include "game/map/visual_map_data.hpp"
 #include "game/visual/forest_renderer.hpp"
 #include "mapgen/patch_source.hpp"
 #include "mapgen/river_arcs.hpp"
@@ -118,18 +119,22 @@ class MapViewView : public AppView {
   // The fetched/synthetic patch. `height` is kept for mouse picking; outlives
   // Initialize.
   mapgen::PatchData patch_;
-  // The map wrapped in the frozen MapData contract (one-hot biome slices at
-  // the raster's own texel spacing) -- what the cluster terrain builder and
-  // mouse picking read.
-  MapData terrain_map_;
+  // The map as the RENDER path sees it: heights plus one Cover class per node,
+  // at the raster's own texel spacing. What the cluster terrain builder and
+  // mouse picking read, both through its vocabulary-free TerrainLattice.
+  VisualMapData terrain_map_;
+  // The GAMEPLAY map, and only --test-map has one: that forest fixture is
+  // authored in biomes and drives foliage placement through
+  // MapDataTerrainQuery. Empty on every other path.
+  MapData gameplay_map_;
 
-  // Terrain materials: one PBR pack per biome (layer index == Biome enum),
-  // resolved through assets/materials/terrain_biomes.json. The library also owns
+  // Terrain materials: one PBR pack per GROUND SLOT (bare rock, scree, ...),
+  // resolved through assets/materials/terrain_ground.json. The library also owns
   // the shared trilinear+aniso sampler the arrays must be read through.
   MaterialLibrary matlib_;
   MaterialLibrary::TerrainArrays terrain_arrays_;
 
-  // Biome weights as a splat texture sampled by world XZ: 8 slots across two
+  // Ground-material weights as a splat texture sampled by world XZ: 8 slots across two
   // RGBA8 planes. Held as views (each keeps its texture alive) for the lifetime
   // of the terrain material that binds them. Its sampler CLAMPS -- the splat
   // covers the map's own extent, so repeating would fold edge onto edge.

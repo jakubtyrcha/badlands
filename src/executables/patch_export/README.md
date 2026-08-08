@@ -26,7 +26,7 @@ directory is what this tool produces, not what it reads.
 | File | What |
 |---|---|
 | `<name>-height.png` | RGBA8. `R = G` = height code; `B = min(255, height + water)`; `A = 255` |
-| `<name>-biome.png` | RGBA8 through `kBiomePalette`, the palette the 3D terrain's vertex colours use |
+| `<name>-cover.png` | RGBA8 through `kCoverPalette`, the palette the 3D terrain's vertex colours use |
 | `<name>-hillshade.png` | RGBA8. NW sun at 45°, flat water tinted by depth, river centrelines |
 | `<name>-export.txt` | the sidecar: how the codes decode back to metres |
 | `<name>/` | with `--dump-patch`: the patch_io directory (`mapview --load`-able, shareable) |

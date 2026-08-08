@@ -20,10 +20,8 @@ namespace badlands {
 
 namespace {
 
-using mapgen::kBiomePalette;
-
 // Pack four u8 into one float slot (matches the Uint8x4 / Unorm8x4 vertex
-// attributes). Local copy: the MapData-based terrain_mesh keeps its own
+// attributes). Local copy: the map-based terrain_mesh keeps its own
 // PackU8x4 internal, and the cluster build has no other terrain_mesh dependency.
 float PackU8x4(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
   const uint32_t u = static_cast<uint32_t>(a) | (static_cast<uint32_t>(b) << 8) |
@@ -39,8 +37,8 @@ float PackU8x4(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
 // the edges), so two callers sampling the same node get bitwise-identical
 // normals -- what makes shared boundary vertices crack-free. Mirrors the simple
 // terrain_mesh builder's normal so both agree on the surface.
-glm::vec3 NormalAt(const MapData& map, float wx, float wz) {
-  const float d = map.spacing_m();
+glm::vec3 NormalAt(const TerrainLattice& map, float wx, float wz) {
+  const float d = map.spacing_m;
   const float hl = map.HeightAt(wx - d, wz);
   const float hr = map.HeightAt(wx + d, wz);
   const float hd = map.HeightAt(wx, wz - d);
@@ -173,7 +171,15 @@ struct BuildProfile {
 struct WorkVertex {
   glm::vec3 pos;
   glm::vec3 normal;
-  uint8_t biome;
+  // The node's CLASS byte, whatever vocabulary the lattice speaks, plus the
+  // colour it resolves to. The colour is carried rather than looked up later
+  // because the palette lives on the lattice and the two places that need a
+  // colour -- cluster emission and the simplifier's attribute weights -- run
+  // deep inside the parallel build with no lattice in scope. Resolving it where
+  // the class is read keeps the palette lookup at exactly the sites that know
+  // what the byte means.
+  uint8_t klass;
+  mapgen::Rgb color;
 };
 
 struct ClusterGeom {
@@ -233,7 +239,7 @@ struct PosKeyHash {
     // only term moving entropy downward is (h >> 2) -- not far enough.
     //
     // On a map whose height is bitwise constant (a flat plateau, a clamped sea
-    // level, the blockout maps, MakeFlatMapData in the test suite) this is not
+    // level, the blockout maps, MakeFlatLattice in the test suite) this is not
     // a slight imbalance: MEASURED, all 16641 keys of a 129x129 weld hashed to
     // ONE bucket, turning each weld into an O(n^2) probe walk.
     //
@@ -341,7 +347,7 @@ TerrainCluster PackClusterAt(TerrainClusterDag& dag, const ClusterGeom& geom,
     // BGRA8Unorm and terrain_blend loads its textures as plain RGBA8Unorm (no
     // sRGB decode), so both treat 8-bit albedo as linear. Linearizing here would
     // make cluster terrain too dark. See the M4 color-path finding in the docs.
-    const mapgen::Rgb col = kBiomePalette[v.biome];
+    const mapgen::Rgb col = v.color;
     *out++ = v.pos.x;
     *out++ = v.pos.y;
     *out++ = v.pos.z;
@@ -349,7 +355,7 @@ TerrainCluster PackClusterAt(TerrainClusterDag& dag, const ClusterGeom& geom,
     *out++ = v.normal.y;
     *out++ = v.normal.z;
     *out++ = PackU8x4(col.r, col.g, col.b, 255);
-    *out++ = PackU8x4(v.biome, ClusterHashByte(v.pos),
+    *out++ = PackU8x4(v.klass, ClusterHashByte(v.pos),
                       static_cast<uint8_t>(level), 0);
     lo = glm::min(lo, v.pos);
     hi = glm::max(hi, v.pos);
@@ -381,11 +387,11 @@ uint32_t EmitCluster(TerrainClusterDag& dag,
 }
 
 // The 2-triangle-per-quad leaf tile [qx0,qx1] x [qz0,qz1] (in lattice nodes),
-// vertex grid at map.spacing_m() spacing, one consistent diagonal (n00->n11).
-// Height/normal/biome sample the frozen MapData lattice directly.
-ClusterGeom BuildLeafGeom(const MapData& map, int qx0, int qz0, int qx1,
+// vertex grid at map.spacing_m spacing, one consistent diagonal (n00->n11).
+// Height/normal/class sample the lattice directly.
+ClusterGeom BuildLeafGeom(const TerrainLattice& map, int qx0, int qz0, int qx1,
                           int qz1) {
-  const float sp = map.spacing_m();
+  const float sp = map.spacing_m;
   const int vx = qx1 - qx0 + 1;
   const int vz = qz1 - qz0 + 1;
   ClusterGeom g;
@@ -395,9 +401,10 @@ ClusterGeom BuildLeafGeom(const MapData& map, int qx0, int qz0, int qx1,
       const float wx = static_cast<float>(i) * sp;
       const float wz = static_cast<float>(j) * sp;
       WorkVertex v;
-      v.pos = glm::vec3(wx, map.height(i, j), wz);
+      v.pos = glm::vec3(wx, map.HeightAtNode(i, j), wz);
       v.normal = NormalAt(map, wx, wz);
-      v.biome = static_cast<uint8_t>(map.WeightsAtNode(i, j).Dominant());
+      v.klass = map.ClassAtNode(i, j);
+      v.color = map.ColorFor(v.klass);
       g.verts.push_back(v);
     }
   }
@@ -499,18 +506,19 @@ glm::vec3 DetailNormalAt(const TerrainDetailField& f, float wx, float wz,
 //     post into the middle of every channel. The differencing step is
 //     canonical over the same four exponents (the minimum), so all four
 //     emitters agree bitwise.
-WorkVertex LatticeNodeVertex(const MapData& map, const DetailView& dv, int i,
+WorkVertex LatticeNodeVertex(const TerrainLattice& map, const DetailView& dv, int i,
                              int j) {
-  const float sp = map.spacing_m();
+  const float sp = map.spacing_m;
   const float wx = static_cast<float>(i) * sp;
   const float wz = static_cast<float>(j) * sp;
   WorkVertex v;
-  v.biome = static_cast<uint8_t>(map.WeightsAtNode(i, j).Dominant());
+  v.klass = map.ClassAtNode(i, j);
+  v.color = map.ColorFor(v.klass);
   const int kmin =
       std::min(std::min(dv.QuadExp(i - 1, j - 1), dv.QuadExp(i, j - 1)),
                std::min(dv.QuadExp(i - 1, j), dv.QuadExp(i, j)));
   if (kmin == 0) {
-    v.pos = glm::vec3(wx, map.height(i, j), wz);
+    v.pos = glm::vec3(wx, map.HeightAtNode(i, j), wz);
     v.normal = NormalAt(map, wx, wz);
     return v;
   }
@@ -525,19 +533,20 @@ WorkVertex LatticeNodeVertex(const MapData& map, const DetailView& dv, int i,
 // LatticeNodeVertex; everything else samples the detail surface, with
 // `normal_d` the seam-canonical differencing step (the quad's own step for
 // interior vertices, the shared edge's step for on-edge vertices).
-WorkVertex DetailVertex(const MapData& map, const DetailView& dv, int f, int gx,
+WorkVertex DetailVertex(const TerrainLattice& map, const DetailView& dv, int f, int gx,
                         int gz, float normal_d) {
   if (gx % f == 0 && gz % f == 0)
     return LatticeNodeVertex(map, dv, gx / f, gz / f);
   const TerrainDetailField& field = *dv.field;
-  const float sp = map.spacing_m();
+  const float sp = map.spacing_m;
   const float step = sp / static_cast<float>(f);
   const float wx = static_cast<float>(gx) * step;
   const float wz = static_cast<float>(gz) * step;
   WorkVertex v;
   v.pos = glm::vec3(wx, field.height_at(wx, wz), wz);
   v.normal = DetailNormalAt(field, wx, wz, normal_d);
-  v.biome = static_cast<uint8_t>(map.BiomesAt(wx, wz).Dominant());
+  v.klass = map.ClassAt(wx, wz);
+  v.color = map.ColorFor(v.klass);
   return v;
 }
 
@@ -554,9 +563,9 @@ WorkVertex DetailVertex(const MapData& map, const DetailView& dv, int f, int gx,
 // perimeter arc length, emitting one triangle per step -- equal-resolution
 // edges, fanned edges, and the corners where they meet all fall out of the
 // same walk, so there is no corner case to enumerate (or get wrong).
-void AppendQuadGeom(ClusterGeom& g, PosTable& weld, const MapData& map,
+void AppendQuadGeom(ClusterGeom& g, PosTable& weld, const TerrainLattice& map,
                     const DetailView& dv, int qx, int qz) {
-  const float sp = map.spacing_m();
+  const float sp = map.spacing_m;
   auto add = [&](const WorkVertex& v) -> uint32_t {
     const uint32_t idx = static_cast<uint32_t>(g.verts.size());
     const uint32_t got = weld.FindOrInsert(KeyOf(v.pos), idx);
@@ -705,7 +714,7 @@ struct TileCells {
   std::vector<ClusterGeom> geoms;  // row-major, one per cell
 };
 
-TileCells BuildDetailedTileCells(const MapData& map, const DetailView& dv,
+TileCells BuildDetailedTileCells(const TerrainLattice& map, const DetailView& dv,
                                  int qx0, int qz0, int qx1, int qz1, int Q) {
   int kmax = 0;
   for (int qz = qz0; qz < qz1; ++qz)
@@ -815,7 +824,7 @@ GroupResult SimplifyAndSplit(ClusterGeom merged, const glm::vec4& footprint,
     positions[v * 3 + 0] = w.pos.x;
     positions[v * 3 + 1] = w.pos.y;
     positions[v * 3 + 2] = w.pos.z;
-    const mapgen::Rgb col = kBiomePalette[w.biome];
+    const mapgen::Rgb col = w.color;
     attrs[v * 6 + 0] = w.normal.x;
     attrs[v * 6 + 1] = w.normal.y;
     attrs[v * 6 + 2] = w.normal.z;
@@ -1347,7 +1356,7 @@ void ReduceGrid(TerrainClusterDag& dag, std::vector<ClusterGeom>& cluster_geom,
 // --- the leaf pass, tile by tile ---------------------------------------------
 //
 // Tiles are INDEPENDENT and always were: BuildLeafGeom and BuildDetailedTileCells
-// read only the const MapData and DetailView, and a hot tile's pre-pass reduction
+// read only the const TerrainLattice and DetailView, and a hot tile's pre-pass reduction
 // runs on its own sub-grid and never reads a neighbour's clusters. The single
 // thing that coupled them was EmitCluster appending to one shared DAG -- which is
 // an EMISSION ORDER dependency, not a data dependency.
@@ -1372,10 +1381,10 @@ struct TileBuild {
 // (per-tile pre-pass rounds have a handful of groups and were already falling
 // below the inline threshold). parallel_build is a scheduling knob only, so
 // forcing it off here cannot change the output.
-void BuildTile(const MapData& map, const DetailView& dv, int tx, int tz, int Q,
+void BuildTile(const TerrainLattice& map, const DetailView& dv, int tx, int tz, int Q,
                int W, int H, float map_w, float map_h,
                const TerrainClusterParams& params, TileBuild& out) {
-  const float sp = map.spacing_m();
+  const float sp = map.spacing_m;
   const int qx0 = tx * Q, qx1 = std::min((tx + 1) * Q, W);
   const int qz0 = tz * Q, qz1 = std::min((tz + 1) * Q, H);
   BuildProfile& prof = out.prof;
@@ -1582,15 +1591,15 @@ void SelectClusters(const TerrainClusterDag& dag, glm::vec3 cam_pos,
 }
 
 
-TerrainClusterDag BuildTerrainClusterDag(const MapData& map,
+TerrainClusterDag BuildTerrainClusterDag(const TerrainLattice& map,
                                          const TerrainClusterParams& params,
                                          const TerrainDetailField* detail) {
   const auto t_start = std::chrono::steady_clock::now();
-  const float sp = map.spacing_m();
+  const float sp = map.spacing_m;
   const int Q = std::max(1, params.tile_quads);
   // Quads span the lattice: (nodes-1) quads over nodes vertices per axis.
-  const int W = std::max(0, map.nodes_x() - 1);
-  const int H = std::max(0, map.nodes_z() - 1);
+  const int W = std::max(0, map.nodes_x - 1);
+  const int H = std::max(0, map.nodes_z - 1);
 
   TerrainClusterDag dag;
   dag.map_quads_x = W;

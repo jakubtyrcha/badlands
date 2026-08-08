@@ -1,0 +1,33 @@
+{
+  "_comment": "Ground SLOT -> PBR pack for the terrain-blend texture arrays. Keyed by ground_slot_name() (src/mapview/ground_splat.hpp); the array layer index is the GroundSlot enum value (bare_rock=0, scree=1, stony_ground=2, turf=3, heath=4, peat=5, silt=6, forest_floor=7). The 'default' block must name every slot. A block named after a mapgen::TerrainClass may be PARTIAL -- it overrides the slots it names and inherits the rest -- which is how a granite tor and a limestone dale get different rock without restating the whole set. All packs must share one texture size (currently 1024x1024): a texture array has one size for all layers.",
+
+  "_asset_gap": "PROVISIONAL, pending the material-variation (brush) work -- and severely constrained by what exists. assets/materials/ holds 37 pack directories but only 15 carry a material.json, and just 10 of those are ground rather than bark, brick, plank or paving. There is NO grass, heath, peat or snow pack at all, so the vegetated slots below point at the closest rock or leaf-litter available and read far too stony against patches that are ~90% grass. Four Poly Haven CC0 packs would fix it; that is asset work, not code. Slots that share a pack do so because nothing else is available, not by design.",
+
+  "default": {
+    "bare_rock": "assets/materials/lichen_rock_1k",
+    "scree": "assets/materials/aerial_rocks_01_1k",
+    "stony_ground": "assets/materials/rocky_terrain_02_1k",
+    "turf": "assets/materials/forest_ground_06_1k",
+    "heath": "assets/materials/forest_ground_06_1k",
+    "peat": "assets/materials/brown_mud_03_1k",
+    "silt": "assets/materials/river_small_rocks_1k",
+    "forest_floor": "assets/materials/brown_mud_leaves_01_1k"
+  },
+
+  "tor_blockfield": {
+    "bare_rock": "assets/materials/rock_boulder_cracked_1k"
+  },
+  "karst_pavement": {
+    "bare_rock": "assets/materials/rock_embedded_floor_1k",
+    "stony_ground": "assets/materials/dry_riverbed_rock_1k"
+  },
+  "alpine_talus": {
+    "bare_rock": "assets/materials/rock_boulder_cracked_1k"
+  },
+  "wooded_fluvial": {
+    "silt": "assets/materials/dry_riverbed_rock_1k"
+  },
+  "lowland_drift": {
+    "stony_ground": "assets/materials/dry_riverbed_rock_1k"
+  }
+}

@@ -42,6 +42,8 @@ using badlands::TerrainClusterParams;
 namespace {
 
 using badlands::MapData;
+using badlands::TerrainLattice;
+using badlands::TerrainLatticeStorage;
 
 // The DAG's leaf grid is the MapData lattice: (nodes-1) quads over `nodes`
 // vertices per axis. The suite's `w`/`h` are QUAD counts (matching the old
@@ -53,7 +55,20 @@ using badlands::MapData;
 // collapses interior verts and reports non-trivial error, so the monotonicity
 // and sphere checks exercise real numbers rather than a flat plane. Diagonal
 // two-biome split so vertex color varies and the attribute metric is engaged.
-MapData MakeMapData(int w, int h) {
+// Owns a gameplay map AND the lattice view of it. The view holds raw pointers
+// into the map, so the two have to travel together; the implicit conversion is
+// what keeps every call site reading as it did before the builder stopped
+// taking a whole map.
+struct TestMap {
+  MapData map;
+  mutable TerrainLatticeStorage store;
+  operator const TerrainLattice&() const {
+    store = map.Lattice();
+    return store.View();
+  }
+};
+
+TestMap MakeMapData(int w, int h) {
   const int nodes_x = w + 1, nodes_z = h + 1;
   MapData m(nodes_x, nodes_z, 1.0f);
   for (int j = 0; j < nodes_z; ++j) {
@@ -69,17 +84,17 @@ MapData MakeMapData(int w, int h) {
       m.mutable_slice(static_cast<int>(b), i, j) = 255;
     }
   }
-  return m;
+  return TestMap{std::move(m), {}};
 }
 
 // Flat single-biome map for the cheap grid-arithmetic checks.
-MapData MakeFlatMapData(int w, int h, badlands::mapgen::Biome biome) {
+TestMap MakeFlatMapData(int w, int h, badlands::mapgen::Biome biome) {
   const int nodes_x = w + 1, nodes_z = h + 1;
   MapData m(nodes_x, nodes_z, 1.0f);
   for (int j = 0; j < nodes_z; ++j)
     for (int i = 0; i < nodes_x; ++i)
       m.mutable_slice(static_cast<int>(biome), i, j) = 255;
-  return m;
+  return TestMap{std::move(m), {}};
 }
 
 // --- bitwise vertex helpers -------------------------------------------------
@@ -601,7 +616,7 @@ struct DetailFixture {
   TerrainDetailField field;
 };
 
-DetailFixture MakeDetail(const MapData& map, int w, int h,
+DetailFixture MakeDetail(const TestMap& map, int w, int h,
                          const std::function<int(int, int)>& exp_of,
                          float dent_cx, float dent_cz, float dent_r,
                          float dent_depth) {
@@ -616,7 +631,7 @@ DetailFixture MakeDetail(const MapData& map, int w, int h,
   fx.field.height = h;
   fx.field.height_at = [&map, dent_cx, dent_cz, dent_r,
                         dent_depth](float wx, float wz) {
-    const float base = map.HeightAt(wx, wz);
+    const float base = map.map.HeightAt(wx, wz);
     const float dx = wx - dent_cx, dz = wz - dent_cz;
     const float d = std::sqrt(dx * dx + dz * dz);
     if (d >= dent_r) return base;
@@ -861,7 +876,7 @@ void CheckColdTilesIdentical(const TerrainClusterDag& da,
 TEST_CASE("terrain detail: absent detail reproduces today's build bitwise",
           "[terrain_clusters]") {
   const int w = 32, h = 32;
-  const MapData map = MakeMapData(w, h);
+  const TestMap map = MakeMapData(w, h);
   const auto base = BuildTerrainClusterDag(map);
   SECTION("null field") {
     RequireDagsBitIdentical(base, BuildTerrainClusterDag(map, {}, nullptr));
@@ -882,7 +897,7 @@ TEST_CASE("terrain detail: absent detail reproduces today's build bitwise",
 TEST_CASE("terrain detail: refined leaves are watertight at every factor",
           "[terrain_clusters]") {
   const int w = 32, h = 32;
-  const MapData map = MakeMapData(w, h);
+  const TestMap map = MakeMapData(w, h);
   const auto base = BuildTerrainClusterDag(map);
   for (int k : {1, 2, 3}) {
     DYNAMIC_SECTION("k=" << k) {
@@ -914,7 +929,7 @@ TEST_CASE("terrain detail: refined leaves are watertight at every factor",
 TEST_CASE("terrain detail: unequal exponents meet at the coarser resolution",
           "[terrain_clusters]") {
   const int w = 32, h = 32;
-  const MapData map = MakeMapData(w, h);
+  const TestMap map = MakeMapData(w, h);
   // k=3 against k=2 side by side within one tile: the shared edge must carry
   // exactly the coarser side's vertices (fe = 4 -> 3 interior positions), with
   // the finer side fanning down to them.
@@ -952,7 +967,7 @@ TEST_CASE("terrain detail: unequal exponents meet at the coarser resolution",
 TEST_CASE("terrain detail: islands and single quads hold the invariants",
           "[terrain_clusters]") {
   const int w = 32, h = 32;
-  const MapData map = MakeMapData(w, h);
+  const TestMap map = MakeMapData(w, h);
   const auto base = BuildTerrainClusterDag(map);
   const DetailFixture fx = MakeDetail(
       map, w, h,
@@ -975,7 +990,7 @@ TEST_CASE("terrain detail: islands and single quads hold the invariants",
 TEST_CASE("terrain detail: selected cuts stay exact watertight covers",
           "[terrain_clusters]") {
   const int w = 32, h = 32;
-  const MapData map = MakeMapData(w, h);
+  const TestMap map = MakeMapData(w, h);
   const DetailFixture fx = MakeDetail(
       map, w, h,
       [](int qx, int qz) { return (std::abs(qx - qz) <= 1) ? 3 : 0; }, 16.0f,
@@ -1008,7 +1023,7 @@ TEST_CASE("terrain detail: selected cuts stay exact watertight covers",
 TEST_CASE("terrain detail: the pre-pass leaves a sound mixed-depth tree",
           "[terrain_clusters]") {
   const int w = 32, h = 32;
-  const MapData map = MakeMapData(w, h);
+  const TestMap map = MakeMapData(w, h);
   const DetailFixture fx = MakeDetail(
       map, w, h,
       [](int qx, int qz) { return (std::abs(qx - qz) <= 1) ? 3 : 0; }, 16.0f,
@@ -1044,7 +1059,7 @@ TEST_CASE("terrain detail: the pre-pass leaves a sound mixed-depth tree",
 TEST_CASE("terrain detail: parallel == serial, bitwise, on a mixed-depth build",
           "[terrain_clusters]") {
   const int w = 32, h = 32;
-  const MapData map = MakeMapData(w, h);
+  const TestMap map = MakeMapData(w, h);
   const DetailFixture fx = MakeDetail(
       map, w, h,
       [](int qx, int qz) { return (std::abs(qx - qz) <= 1) ? 3 : 0; }, 16.0f,
@@ -1068,7 +1083,7 @@ TEST_CASE("terrain detail: a solid refined block terminates and stays sound",
   // build at ~50 MB/s). This test's job is to TERMINATE; the checks after are
   // the usual soundness sweep on the fixture's unusually seam-heavy tree.
   const int w = 32, h = 32;
-  const MapData map = MakeMapData(w, h);
+  const TestMap map = MakeMapData(w, h);
   const DetailFixture fx = MakeDetail(
       map, w, h,
       [](int qx, int qz) {

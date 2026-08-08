@@ -1,9 +1,9 @@
 #pragma once
 
 // Shared, app-agnostic cluster-LOD terrain module. Encapsulates the whole
-// MapData -> render pipeline so an app only supplies MapData + its render
+// TerrainLattice -> render pipeline so an app only supplies a lattice + its render
 // context/registry:
-//   * Build   -- builds the Nanite-style cluster DAG from the frozen MapData
+//   * Build   -- builds the Nanite-style cluster DAG from the lattice
 //                contract, its own vertex-color material factory, and one
 //                terrain entity (shared mesh + empty MeshDrawRangesComponent +
 //                whole-map AABB) into the registry.
@@ -28,7 +28,7 @@
 #include <glm/glm.hpp>
 
 #include "engine/rendering/material_library.hpp"  // MaterialLibrary::TerrainArrays
-#include "game/geometry/terrain_clusters.hpp"  // TerrainClusterDag, MapData, tau consts
+#include "game/geometry/terrain_clusters.hpp"  // TerrainClusterDag, TerrainLattice, tau consts
 
 namespace badlands {
 
@@ -65,7 +65,7 @@ class ClusterTerrain {
   //
   // Returns false if the material factory fails to build. Seeds an initial LOD
   // cut so the first rendered frame draws.
-  bool Build(const MapData& map, const RenderContext& ctx,
+  bool Build(const TerrainLattice& map, const RenderContext& ctx,
              entt::registry& registry, const glm::mat4& model,
              const TerrainClusterParams& params,
              const MaterialLibrary::TerrainArrays& arrays,

@@ -11,7 +11,7 @@
 #include <string>
 #include <vector>
 
-#include "mapgen/biomes.hpp"
+#include "mapgen/cover.hpp"
 #include "mapgen/patch_io.hpp"
 #include "mapgen/river_clip.hpp"
 #include "mapgen/river_io.hpp"
@@ -54,11 +54,11 @@ void write_manifest(const std::string& dir, int res, float size_m) {
 // store level == height.
 void write_map(const std::string& dir, int n, float size_m,
                const std::vector<float>& height, const std::vector<float>& level,
-               const std::vector<uint8_t>& biome) {
+               const std::vector<uint8_t>& cover) {
   write_manifest(dir, n, size_m);
   write_raw(dir + "/height.f32", height);
   write_raw(dir + "/level.f32", level);
-  write_raw(dir + "/biome.u8", biome);
+  write_raw(dir + "/cover.u8", cover);
 }
 
 }  // namespace
@@ -158,15 +158,15 @@ TEST_CASE("load_patch round-trips a written directory", "[map_io]") {
   const int n = 8;
   const float size_m = 64.0f;
   std::vector<float> height(n * n), level(n * n);
-  std::vector<uint8_t> biome(n * n, uint8_t(Biome::Plains));
+  std::vector<uint8_t> cover(n * n, uint8_t(Cover::Grass));
   for (int i = 0; i < n * n; ++i) {
     height[i] = 100.0f + i;
     level[i] = height[i];  // all dry
   }
   height[20] = 50.0f;
   level[20] = 60.0f;  // one wet texel, 10 m deep
-  biome[20] = uint8_t(Biome::Lake);
-  write_map(dir.str(), n, size_m, height, level, biome);
+  cover[20] = uint8_t(Cover::Water);
+  write_map(dir.str(), n, size_m, height, level, cover);
 
   std::string err;
   const auto p = load_patch(dir.str(), &err);
@@ -175,7 +175,7 @@ TEST_CASE("load_patch round-trips a written directory", "[map_io]") {
   CHECK(p->height.width == n);
   CHECK(p->height.height == n);
   CHECK(p->height.data == height);
-  CHECK(p->biome.data == biome);
+  CHECK(p->cover.data == cover);
   REQUIRE(p->lakes.size() == 1);
   CHECK(p->lakes[0].max_depth_m == 10.0f);
   CHECK(p->water_depth.data[20] == 10.0f);
@@ -190,8 +190,8 @@ TEST_CASE("a raster whose size contradicts the manifest is rejected",
   TempDir dir("badsize");
   const int n = 8;
   std::vector<float> height(n * n, 1.0f), level(n * n, 1.0f);
-  std::vector<uint8_t> biome(n * n, uint8_t(Biome::Plains));
-  write_map(dir.str(), n, 64.0f, height, level, biome);
+  std::vector<uint8_t> cover(n * n, uint8_t(Cover::Grass));
+  write_map(dir.str(), n, 64.0f, height, level, cover);
   write_manifest(dir.str(), 16, 64.0f);  // claims 16x16, files hold 8x8
 
   std::string err;
@@ -200,19 +200,57 @@ TEST_CASE("a raster whose size contradicts the manifest is rejected",
   CHECK_THAT(err, Catch::Matchers::ContainsSubstring("expected"));
 }
 
-TEST_CASE("an out-of-range biome is rejected", "[map_io]") {
+TEST_CASE("an out-of-range cover is rejected", "[map_io]") {
   // A bad index silently samples the wrong terrain texture array layer, so it
   // must fail here rather than on the GPU.
-  TempDir dir("badbiome");
+  TempDir dir("badcover");
   const int n = 4;
   std::vector<float> height(n * n, 1.0f), level(n * n, 1.0f);
-  std::vector<uint8_t> biome(n * n, uint8_t(Biome::Plains));
-  biome[5] = 200;
-  write_map(dir.str(), n, 16.0f, height, level, biome);
+  std::vector<uint8_t> cover(n * n, uint8_t(Cover::Grass));
+  cover[5] = 200;
+  write_map(dir.str(), n, 16.0f, height, level, cover);
 
   std::string err;
   CHECK_FALSE(load_patch(dir.str(), &err).has_value());
-  CHECK_THAT(err, Catch::Matchers::ContainsSubstring("biome.u8"));
+  CHECK_THAT(err, Catch::Matchers::ContainsSubstring("cover.u8"));
+}
+
+TEST_CASE("terrain_class round-trips, and its absence is Unknown", "[map_io]") {
+  // Same forward-compatibility rule as soil.f32 and rivers.bin: a directory
+  // written before the key existed must still load, and an unrecognised name
+  // from a newer writer must degrade to Unknown rather than fail.
+  TempDir dir("terrainclass");
+  const int n = 4;
+
+  PatchData p;
+  p.texel_m = 4.0f;
+  p.height = Field2D<float>(n, n, 10.0f);
+  p.level = p.height;
+  p.cover = Field2D<uint8_t>(n, n, uint8_t(Cover::Grass));
+  p.soil = Field2D<float>(n, n, 1.0f);
+  p.terrain_class = TerrainClass::TorBlockfield;
+
+  std::string err;
+  REQUIRE(write_patch(dir.str(), p, "unit-test", &err));
+  const auto loaded = load_patch(dir.str(), &err);
+  REQUIRE(loaded.has_value());
+  CHECK(loaded->terrain_class == TerrainClass::TorBlockfield);
+
+  SECTION("a manifest with no terrain_class key loads as Unknown") {
+    write_manifest(dir.str(), n, p.texel_m * n);  // rewrites map.txt without it
+    const auto reloaded = load_patch(dir.str(), &err);
+    REQUIRE(reloaded.has_value());
+    CHECK(reloaded->terrain_class == TerrainClass::Unknown);
+  }
+
+  SECTION("a name this build does not know is Unknown, not an error") {
+    std::ofstream f(dir.str() + "/map.txt", std::ios::app);
+    f << "terrain_class loess_plateau\n";
+    f.close();
+    const auto reloaded = load_patch(dir.str(), &err);
+    REQUIRE(reloaded.has_value());
+    CHECK(reloaded->terrain_class == TerrainClass::Unknown);
+  }
 }
 
 TEST_CASE("a missing or malformed manifest is reported, not guessed",
@@ -255,7 +293,7 @@ TEST_CASE("write_patch + load_patch round-trips a PatchData bit-identically",
   p.origin_m = glm::dvec2(100.0, -50.0);
   p.height = Field2D<float>(n, n);
   p.level = Field2D<float>(n, n);
-  p.biome = Field2D<uint8_t>(n, n, uint8_t(Biome::Plains));
+  p.cover = Field2D<uint8_t>(n, n, uint8_t(Cover::Grass));
   p.soil = Field2D<float>(n, n);
   for (int i = 0; i < n * n; ++i) {
     p.height.data[i] = 100.0f + 0.5f * static_cast<float>(i);
@@ -263,7 +301,7 @@ TEST_CASE("write_patch + load_patch round-trips a PatchData bit-identically",
     p.soil.data[i] = 0.1f * static_cast<float>(i);
   }
   p.level.data[7] = p.height.data[7] + 3.0f;  // one wet texel, 3 m deep
-  p.biome.data[7] = uint8_t(Biome::Lake);
+  p.cover.data[7] = uint8_t(Cover::Water);
   derive_water(p.height, p.level, p.texel_m, p.water_depth, p.lake_id, p.lakes);
 
   std::string err;
@@ -275,7 +313,7 @@ TEST_CASE("write_patch + load_patch round-trips a PatchData bit-identically",
   CHECK(err.empty());
   CHECK(loaded->height.data == p.height.data);
   CHECK(loaded->level.data == p.level.data);
-  CHECK(loaded->biome.data == p.biome.data);
+  CHECK(loaded->cover.data == p.cover.data);
   CHECK(loaded->soil.data == p.soil.data);
   // The derived water block is not written -- load_patch reproduces it from
   // height + level, so it must match what the same derivation gave `p`.
@@ -301,8 +339,8 @@ TEST_CASE("soil absent on disk loads as zeros, correctly sized",
   TempDir dir("nosoil");
   const int n = 5;
   std::vector<float> height(n * n, 10.0f), level(n * n, 10.0f);
-  std::vector<uint8_t> biome(n * n, uint8_t(Biome::Plains));
-  write_map(dir.str(), n, 40.0f, height, level, biome);  // no soil.f32 written
+  std::vector<uint8_t> cover(n * n, uint8_t(Cover::Grass));
+  write_map(dir.str(), n, 40.0f, height, level, cover);  // no soil.f32 written
 
   std::string err;
   const auto p = load_patch(dir.str(), &err);
@@ -325,7 +363,7 @@ TEST_CASE("write_patch + load_patch round-trips rivers exactly", "[map_io]") {
   p.texel_m = size_m / static_cast<float>(n);
   p.height = Field2D<float>(n, n, 100.0f);
   p.level = Field2D<float>(n, n, 100.0f);
-  p.biome = Field2D<uint8_t>(n, n, uint8_t(Biome::Plains));
+  p.cover = Field2D<uint8_t>(n, n, uint8_t(Cover::Grass));
   p.soil = Field2D<float>(n, n, 1.0f);
   derive_water(p.height, p.level, p.texel_m, p.water_depth, p.lake_id, p.lakes);
 
@@ -392,8 +430,8 @@ TEST_CASE("rivers.bin absent on disk loads as an empty graph", "[map_io]") {
   TempDir dir("norivers");
   const int n = 5;
   std::vector<float> height(n * n, 10.0f), level(n * n, 10.0f);
-  std::vector<uint8_t> biome(n * n, uint8_t(Biome::Plains));
-  write_map(dir.str(), n, 40.0f, height, level, biome);  // no rivers.bin written
+  std::vector<uint8_t> cover(n * n, uint8_t(Cover::Grass));
+  write_map(dir.str(), n, 40.0f, height, level, cover);  // no rivers.bin written
   CHECK_FALSE(std::filesystem::exists(dir.str() + "/rivers.bin"));
 
   std::string err;
@@ -545,7 +583,7 @@ TEST_CASE("write_patch + load_patch round-trips AWKWARD geometry exactly",
   p.origin_m = glm::dvec2(11840.546875, 11776.328125);
   p.height = Field2D<float>(n, n, 100.0f);
   p.level = p.height;
-  p.biome = Field2D<uint8_t>(n, n, static_cast<uint8_t>(Biome::Plains));
+  p.cover = Field2D<uint8_t>(n, n, static_cast<uint8_t>(Cover::Grass));
   p.soil = Field2D<float>(n, n, 2.0f);
 
   std::string err;

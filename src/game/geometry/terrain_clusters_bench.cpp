@@ -107,8 +107,8 @@ badlands::mapgen::Field2D<float> MakeBaseHeight() {
   return h;
 }
 
-// The frozen MapData lattice, built exactly as MakeOneHotMapData does in
-// map_view_view.cpp: ONE MORE NODE than texels per axis, edge nodes clamping to
+// The gameplay map, built exactly as the mapview one is: ONE MORE NODE than
+// texels per axis, edge nodes clamping to
 // the last texel, so node i sits at i * texel_m and the lattice spans the map.
 // Biome follows elevation, which is both deterministic and the way a real map
 // correlates -- it gives the attribute metric something to weigh.
@@ -174,6 +174,10 @@ badlands::mapgen::RiverGraph MakeMeanderGraph() {
 struct Fixture {
   badlands::mapgen::Field2D<float> base;
   MapData map;
+  // The lattice view of `map`, and the buffer it had to derive. Rebuilt after
+  // `map` is assigned, since the view holds raw pointers into it.
+  badlands::TerrainLatticeStorage store;
+  const badlands::TerrainLattice& lattice() { return store.View(); }
   // Heap-allocated and never moved: detail.height_at closes over a raw pointer
   // to it, exactly as map_view_view.cpp does, and a dangling pointer here would
   // be a silent wrong-height bug rather than a crash.
@@ -196,6 +200,7 @@ Fixture MakeFixture() {
   Fixture f;
   f.base = MakeBaseHeight();
   f.map = MakeMapData(f.base);
+  f.store = f.map.Lattice();
 
   const badlands::mapgen::RiverGraph graph = MakeMeanderGraph();
   const float texel_m = kWorldM / static_cast<float>(kTexels);
@@ -253,8 +258,10 @@ Fixture MakeFixture() {
 
 // Built once and shared: the carve alone costs more than a DAG build at this
 // size, and every case below wants the identical input.
-const Fixture& TheFixture() {
-  static const Fixture f = MakeFixture();
+Fixture& TheFixture() {
+  // Non-const because the lattice view has to be re-seated on access -- it
+  // holds a raw pointer into the fixture's own buffers.
+  static Fixture f = MakeFixture();
   return f;
 }
 
@@ -337,7 +344,7 @@ constexpr uint64_t kGoldenDagHash = 0x4b4e13b7e370cfe3ull;
 
 TEST_CASE("cluster bench fixture matches the production cost profile",
           "[terrain][cluster][golden]") {
-  const Fixture& f = TheFixture();
+  Fixture& f = TheFixture();
   const double texel_frac =
       double(f.corridor_texels) / double(kTexels) / double(kTexels);
   const double quad_frac =
@@ -363,9 +370,9 @@ TEST_CASE("cluster bench fixture matches the production cost profile",
 
 TEST_CASE("terrain cluster DAG output is bit-identical to the pinned golden",
           "[terrain][cluster][golden]") {
-  const Fixture& f = TheFixture();
+  Fixture& f = TheFixture();
   const TerrainClusterDag dag =
-      BuildTerrainClusterDag(f.map, TerrainClusterParams{}, &f.detail);
+      BuildTerrainClusterDag(f.lattice(), TerrainClusterParams{}, &f.detail);
 
   REQUIRE(dag.level_count > 1);
   REQUIRE(!dag.clusters.empty());
@@ -380,15 +387,15 @@ TEST_CASE("terrain cluster DAG output is bit-identical to the pinned golden",
 
 TEST_CASE("serial and parallel builds agree byte for byte",
           "[terrain][cluster][golden]") {
-  const Fixture& f = TheFixture();
+  Fixture& f = TheFixture();
 
   TerrainClusterParams par;
   par.parallel_build = true;
   TerrainClusterParams ser;
   ser.parallel_build = false;
 
-  const TerrainClusterDag a = BuildTerrainClusterDag(f.map, par, &f.detail);
-  const TerrainClusterDag b = BuildTerrainClusterDag(f.map, ser, &f.detail);
+  const TerrainClusterDag a = BuildTerrainClusterDag(f.lattice(), par, &f.detail);
+  const TerrainClusterDag b = BuildTerrainClusterDag(f.lattice(), ser, &f.detail);
 
   // parallel_build is documented as a SCHEDULING knob only. On the detailed
   // fixture it exercises the pre-pass path as well as the main merge, which the
@@ -400,30 +407,30 @@ TEST_CASE("serial and parallel builds agree byte for byte",
 // ([.]) so ctest and the benchmark run stay quiet; run it explicitly with
 // `scripts/test.sh badlands_terrain_cluster_bench "[profile]"`.
 TEST_CASE("terrain cluster DAG build profile", "[.][profile]") {
-  const Fixture& f = TheFixture();
+  Fixture& f = TheFixture();
   spdlog::set_level(spdlog::level::info);
   const TerrainClusterDag dag =
-      BuildTerrainClusterDag(f.map, TerrainClusterParams{}, &f.detail);
+      BuildTerrainClusterDag(f.lattice(), TerrainClusterParams{}, &f.detail);
   spdlog::set_level(spdlog::level::off);
   CHECK(!dag.clusters.empty());
 }
 
 TEST_CASE("terrain cluster DAG build", "[.][bench]") {
-  const Fixture& f = TheFixture();
+  Fixture& f = TheFixture();
 
   BENCHMARK("build with river detail (parallel)") {
-    return BuildTerrainClusterDag(f.map, TerrainClusterParams{}, &f.detail)
+    return BuildTerrainClusterDag(f.lattice(), TerrainClusterParams{}, &f.detail)
         .clusters.size();
   };
 
   BENCHMARK("build with river detail (serial)") {
     TerrainClusterParams p;
     p.parallel_build = false;
-    return BuildTerrainClusterDag(f.map, p, &f.detail).clusters.size();
+    return BuildTerrainClusterDag(f.lattice(), p, &f.detail).clusters.size();
   };
 
   BENCHMARK("build with no detail field (parallel)") {
-    return BuildTerrainClusterDag(f.map, TerrainClusterParams{}, nullptr)
+    return BuildTerrainClusterDag(f.lattice(), TerrainClusterParams{}, nullptr)
         .clusters.size();
   };
 }

@@ -8,6 +8,9 @@
 //                      request inside the world's extent; geometry comes
 //                      from --patch-size / --patch-res / --patch-origin
 //                      (--tag picks which snapshot, default the latest).
+//                    - raw.json present -> a terrain-net BUNDLE: real
+//                      bare-earth LiDAR plus land cover (mapgen/
+//                      terrain_net_patch_source.hpp). Its own geometry wins.
 //                    - map.txt present -> a finished PATCH (mapgen/
 //                      patch_io.hpp's on-disk form). Loaded as a
 //                      mapgen::FilePatchSource; geometry (resolution,
@@ -66,6 +69,7 @@
 #include "executables/mapview/map_view_view.hpp"
 #include "mapgen/coarse_world_patch_source.hpp"
 #include "mapgen/file_patch_source.hpp"
+#include "mapgen/terrain_net_patch_source.hpp"
 #include "mapgen/synthetic_patch_source.hpp"
 
 namespace {
@@ -102,8 +106,11 @@ bool SelectPatchSource(
     // means a whole coarse world (any request inside its extent is
     // answerable); map.txt means one finished patch (the manifest names its
     // own geometry, full stop -- see mapgen/patch_io.hpp).
+    // raw.json means a terrain-net bundle: real bare-earth LiDAR plus land
+    // cover, the same "one finished survey" shape as a patch dir.
     const bool has_world = std::filesystem::exists(load_dir + "/world.txt");
     const bool has_patch = std::filesystem::exists(load_dir + "/map.txt");
+    const bool has_bundle = badlands::mapgen::IsTerrainNetBundle(load_dir);
     if (has_world) {
       std::string err;
       std::unique_ptr<badlands::mapgen::CoarseWorldPatchSource> coarse_source =
@@ -141,10 +148,33 @@ bool SelectPatchSource(
       if (!file_source->source().empty())
         std::printf("mapview:   source: %s\n", file_source->source().c_str());
       source = std::move(file_source);
+    } else if (has_bundle) {
+      std::string err;
+      std::unique_ptr<badlands::mapgen::TerrainNetPatchSource> bundle =
+          badlands::mapgen::LoadTerrainNetPatchSource(load_dir, &err);
+      if (!bundle) {
+        std::fprintf(stderr, "mapview: %s\n", err.c_str());
+        return false;
+      }
+      // Same rule as a patch dir: a survey is a finished artifact, so Fetch
+      // ignores the request and the geometry handed back is what it holds.
+      request = bundle->native_request();
+      std::printf("mapview: loading %s (%dx%d texels, %.0f m, %.2f m/texel)\n",
+                  load_dir.c_str(), request.resolution, request.resolution,
+                  request.world_size_m,
+                  badlands::mapgen::patch_texel_m(request));
+      if (!bundle->area().empty())
+        std::printf("mapview:   area: %s\n", bundle->area().c_str());
+      std::printf("mapview:   terrain class: %s, nodata filled: %.3f%%\n",
+                  std::string(badlands::mapgen::terrain_class_name(
+                                  bundle->Fetch(request).terrain_class))
+                      .c_str(),
+                  bundle->nodata_fraction() * 100.0f);
+      source = std::move(bundle);
     } else {
       std::fprintf(stderr,
-                   "mapview: %s has neither world.txt (a coarse world) nor "
-                   "map.txt (a patch)\n",
+                   "mapview: %s has none of world.txt (a coarse world), "
+                   "map.txt (a patch) or raw.json (a terrain-net bundle)\n",
                    load_dir.c_str());
       return false;
     }

@@ -777,6 +777,13 @@ add_library(badlands_mapgen_lib STATIC
     # (src/foliage/ compiles this TU directly rather than linking this lib).
     src/mapgen/distance_field.cpp
     src/mapgen/hydrology.cpp
+    # Prepass + the two TEMPORARY stand-in fields a heightfield-only map source
+    # needs (soil from slope, standing water from flood-fill vetoed by observed
+    # cover). They live here rather than beside the provider because none of
+    # them knows what a patch is -- each is a pure function of a raster.
+    src/mapgen/nodata_fill.cpp
+    src/mapgen/soil_estimate.cpp
+    src/mapgen/standing_water.cpp
     src/mapgen/river_clip.cpp
     src/mapgen/river_prune.cpp
     src/mapgen/river_graph.cpp
@@ -820,10 +827,14 @@ add_library(badlands_patch_providers STATIC
     src/mapgen/synthetic_patch_source.cpp
     src/mapgen/file_patch_source.cpp
     src/mapgen/coarse_world_patch_source.cpp
+    # Real LiDAR bundles (terrain-net). Reads the --format raw side only --
+    # three flat arrays plus a JSON sidecar -- so nothing here parses a GeoTIFF.
+    src/mapgen/terrain_net_patch_source.cpp
     src/mapgen/cubic_sample.cpp
     src/mapgen/relief_filter.cpp
     src/mapgen/patch_export.cpp)
-target_link_libraries(badlands_patch_providers PUBLIC badlands_patch_lib)
+target_link_libraries(badlands_patch_providers PUBLIC badlands_patch_lib
+    nlohmann_json::nlohmann_json)
 
 # badlands_mapview_view: everything the map tool needs to fetch a patch and
 # render it, EXCEPT the main that picks which PatchSource to fetch from.
@@ -835,8 +846,8 @@ target_link_libraries(badlands_patch_providers PUBLIC badlands_patch_lib)
 # links the providers directly, may choose one.
 add_library(badlands_mapview_view STATIC
     src/executables/mapview/map_view_view.cpp
-    src/mapview/biome_manifest.cpp
-    src/mapview/biome_splat.cpp
+    src/game/map/visual_map_data.cpp
+    src/mapview/ground_splat.cpp
     src/mapview/lake_surface.cpp
     src/mapview/river_surface.cpp
     src/game/geometry/terrain_mesh.cpp
@@ -962,6 +973,23 @@ target_include_directories(badlands_river_tests PRIVATE
 )
 target_link_libraries(badlands_river_tests PRIVATE badlands_mapgen_lib)
 add_test(NAME badlands_river_tests COMMAND badlands_river_tests
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# badlands_patch_fields_tests: the raster prepass and the two TEMPORARY
+# stand-in fields -- nodata fill, soil from slope, standing water from
+# flood-fill vetoed by observed cover. Pure CPU, no patch and no provider: each
+# subject is a function of a raster, which is exactly what makes them
+# replaceable when the simulation supplies the real thing.
+add_executable(badlands_patch_fields_tests
+    src/mapgen/nodata_fill_tests.cpp
+    src/mapgen/patch_fields_tests.cpp
+    third_party/catch2/extras/catch_amalgamated.cpp
+)
+target_include_directories(badlands_patch_fields_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+)
+target_link_libraries(badlands_patch_fields_tests PRIVATE badlands_mapgen_lib)
+add_test(NAME badlands_patch_fields_tests COMMAND badlands_patch_fields_tests
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_artifact_io_tests: the coarse (protogen) artifact's on-disk form --
@@ -2238,9 +2266,10 @@ target_include_directories(badlands_biome_manifest_tests PRIVATE
 target_link_libraries(badlands_biome_manifest_tests PRIVATE nlohmann_json::nlohmann_json)
 add_test(NAME badlands_biome_manifest_tests COMMAND badlands_biome_manifest_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
-# badlands_biome_splat_tests: pure-CPU tests for the biome -> splat raster the
-# cluster terrain samples by world XZ (slot index == Biome enum == terrain array
-# layer index, weights sum to full, at most two layers per texel).
+# badlands_ground_splat_tests: pure-CPU tests for the patch -> ground splat the
+# cluster terrain samples by world XZ (slot index == terrain array layer index,
+# weights sum to full, at most two layers per texel), plus the slot -> pack
+# manifest. Pins DIRECTION, not the provisional tuning constants.
 # badlands_foliage_tests: the foliage placement library — the underlying
 # methods (depth curve, hash, clump remap, EDT depth field, slope probe, cell
 # indexing) each against an analytic answer, then the whole-generator
@@ -2261,17 +2290,20 @@ target_include_directories(badlands_foliage_tests PRIVATE
 )
 add_test(NAME badlands_foliage_tests COMMAND badlands_foliage_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
-add_executable(badlands_biome_splat_tests
-    src/mapview/tests/biome_splat_tests.cpp
-    src/mapview/biome_splat.cpp
+add_executable(badlands_ground_splat_tests
+    src/mapview/tests/ground_splat_tests.cpp
+    src/mapview/ground_splat.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
-target_include_directories(badlands_biome_splat_tests PRIVATE
+target_include_directories(badlands_ground_splat_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/third_party/glm
     ${CMAKE_SOURCE_DIR}/third_party/catch2/extras
+    ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
 )
-add_test(NAME badlands_biome_splat_tests COMMAND badlands_biome_splat_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+target_link_libraries(badlands_ground_splat_tests PRIVATE
+    badlands_patch_lib nlohmann_json::nlohmann_json)
+add_test(NAME badlands_ground_splat_tests COMMAND badlands_ground_splat_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # badlands_patch_io_tests: the on-disk patch form -- the level convention
 # (depth = max(0, level - height)), lake derivation, and the size/range checks
@@ -2293,6 +2325,7 @@ add_test(NAME badlands_patch_io_tests COMMAND badlands_patch_io_tests WORKING_DI
 # fixture is a synthetic coarse artifact the test writes itself.
 add_executable(badlands_patch_tests
     src/mapgen/coarse_world_patch_source_tests.cpp
+    src/mapgen/terrain_net_patch_source_tests.cpp
     third_party/catch2/extras/catch_amalgamated.cpp
 )
 target_include_directories(badlands_patch_tests PRIVATE

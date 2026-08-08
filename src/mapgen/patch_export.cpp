@@ -5,12 +5,13 @@
 
 #include <glm/glm.hpp>
 
-#include "mapgen/biomes.hpp"
+#include "mapgen/cover.hpp"
 #include "mapgen/river_network.hpp"
 
 namespace badlands::mapgen {
 
 namespace {
+
 
 // PRESENTATION constants. Unlike everything else in this directory these are
 // picked to be readable, not physical -- they only ever reach an image. The
@@ -112,15 +113,16 @@ std::vector<uint8_t> encode_height_water_rgba(const Field2D<float>& height,
   return rgba;
 }
 
-std::vector<uint8_t> encode_biome_rgba(const Field2D<uint8_t>& biome) {
-  const int w = biome.width, h = biome.height;
+std::vector<uint8_t> encode_cover_rgba(const Field2D<uint8_t>& cover) {
+  const int w = cover.width, h = cover.height;
   if (w <= 0 || h <= 0) return {};
 
   std::vector<uint8_t> rgba(static_cast<size_t>(w) * h * 4);
   for (int y = 0; y < h; ++y) {
     for (int x = 0; x < w; ++x) {
-      const uint8_t id = biome.at(x, y);
-      const Rgb tone = id < kBiomeCount ? kBiomePalette[id] : Rgb{0, 0, 0};
+      const uint8_t id = cover.at(x, y);
+      const Rgb tone =
+          id < kCoverCount ? kCoverPalette[id] : Rgb{0, 0, 0};
       put(rgba, (static_cast<size_t>(y) * w + x) * 4, tone);
     }
   }
