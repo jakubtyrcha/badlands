@@ -4,8 +4,15 @@
 
 namespace sq {
 
+// `counters` is deliberately NOT consulted.
+//
+// An interaction whose only net effect is advancing next_id_ -- spawn then
+// delete inside one bracket -- would otherwise push an undo step that visibly
+// does nothing when pressed, which is a worse outcome than the one it prevents.
+// It is safe to drop: the id it consumed belonged to a node that exists in no
+// recorded state, so re-issuing it later collides with nothing.
 bool Delta::empty() const {
-    return added.empty() && removed.empty() && changed.empty();
+    return added.empty() && removed.empty() && changed.empty() && order.empty();
 }
 
 Delta decompose(const SceneDocument& baseline, const SceneDocument& current) {
@@ -43,6 +50,30 @@ Delta decompose(const SceneDocument& baseline, const SceneDocument& current) {
         }
     }
 
+    // A pure reordering changes no field on any node, so everything above comes
+    // back empty and the reorder would be lost. Recorded only when the sequence
+    // add/remove alone would produce differs from the real one, so the common
+    // case still carries nothing.
+    std::vector<int32_t> replayed;
+    replayed.reserve(before.size());
+    for (const Node& node : before) {
+        if (find_in(after, node.id) != nullptr) {
+            replayed.push_back(node.id); // survivors, in their OLD order
+        }
+    }
+    for (const Delta::Added& added : delta.added) {
+        const size_t at = std::min(added.index, replayed.size());
+        replayed.insert(replayed.begin() + static_cast<ptrdiff_t>(at), added.node.id);
+    }
+    std::vector<int32_t> actual;
+    actual.reserve(after.size());
+    for (const Node& node : after) {
+        actual.push_back(node.id);
+    }
+    if (replayed != actual) {
+        delta.order = std::move(actual);
+    }
+
     return delta;
 }
 
@@ -66,6 +97,12 @@ void apply(SceneDocument& doc, const Delta& delta) {
     // account for that -- they were read off the finished vector.
     for (const Delta::Added& added : delta.added) {
         doc.insert(added.node, added.index);
+    }
+
+    // Only present when add/remove alone could not reproduce the sequence.
+    // Applied last, so it sees every node it names.
+    if (!delta.order.empty()) {
+        doc.reorder(delta.order);
     }
 
     doc.set_counters(delta.counters);

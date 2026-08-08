@@ -787,3 +787,79 @@ TEST_CASE("Editor: a dial turn is one undo entry") {
     CHECK(editor->nodeShapeParam(spawned.node_id) == doctest::Approx(before));
     CHECK(label_of(&sq::Editor::undoLabel, *editor) == "Spawn"); // ten calls, ONE entry
 }
+
+// --- reordering, which no field comparison can see --------------------------
+
+TEST_CASE("a pure reordering is recorded and replayed") {
+    SceneDocument baseline;
+    for (int i = 0; i < 4; ++i) {
+        spawn(baseline, float(i));
+    }
+
+    SceneDocument current = clone(baseline);
+    std::vector<int32_t> swapped;
+    for (const Node& n : current.nodes()) swapped.push_back(n.id);
+    std::swap(swapped[0], swapped[3]);
+    current.reorder(swapped);
+
+    const Delta delta = decompose(baseline, current);
+    // No node's FIELDS changed, so without an order record this delta would be
+    // empty and the reorder lost -- silently repainting the scene, since
+    // sdf_fold folds in vector order and a Subtract carves everything before it.
+    CHECK_FALSE(delta.empty());
+    CHECK(delta.added.empty());
+    CHECK(delta.removed.empty());
+    CHECK(delta.changed.empty());
+
+    SceneDocument replayed = clone(baseline);
+    apply(replayed, delta);
+    CHECK(same_document(replayed, current));
+}
+
+TEST_CASE("an add that lands in order records no reordering") {
+    SceneDocument baseline;
+    spawn(baseline, 0);
+    spawn(baseline, 1);
+
+    SceneDocument current = clone(baseline);
+    spawn(current, 2);
+
+    // The common case must stay cheap: add/remove alone reproduce the sequence.
+    CHECK(decompose(baseline, current).order.empty());
+}
+
+TEST_CASE("a reorder combined with an add and a remove replays exactly") {
+    SceneDocument baseline;
+    for (int i = 0; i < 5; ++i) {
+        spawn(baseline, float(i));
+    }
+
+    SceneDocument current = clone(baseline);
+    current.erase(current.nodes()[1].id);
+    spawn(current, 99);
+    std::vector<int32_t> ids;
+    for (const Node& n : current.nodes()) ids.push_back(n.id);
+    std::reverse(ids.begin(), ids.end());
+    current.reorder(ids);
+
+    SceneDocument replayed = clone(baseline);
+    apply(replayed, decompose(baseline, current));
+
+    REQUIRE(replayed.nodes().size() == current.nodes().size());
+    for (size_t i = 0; i < current.nodes().size(); ++i) {
+        CHECK(replayed.nodes()[i].id == current.nodes()[i].id);
+    }
+}
+
+TEST_CASE("reorder keeps nodes a stale sequence does not name") {
+    SceneDocument doc;
+    const int32_t a = spawn(doc, 0);
+    const int32_t b = spawn(doc, 1);
+    spawn(doc, 2);
+
+    doc.reorder(std::vector<int32_t>{b, a}); // says nothing about the third
+
+    CHECK(doc.nodes().size() == 3); // nothing dropped
+    CHECK(doc.nodes()[0].id == b);
+    CHECK(doc.nodes()[1].id == a);
+}

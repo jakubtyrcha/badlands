@@ -90,13 +90,17 @@ std::vector<SdfNode> pack_scene(const SceneDocument& doc) {
 }
 
 std::optional<float> evaluate_scene_sdf(const SceneDocument& doc, simd_float3 p) {
-    if (doc.nodes().empty()) {
-        return std::nullopt;
-    }
     // Single-point convenience query: packs once, folds once. sample_scene
     // below is the perf-sensitive path (N^3 fold evaluations) and packs
     // once itself rather than calling this function per sample point.
     const std::vector<SdfNode> packed = pack_scene(doc);
+    // Guarded on the PACKED count, not on doc.nodes(): a document holding only
+    // Groups has nodes but no geometry, and sdf_fold over nothing returns
+    // FLT_MAX -- which would be handed back as though it were a real distance
+    // rather than the nullopt that means "there is no scene here".
+    if (packed.empty()) {
+        return std::nullopt;
+    }
     return sdf_fold(packed.data(), static_cast<int>(packed.size()), p);
 }
 
@@ -135,7 +139,11 @@ Aabb scene_aabb(const SceneDocument& doc) {
 } // namespace
 
 SampleGrid sample_scene(const SceneDocument& doc, int32_t n) {
-    if (doc.nodes().empty()) {
+    // Pack first and gate on THAT, for the same reason evaluate_scene_sdf does:
+    // a document of Groups alone has nodes and no geometry, and sampling it
+    // would fill every cell with FLT_MAX rather than reporting an empty grid.
+    const std::vector<SdfNode> packed = pack_scene(doc);
+    if (packed.empty()) {
         return SampleGrid{};
     }
     assert(n >= 2 && "sample_scene: n must be >= 2 for a non-empty scene");
@@ -153,10 +161,9 @@ SampleGrid sample_scene(const SceneDocument& doc, int32_t n) {
     grid.n = n;
     grid.values.resize(static_cast<size_t>(n) * static_cast<size_t>(n) * static_cast<size_t>(n));
 
-    // Pack once, fold N^3 times: evaluate_scene_sdf would re-pack (allocate)
-    // per sample point, which is the exact per-call cost this loop cannot
-    // afford at n=64 (262144 samples).
-    const std::vector<SdfNode> packed = pack_scene(doc);
+    // Packed ONCE, above, and folded N^3 times: evaluate_scene_sdf would
+    // re-pack (allocate) per sample point, which is the exact per-call cost
+    // this loop cannot afford at n=64 (262144 samples).
     const int node_count = static_cast<int>(packed.size());
 
     for (int32_t z = 0; z < n; ++z) {

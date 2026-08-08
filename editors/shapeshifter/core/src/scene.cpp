@@ -259,6 +259,29 @@ void SceneDocument::erase(int32_t id) {
     std::erase_if(nodes_, [id](const Node& node) { return node.id == id; });
 }
 
+void SceneDocument::reorder(const std::vector<int32_t>& ids) {
+    std::vector<Node> out;
+    out.reserve(nodes_.size());
+    for (const int32_t id : ids) {
+        for (Node& node : nodes_) {
+            if (node.id == id) {
+                out.push_back(std::move(node));
+                node.id = kInvalidNode; // claimed; the sweep below skips it
+                break;
+            }
+        }
+    }
+    // Anything `ids` did not name keeps its relative order at the end, so a
+    // stale sequence degrades into a partial reorder rather than dropping
+    // nodes on the floor.
+    for (Node& node : nodes_) {
+        if (node.id != kInvalidNode) {
+            out.push_back(std::move(node));
+        }
+    }
+    nodes_ = std::move(out);
+}
+
 Node SceneDocument::make_node(Shape shape, Op op) {
     Node node;
     node.id = next_id_++;
@@ -307,7 +330,7 @@ int32_t SceneDocument::spawn_unsnapped(Shape shape, Op op, simd_float3 position)
     return add(std::move(node)).id; // world-rooted, resting on nothing
 }
 
-bool SceneDocument::attach(int32_t id, ParentRef parent, bool preserve_world_pose) {
+bool SceneDocument::attach(int32_t id, ParentRef parent, bool preserve_world_transform) {
     Node* node = find(id);
     if (node == nullptr) {
         return false;
@@ -334,23 +357,45 @@ bool SceneDocument::attach(int32_t id, ParentRef parent, bool preserve_world_pos
         }
     }
 
-    // Captured BEFORE the parent changes, since that is the pose being kept.
-    const Frame world = placement(id).frame;
+    // Captured BEFORE the parent changes, since this is what is being kept.
+    const NodePlacement before = placement(id);
     node->parent = std::move(parent);
-    if (preserve_world_pose) {
-        const Frame local = relative_to(parent_frame(id), world);
-        node->local_position = local.position;
-        node->local_rotation = local.rotation;
-        // local.uniform_scale is deliberately dropped. A Shape contributes 1
-        // regardless, and a Group's scale is its own authored size rather than
-        // something to be solved for -- re-parenting must not silently resize
-        // an assembly.
+    if (!preserve_world_transform) {
+        return true;
+    }
+
+    const Frame pf = parent_frame(id);
+    const Frame local = relative_to(pf, before.frame);
+    node->local_position = local.position;
+    node->local_rotation = local.rotation;
+
+    // SIZE, not just pose. A Shape contributes exactly 1 to uniform_scale by
+    // construction, so hanging it under a Group scaled 4x would quadruple the
+    // box it renders and picks against -- a very visible move, on an operation
+    // whose whole promise is that nothing moves. The inherited factor is a
+    // single scalar, so dividing it out of the node's own scale is exact.
+    //
+    // Works for a Group too, and for the same expression: changing its scale
+    // changes its own contribution by precisely that factor.
+    const float after = placement(id).frame.uniform_scale;
+    if (after > 1e-6f && std::isfinite(after)) {
+        node->scale *= before.frame.uniform_scale / after;
+    }
+
+    // The contact is a fact about a SURFACE, and surfaces do not move because
+    // something was re-parented. Its point and normal are stored in the
+    // PARENT's frame, so leaving them alone would silently re-read them against
+    // a different frame -- anchoring the Placement gizmo, and the rotate drag's
+    // pivot, somewhere nowhere near the skin the node rests on.
+    if (node->contact.valid && before.contact.has_value()) {
+        node->contact.point = inverse_transform_point(pf, before.contact->point);
+        node->contact.normal = inverse_transform_direction(pf, before.contact->normal);
     }
     return true;
 }
 
 void SceneDocument::detach(int32_t id) {
-    attach(id, ParentRef{}, /*preserve_world_pose=*/true);
+    attach(id, ParentRef{}, /*preserve_world_transform=*/true);
 }
 
 void SceneDocument::remove_node(int32_t id, OrphanPolicy policy) {

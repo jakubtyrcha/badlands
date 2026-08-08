@@ -178,7 +178,14 @@ struct RadialMenu: View {
                     let target = drag.startFraction + CGFloat(swept / 180.0)
                     vm.setSelectedShapeParam(Self.value(atFraction: target, in: spec))
                 }
+                // Guarded on `drag`, exactly like the disappear path below, so
+                // the pair is symmetric. If the knob vanished mid-gesture and
+                // onDisappear already closed the interaction, an unconditional
+                // end here would decrement an OUTER interaction's refcount --
+                // committing it early and splitting one gesture into two undo
+                // entries.
                 .onEnded { _ in
+                    guard drag != nil else { return }
                     drag = nil
                     vm.endInteraction()
                 }

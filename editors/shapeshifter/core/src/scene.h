@@ -166,6 +166,10 @@ public:
     // reproducing a state that already accounted for it. remove_node is the
     // editing operation; this is the mechanical one.
     void erase(int32_t id);
+    // Rearranges the node vector into `ids`. Ids not present are skipped, and
+    // any node `ids` does not name keeps its relative position at the end, so a
+    // stale sequence degrades rather than dropping nodes.
+    void reorder(const std::vector<int32_t>& ids);
 
     // WHERE A NODE IS. The only way to ask, and deliberately the only way:
     // consumers that compose placement out of a Node's own fields are what make
@@ -245,24 +249,33 @@ public:
     // handle attaching and detaching before there is a way to ask for it --
     // otherwise the model is a claim rather than a capability.
 
-    // Re-parents `id`. With preserve_world_pose the node does not appear to
-    // move: its local transform is re-solved against the new parent's frame
-    // (relative_to), so only the frame it is EXPRESSED in changes. Without it,
-    // the existing local transform is simply reinterpreted in the new frame,
-    // and the node jumps.
+    // Re-parents `id`. With preserve_world_transform NOTHING about the node
+    // changes on screen: position, orientation AND size are all held, and only
+    // the frame they are EXPRESSED in moves. Without it, the existing local
+    // transform is reinterpreted in the new frame and the node jumps.
     //
-    // `contact` is untouched either way. What a node rests on is not changed by
-    // whose frame its transform is written in -- that separation is the point.
+    // Size is part of that promise, not an extra. A Shape contributes exactly 1
+    // to uniform_scale by construction, so hanging one under a Group scaled 4x
+    // would otherwise quadruple the box it renders and picks against -- a very
+    // visible move, on an operation that claims to make none. The inherited
+    // factor is a single scalar, so it is divided out of the node's own scale
+    // exactly.
+    //
+    // `contact.surface` and `contact.valid` are untouched -- what a node rests
+    // ON is not changed by whose frame its transform is written in. But
+    // contact.point/normal are stored in the PARENT's frame, so they are
+    // RE-EXPRESSED against the new one: a surface does not move because
+    // something was re-parented.
     //
     // Returns false, having changed nothing, for an unknown id, a parent id
     // that does not exist, self-parenting, or any parent whose own chain
     // already passes through `id`. THE CYCLE CHECK LIVES HERE, at the mutation
     // boundary, so placement()'s depth guard only ever sees a document someone
     // corrupted by writing fields directly.
-    bool attach(int32_t id, ParentRef parent, bool preserve_world_pose = true);
+    bool attach(int32_t id, ParentRef parent, bool preserve_world_transform = true);
 
-    // Re-roots to world with the world pose unchanged. detach of an already
-    // world-rooted node is a no-op.
+    // Re-roots to world with the world transform unchanged. detach of an
+    // already world-rooted node is a no-op.
     void detach(int32_t id);
 
     // What becomes of a removed node's CHILDREN -- the transform relation, not

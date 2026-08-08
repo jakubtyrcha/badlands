@@ -644,3 +644,97 @@ TEST_CASE("clearing the provider re-roots without losing the binding") {
     CHECK(doc.find(id)->parent.attachment == "hand.R"); // the binding is still there
     check_float3_approx(doc.placement(id).frame.position, simd_float3{1, 0, 0});
 }
+
+// --- attach preserves the whole transform, and re-states the contact ---------
+//
+// Regressions for a code review. Each of these passed silently before, because
+// the existing attach cases asserted position and rotation and nothing else.
+
+TEST_CASE("attach preserves world SIZE under a scaled Group") {
+    SceneDocument doc;
+    const int32_t group = doc.add_group();
+    doc.set_node_scale(group, simd_float3{4, 4, 4});
+
+    const int32_t child = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{1, 0, 0});
+    const simd_float3 before = doc.placement(child).half_extents;
+
+    REQUIRE(doc.attach(child, node_parent(group)));
+
+    // Without compensation the box would quadruple -- a very visible move, on
+    // an operation whose whole promise is that nothing moves.
+    check_float3_approx(doc.placement(child).half_extents, before);
+}
+
+TEST_CASE("detach preserves world size on the way back out") {
+    SceneDocument doc;
+    const int32_t group = doc.add_group();
+    doc.set_node_scale(group, simd_float3{3, 3, 3});
+    const int32_t child = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{1, 0, 0});
+    REQUIRE(doc.attach(child, node_parent(group)));
+    const simd_float3 attached = doc.placement(child).half_extents;
+
+    doc.detach(child);
+
+    check_float3_approx(doc.placement(child).half_extents, attached);
+}
+
+TEST_CASE("attach and detach round-trip the whole transform") {
+    SceneDocument doc;
+    const int32_t group = doc.add_group();
+    doc.set_node_scale(group, simd_float3{2.5f, 2.5f, 2.5f});
+    doc.find(group)->local_position = simd_float3{7, -2, 1};
+    doc.find(group)->local_rotation = simd_quaternion(0.9f, simd_normalize(simd_float3{1, 2, 3}));
+
+    const int32_t child = doc.spawn_unsnapped(Shape::Cone, Op::Add, simd_float3{1, 2, 3});
+    doc.set_node_scale(child, simd_float3{2, 1, 0.5f});
+    const NodePlacement before = doc.placement(child);
+
+    REQUIRE(doc.attach(child, node_parent(group)));
+    doc.detach(child);
+
+    const NodePlacement after = doc.placement(child);
+    check_float3_approx(after.frame.position, before.frame.position);
+    check_float3_approx(after.half_extents, before.half_extents);
+    check_float3_approx(simd_act(after.frame.rotation, simd_float3{1, 0, 0}),
+                        simd_act(before.frame.rotation, simd_float3{1, 0, 0}));
+}
+
+// A surface does not move because something was re-parented. contact.point is
+// stored in the PARENT's frame, so leaving it alone would silently re-read it
+// against a different one -- putting the Placement gizmo, and the rotate drag's
+// pivot, nowhere near the skin the node rests on.
+TEST_CASE("attach re-states the contact so it stays on its surface") {
+    SceneDocument doc;
+    const int32_t base = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    const int32_t detail = doc.spawn_snapped(Shape::Sphere, Op::Add, simd_float3{0, 0.5f, 0},
+                                             simd_float3{0, 1, 0}, base);
+    const int32_t elsewhere = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{9, 9, 9});
+
+    const WorldContact before = *doc.placement(detail).contact;
+    REQUIRE(doc.attach(detail, node_parent(elsewhere)));
+
+    const NodePlacement after = doc.placement(detail);
+    REQUIRE(after.contact.has_value());
+    check_float3_approx(after.contact->point, before.point);
+    check_float3_approx(after.contact->normal, before.normal);
+}
+
+TEST_CASE("attach re-states the contact through a rotated, scaled parent") {
+    SceneDocument doc;
+    const int32_t base = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    const int32_t detail = doc.spawn_snapped(Shape::Sphere, Op::Add, simd_float3{0, 0.5f, 0},
+                                             simd_float3{0, 1, 0}, base);
+    const int32_t group = doc.add_group();
+    doc.set_node_scale(group, simd_float3{3, 3, 3});
+    doc.find(group)->local_position = simd_float3{2, 0, -4};
+    doc.find(group)->local_rotation = simd_quaternion(float(M_PI_2), simd_float3{0, 1, 0});
+
+    const WorldContact before = *doc.placement(detail).contact;
+    REQUIRE(doc.attach(detail, node_parent(group)));
+
+    const NodePlacement after = doc.placement(detail);
+    REQUIRE(after.contact.has_value());
+    check_float3_approx(after.contact->point, before.point);
+    check_float3_approx(after.contact->normal, before.normal);
+    CHECK(simd_length(after.contact->normal) == doctest::Approx(1.0f));
+}

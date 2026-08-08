@@ -35,6 +35,12 @@ struct Delta {
     std::vector<Added> added;
     std::vector<int32_t> removed;  // by id
     std::vector<Node> changed;     // matched by id
+    // The full id sequence, recorded ONLY when the surviving nodes' order
+    // changed. A pure reordering touches no field on any node, so add/remove/
+    // change would all come back empty and the reorder would vanish on replay --
+    // and order is not cosmetic here, since sdf_fold reduces in vector order
+    // and a Subtract carves everything before it. Empty means "unchanged".
+    std::vector<int32_t> order;
     Counters counters;
 
     bool empty() const;

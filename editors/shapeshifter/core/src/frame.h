@@ -75,6 +75,13 @@ simd_float3 transform_point(const Frame& f, simd_float3 p);
 // the gizmo builds a tangent basis from it.
 simd_float3 transform_direction(const Frame& f, simd_float3 d);
 
+// The inverses of the two above: a world point/direction expressed back in
+// `f`. What attach() needs to re-state a contact against a new parent, since a
+// surface does not move because something was re-parented. A degenerate
+// uniform_scale is treated as 1 rather than dividing the point away.
+simd_float3 inverse_transform_point(const Frame& f, simd_float3 p);
+simd_float3 inverse_transform_direction(const Frame& f, simd_float3 d);
+
 // The inverse of compose: the local frame that, composed with `parent`, yields
 // `world`. What attach() solves to keep a node's world pose while changing
 // whose frame its transform is expressed in.

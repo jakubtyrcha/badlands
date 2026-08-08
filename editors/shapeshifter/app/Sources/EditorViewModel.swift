@@ -103,8 +103,17 @@ final class EditorViewModel {
         // gesture began. Core also guards defensively (updateDrag no-ops if
         // the selection no longer matches the captured node), but the gesture
         // should be cleanly ended here regardless.
+        //
+        // The INTERACTION has to be closed for the same reason, and the cost of
+        // forgetting is worse than a stale drag. `pointer` is cleared just
+        // below, so the eventual mouseUp lands in `case nil` and the matching
+        // endInteraction never arrives — leaving History::depth_ pinned above
+        // zero, where every later begin/end pair merely nests and NO undo entry
+        // is ever pushed again. Silent, and permanent until a ⌘Z force-closes
+        // it and commits the whole accumulated blob as one step.
         if isDragging {
             editor.endDrag()
+            endInteraction()
             isDragging = false
         }
         pointer = nil

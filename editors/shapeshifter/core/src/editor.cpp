@@ -789,11 +789,17 @@ void Editor::updateDrag(float x, float y) {
             // and finite by construction — see scale_axis_param.
             scale[axis] = impl_->drag.start_scale[axis] * (*s / impl_->drag.start_axis_s);
         }
-        node->scale = simd_float3{
+        // THROUGH the setter, not around it. set_node_scale exists because a
+        // Group's scale has to stay uniform -- compose has no meaning for a
+        // Group at {1,2,1} -- and this is the one place that could have written
+        // one directly. Unreachable today only because raycast_scene skips
+        // Groups so none can be picked, which is exactly the kind of accident
+        // that stops being true later.
+        impl_->scene.set_node_scale(node->id, simd_float3{
             std::clamp(scale.x, kNodeScaleMin, kNodeScaleMax),
             std::clamp(scale.y, kNodeScaleMin, kNodeScaleMax),
             std::clamp(scale.z, kNodeScaleMin, kNodeScaleMax),
-        };
+        });
         impl_->markSceneLinesDirty();
         return;
     }
@@ -922,11 +928,15 @@ void Editor::setNodeOp(int32_t nodeId, Op op) {
 }
 
 Vec3f Editor::nodeScale(int32_t nodeId) const {
-    const Node* node = impl_->scene.find(nodeId);
-    if (node == nullptr) {
-        return Vec3f{0.0f, 0.0f, 0.0f};
-    }
-    return Vec3f{node->scale.x, node->scale.y, node->scale.z};
+    // WORLD, to match nodePosition and nodeRotation. Reporting the node's own
+    // box here while those two report resolved values would hand any caller
+    // reading the trio a mixed-frame answer -- one that disagrees with what is
+    // rendered the moment anything is parented under a scaled Group.
+    //
+    // Doubled because half_extents is what the document resolves and what
+    // pack_scene writes; scale is the full extent it was derived from.
+    const simd_float3 extent = 2.0f * impl_->scene.placement(nodeId).half_extents;
+    return Vec3f{extent.x, extent.y, extent.z};
 }
 
 Vec4f Editor::nodeRotation(int32_t nodeId) const {
