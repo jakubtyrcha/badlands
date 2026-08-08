@@ -116,16 +116,31 @@ Frame SceneDocument::resolve_parent_frame(const Node& node, bool& binding_resolv
     // document cannot blow the stack.
     const Node* chain[kMaxParentDepth];
     int depth = 0;
+    // Identity unless the walk ends at a resolved external attachment, in which
+    // case the rig supplies the frame everything above sits on.
+    Frame base;
+
     for (const Node* cur = &node;;) {
         if (cur->parent.kind == ParentRef::Kind::World) {
             break;
         }
         if (cur->parent.kind == ParentRef::Kind::Attachment) {
-            // No FrameProvider is wired up yet, so an attachment-named parent
-            // cannot resolve and the node falls back to world-rooted. Reported
-            // rather than silent, so a later UI can say the binding is broken
-            // instead of leaving the node at the origin unexplained.
-            binding_resolved = false;
+            // The chain leaves the document here. Whatever the provider hands
+            // back has ALREADY crossed frame_from_matrix, so it is a similarity
+            // and cannot carry shear into anything composed on top of it.
+            const std::optional<Frame> attached =
+                provider_ != nullptr ? provider_->frame_for_attachment(cur->parent.attachment)
+                                     : std::nullopt;
+            if (attached.has_value()) {
+                base = *attached;
+            } else {
+                // No provider, or a name it does not know. The node stays
+                // USABLE -- world-rooted -- and says so, rather than sitting at
+                // the origin with no explanation. Reported from wherever in the
+                // chain it happened, so a descendant of a broken binding knows
+                // its own placement is untrustworthy too.
+                binding_resolved = false;
+            }
             break;
         }
         const Node* parent = find(cur->parent.node);
@@ -144,7 +159,7 @@ Frame SceneDocument::resolve_parent_frame(const Node& node, bool& binding_resolv
         cur = parent;
     }
 
-    Frame f;
+    Frame f = base;
     for (int i = depth - 1; i >= 0; --i) {
         f = compose(f, local_frame(*chain[i]));
     }

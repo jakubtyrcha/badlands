@@ -522,3 +522,125 @@ TEST_CASE("remove_node on an unknown id is a no-op under both policies") {
     doc.remove_node(9999, SceneDocument::OrphanPolicy::Cascade);
     CHECK(doc.nodes().size() == 1);
 }
+
+// --- the external attachment seam -------------------------------------------
+//
+// The animation-preview seam, exercised with no animation code anywhere. A real
+// provider will be backed by AnimationSet::AttachmentTransform(id, pose) --
+// name-addressed, exactly like this, because that is the contract the engine
+// already has: joints and sockets share one namespace and nothing public can
+// ask which it found.
+
+namespace {
+
+// Resolves one name and nothing else, so the miss path is exercised by every
+// other name a test tries.
+class StubRig : public FrameProvider {
+public:
+    std::optional<Frame> frame_for_attachment(const std::string& name) const override {
+        if (name != "hand.R") {
+            return std::nullopt;
+        }
+        Frame f;
+        f.position = simd_float3{0, 2, 0};
+        f.rotation = simd_quaternion(float(M_PI_2), simd_float3{0, 1, 0});
+        return f;
+    }
+};
+
+ParentRef attachment_parent(const char* name) {
+    ParentRef ref;
+    ref.kind = ParentRef::Kind::Attachment;
+    ref.attachment = name;
+    return ref;
+}
+
+} // namespace
+
+TEST_CASE("a node parented to a known attachment resolves through the provider") {
+    StubRig rig;
+    SceneDocument doc;
+    doc.set_frame_provider(&rig);
+
+    const int32_t id = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{1, 0, 0});
+    doc.find(id)->parent = attachment_parent("hand.R");
+
+    const NodePlacement p = doc.placement(id);
+    CHECK(p.binding_resolved);
+    // The joint sits at {0,2,0} turned +90 about Y, which sends +X to -Z.
+    check_float3_approx(p.frame.position, simd_float3{0, 2, -1});
+}
+
+TEST_CASE("a chain above an attachment composes on top of the rig's frame") {
+    StubRig rig;
+    SceneDocument doc;
+    doc.set_frame_provider(&rig);
+
+    const int32_t group = doc.add_group();
+    doc.set_node_scale(group, simd_float3{2, 2, 2});
+    doc.find(group)->parent = attachment_parent("hand.R");
+
+    const int32_t leaf = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{1, 0, 0});
+    set_parent(doc, leaf, group);
+
+    const NodePlacement p = doc.placement(leaf);
+    CHECK(p.binding_resolved);
+    CHECK(p.frame.uniform_scale == doctest::Approx(2.0f));
+    // The group scales the offset to 2, then the joint's rotation sends +X to -Z.
+    check_float3_approx(p.frame.position, simd_float3{0, 2, -2});
+}
+
+TEST_CASE("an unknown attachment name falls back to world-rooted") {
+    StubRig rig;
+    SceneDocument doc;
+    doc.set_frame_provider(&rig);
+
+    const int32_t id = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{1, 2, 3});
+    doc.find(id)->parent = attachment_parent("no.such.joint");
+
+    const NodePlacement p = doc.placement(id);
+    CHECK_FALSE(p.binding_resolved);
+    check_float3_approx(p.frame.position, simd_float3{1, 2, 3}); // usable, not stranded
+}
+
+TEST_CASE("a null provider falls back to world-rooted") {
+    SceneDocument doc; // no provider at all -- the default, and today's state
+
+    const int32_t id = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{1, 2, 3});
+    doc.find(id)->parent = attachment_parent("hand.R");
+
+    const NodePlacement p = doc.placement(id);
+    CHECK_FALSE(p.binding_resolved);
+    check_float3_approx(p.frame.position, simd_float3{1, 2, 3});
+}
+
+// A descendant of a broken binding is misplaced too, and has to be able to know
+// it rather than reporting a confidently wrong frame.
+TEST_CASE("an unresolved binding is reported to descendants") {
+    SceneDocument doc;
+    const int32_t parent = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    doc.find(parent)->parent = attachment_parent("hand.R"); // no provider
+
+    const int32_t child = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{0, 0, 0});
+    set_parent(doc, child, parent);
+
+    CHECK_FALSE(doc.placement(child).binding_resolved);
+}
+
+// Clearing the provider is what unloading a rig does, and it must not strand
+// anything -- the binding survives, only its resolution goes away.
+TEST_CASE("clearing the provider re-roots without losing the binding") {
+    StubRig rig;
+    SceneDocument doc;
+    doc.set_frame_provider(&rig);
+
+    const int32_t id = doc.spawn_unsnapped(Shape::Cube, Op::Add, simd_float3{1, 0, 0});
+    doc.find(id)->parent = attachment_parent("hand.R");
+    REQUIRE(doc.placement(id).binding_resolved);
+
+    doc.set_frame_provider(nullptr);
+
+    CHECK_FALSE(doc.placement(id).binding_resolved);
+    CHECK(doc.find(id)->parent.attachment == "hand.R"); // the binding is still there
+    check_float3_approx(doc.placement(id).frame.position, simd_float3{1, 0, 0});
+}

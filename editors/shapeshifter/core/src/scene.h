@@ -131,6 +131,19 @@ public:
     // order to store the answer, via relative_to.
     Frame parent_frame(int32_t id) const;
 
+    // THE ANIMATION-PREVIEW SEAM. A node whose parent is an attachment NAME
+    // resolves through this; without one (the default) such a node falls back
+    // to world-rooted and reports binding_resolved == false.
+    //
+    // BORROWED, not owned: the provider outlives nothing here and the document
+    // never frees it. A real one will be backed by
+    // AnimationSet::AttachmentTransform(id, pose), whose glm::mat4 crosses
+    // frame_from_matrix on the way in -- which is where shear and non-uniform
+    // stretch are discarded, since SdfNode can hold neither.
+    //
+    // Nothing in the editor sets one yet. Passing nullptr clears it.
+    void set_frame_provider(const FrameProvider* provider) { provider_ = provider; }
+
     // The chain-length bound. A real hierarchy is a handful deep; this is a
     // CYCLE GUARD, not a design limit, which is why exceeding it is treated as
     // corruption rather than as a supported case.
@@ -245,6 +258,8 @@ private:
     // Groups are not Shapes and have no row in the table above, so they count
     // separately -- "Group 1", "Group 2".
     int32_t group_count_ = 0;
+    // Borrowed; null until something wires up a rig. See set_frame_provider.
+    const FrameProvider* provider_ = nullptr;
 };
 
 } // namespace sq
