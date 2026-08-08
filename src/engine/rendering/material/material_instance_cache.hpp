@@ -7,6 +7,7 @@
 // pinned 3.13.2).
 #include <entt/entt.hpp>
 #include <memory>
+#include <unordered_map>
 
 #include "engine/rendering/material/material_instance_factory.hpp"
 #include "engine/rendering/material/rendering_material_instance.hpp"
@@ -42,13 +43,33 @@ class MaterialInstanceCache {
       const InstanceParams& params = {});
 
   bool Contains(entt::id_type key) const { return cache_.contains(key); }
-  void Erase(entt::id_type key) { cache_.erase(key); }
-  void Clear() { cache_.clear(); }
+  void Erase(entt::id_type key) {
+    cache_.erase(key);
+    provenance_.erase(key);
+  }
+  void Clear() {
+    cache_.clear();
+    provenance_.clear();
+  }
   [[nodiscard]] size_t Size() const { return cache_.size(); }
 
  private:
+  // What a cached entry was actually built from, so a key hit can be checked
+  // against what the caller is asking for rather than trusted. Holds only the
+  // arguments GetOrCreate receives; the caller's `texture_config_hash` goes
+  // into the key but is not passed here, so it is the one key input this
+  // cannot verify (see GetOrCreate).
+  struct Provenance {
+    const MaterialInstanceFactory* factory = nullptr;
+    GeometryType geo{};
+    MaterialPassType material_pass{};
+    RenderPassType pass{};
+    bool reported = false;  // diagnostic emitted once, not once per frame
+  };
+
   entt::resource_cache<RenderingMaterialInstance, MaterialInstanceLoader>
       cache_;
+  std::unordered_map<entt::id_type, Provenance> provenance_;
 };
 
 }  // namespace badlands

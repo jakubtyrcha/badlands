@@ -205,6 +205,23 @@ std::shared_ptr<const CompiledPipeline> GpuPipelineGenerator::GetPipeline(
   pipeline_desc.multisample.mask = ~0u;
   pipeline_desc.multisample.alphaToCoverageEnabled = false;
 
+  // Name the pipeline for Dawn's validation messages. Every pipeline here is
+  // built from the same few shaders and differs only by feature set and target
+  // count, so an unlabeled "attachment state is not compatible" error names
+  // neither the shader nor the variant and says only that SOME pipeline met
+  // the wrong pass. The label is what identified voxel_foliage's G-buffer
+  // variant reaching the depth-only shadow pass. Built once per compile, on
+  // the cache-miss path.
+  const std::string label = decl.shader_path + "|" + decl.fs_entry + "|feat:" +
+                            [&] {
+                              std::string f;
+                              for (const auto& s : decl.features) f += s + ",";
+                              return f;
+                            }() +
+                            "|targets:" + std::to_string(target_formats.size());
+  pipeline_desc.label =
+      WGPUStringView{.data = label.c_str(), .length = label.length()};
+
   wgpu::RenderPipeline pipeline = device_.CreateRenderPipeline(&pipeline_desc);
   if (!pipeline) {
     spdlog::error("GpuPipelineGenerator: Failed to create pipeline: {}",
