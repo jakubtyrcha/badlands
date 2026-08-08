@@ -74,10 +74,18 @@ class CoarseWorldPatchSource final : public PatchSource {
 
 // Loads `dir`: world.txt (mapgen/coarse_io.hpp), the `<tag>-{height,water,
 // soil}.f32` snapshot rasters, and rivers.bin (mapgen/river_io.hpp). An empty
-// `tag` selects the lexicographically LAST `*-height.f32` in the directory --
-// tags are zero-padded step counts ("0060-step"), so lexicographic order is
-// numeric order and the last one is the final step. Returns nullptr with a
-// reason in `error` on any of that failing.
+// `tag` is resolved from the manifest: if `cycles > 0` (phase 1 ran), it is
+// the "%04d-cycle" tag at that count -- the same tag
+// tools/protogen/protogen.cpp's RunExtractRivers goes to -- so a directory
+// holding both a phase-0 "%04d-step" snapshot and a phase-1 "%04d-cycle" one
+// at the same numeric prefix (e.g. `--steps 3000 --cycles 3000`) resolves to
+// the phase-1-finished bed, not whichever sorts last lexicographically
+// ('s' > 'c' would otherwise silently prefer phase 0 -- see FindLatestTag's
+// own comment). Otherwise (no phase-1 provenance) it is the
+// lexicographically LAST `*-height.f32` in the directory -- tags are
+// zero-padded step counts ("0060-step"), so lexicographic order is numeric
+// order and the last one is the final step. Returns nullptr with a reason in
+// `error` on any of that failing.
 std::unique_ptr<CoarseWorldPatchSource> LoadCoarseWorldPatchSource(
     const std::string& dir, const std::string& tag = {},
     std::string* error = nullptr);

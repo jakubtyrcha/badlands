@@ -62,6 +62,12 @@ std::optional<CoarseManifest> load_coarse_manifest(const std::string& dir,
       if (!parse(m.soil_cut_mountain_m)) return std::nullopt;
     } else if (key == "soil_cut_hills_m") {
       if (!parse(m.soil_cut_hills_m)) return std::nullopt;
+    } else if (key == "morfac") {
+      if (!parse(m.morfac)) return std::nullopt;
+    } else if (key == "cycles") {
+      if (!parse(m.cycles)) return std::nullopt;
+    } else if (key == "substeps") {
+      if (!parse(m.substeps)) return std::nullopt;
     }
     // Unknown keys -- including "texel_m", which is written for OTHER readers
     // only (see the header) -- are ignored on purpose: the writer may add
@@ -105,6 +111,9 @@ bool write_coarse_manifest(const std::string& dir, const CoarseManifest& m,
   f << "steps " << m.steps << "\n";
   f << "soil_cut_mountain_m " << fmt_float(m.soil_cut_mountain_m) << "\n";
   f << "soil_cut_hills_m " << fmt_float(m.soil_cut_hills_m) << "\n";
+  f << "morfac " << fmt_float(m.morfac) << "\n";
+  f << "cycles " << m.cycles << "\n";
+  f << "substeps " << m.substeps << "\n";
   if (!f) {
     if (error) *error = "short write on " + path;
     return false;

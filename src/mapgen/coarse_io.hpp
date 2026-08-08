@@ -38,6 +38,15 @@ struct CoarseManifest {
   // against these values directly.
   float soil_cut_mountain_m = 0.0f;
   float soil_cut_hills_m = 0.0f;
+  // Phase-1 provenance (tools/protogen's two-phase morphodynamics, Task 7):
+  // whether/how the SWE fluid+morpho stage ran on top of phase 0's particle
+  // erosion. All three OPTIONAL, like every other field here -- an absent
+  // manifest (predating Task 7) or a phase-0-only run both load with these
+  // at 0, which is the honest reading of "phase 1 did not run" rather than
+  // a special case a consumer has to know about.
+  float morfac = 0.0f;
+  int cycles = 0;
+  int substeps = 0;
 };
 
 // Reads <dir>/world.txt. Returns nullopt and writes the reason to `error` if

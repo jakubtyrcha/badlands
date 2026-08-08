@@ -31,6 +31,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -88,6 +89,13 @@ struct Field {
   float at(int x, int y) const { return v[size_t(y) * n + x]; }
 };
 
+bool FileExists(const std::string& path) {
+  FILE* fp = std::fopen(path.c_str(), "rb");
+  if (!fp) return false;
+  std::fclose(fp);
+  return true;
+}
+
 bool LoadField(const std::string& path, int n, Field& out) {
   FILE* fp = std::fopen(path.c_str(), "rb");
   if (!fp) {
@@ -103,6 +111,39 @@ bool LoadField(const std::string& path, int n, Field& out) {
                  path.c_str(), got, want);
     return false;
   }
+  return true;
+}
+
+// A phase-1 (`NNNN-cycle`) tag has no Q.f32 -- protogen.cpp's DumpPhase1
+// deliberately omits it, since `Qm3s`/`discharge` are phase-0 particle-EMA
+// fields phase 1 never updates, and writing them under a phase-1 tag would
+// dump stale phase-0 state rather than honestly having no opinion (see that
+// function's own comment). But the channel gate needs SOME discharge
+// estimate, and phase 1 carries everything one needs to build a live,
+// non-stale one: `depth` (h) and `vel` (|velocity|) are phase-1's own
+// current state, and Q = h * |v| * cell_m is not a proxy invented here --
+// it is the EXACT formula protogen_swe.cpp's own SweFlux uses to turn a face
+// velocity into a flux (`A_pipe = cell_m * own_h`, flux = v * A_pipe; see
+// its own comment). So this reconstructs the same physical quantity Q.f32
+// would have held, had phase 1 chosen to keep writing it, from state that
+// IS live.
+//
+// Falls back only when Q.f32 is genuinely absent -- a phase-0 tag (which
+// still writes real Q.f32, e.g. the old M16b `--tag 3000-step` usage) keeps
+// reading that file unchanged, so old commands are unaffected.
+bool LoadOrComputeQ(const std::string& base, int n, float cell_m, Field& q) {
+  const std::string q_path = base + "Q.f32";
+  if (FileExists(q_path)) return LoadField(q_path, n, q);
+
+  Field depth, vel;
+  if (!LoadField(base + "depth.f32", n, depth)) return false;
+  if (!LoadField(base + "vel.f32", n, vel)) return false;
+  std::fprintf(stderr,
+               "select: %s missing (phase-1 tag) -- reconstructing Q = "
+               "depth * vel * cell_m from depth.f32/vel.f32\n",
+               q_path.c_str());
+  q = Field(n);
+  for (size_t i = 0; i < q.v.size(); ++i) q.v[i] = depth.v[i] * vel.v[i] * cell_m;
   return true;
 }
 
@@ -349,6 +390,12 @@ void Check(const char* name, bool ok, const std::string& detail) {
   std::printf("  [%s] %-34s %s\n", ok ? "ok" : "FAIL", name, detail.c_str());
 }
 
+std::string F(const char* fmt, double a, double b = 0) {
+  char buf[128];
+  std::snprintf(buf, sizeof(buf), fmt, a, b);
+  return buf;
+}
+
 // Plains must be DRY. A synthetic half-lake/half-flat window scores 100% plain
 // under a bare slope test and 50% once water is excluded -- the bug that put
 // lakes at the top of the real ranking.
@@ -401,11 +448,69 @@ void SuppressionDedups() {
         std::to_string(out.size()) + " kept of " + std::to_string(in.size()));
 }
 
+// Task 8 regression: a phase-1 (`NNNN-cycle`) dump has no Q.f32 -- DumpPhase1
+// deliberately never writes it (protogen.cpp's own comment) -- so running
+// select against one used to fail outright at LoadField's fopen. Two things
+// must hold: (1) Q.f32 absent falls back to depth*vel*cell_m, computed from
+// files that DO exist for a phase-1 tag, and (2) Q.f32 present (every
+// phase-0 tag, e.g. the old M16b `--tag 3000-step` usage) is read verbatim,
+// unmodified by this fallback existing at all.
+void QFallsBackToDepthVelWhenMissing() {
+  namespace fs = std::filesystem;
+  const int n = 4;
+  const float cell_m = 16.0f;
+  std::error_code ec;
+  const fs::path dir = fs::temp_directory_path() / "protogen_select_test";
+  fs::create_directories(dir, ec);
+
+  auto write = [](const std::string& path, const std::vector<float>& v) {
+    FILE* fp = std::fopen(path.c_str(), "wb");
+    std::fwrite(v.data(), sizeof(float), v.size(), fp);
+    std::fclose(fp);
+  };
+
+  // Case 1: phase-1-shaped -- depth.f32/vel.f32 present, Q.f32 absent.
+  {
+    const std::string base = (dir / "1000-cycle-").string();
+    fs::remove(base + "Q.f32", ec);
+    std::vector<float> depth(size_t(n) * n, 0.f), vel(size_t(n) * n, 0.f);
+    depth[5] = 0.5f;
+    vel[5] = 2.0f;  // want Q[5] = 0.5 * 2.0 * cell_m
+    write(base + "depth.f32", depth);
+    write(base + "vel.f32", vel);
+    Field q;
+    const bool loaded = LoadOrComputeQ(base, n, cell_m, q);
+    const float want = 0.5f * 2.0f * cell_m;
+    const bool ok = loaded && std::fabs(q.v[5] - want) < 1e-4f;
+    Check("Q falls back to depth*vel*cell_m (phase-1 tag)", ok,
+          loaded ? F("Q[5]=%.3f want %.3f", double(q.v[5]), double(want))
+                 : std::string("LoadOrComputeQ failed"));
+  }
+
+  // Case 2: phase-0-shaped -- Q.f32 present, must win over any fallback.
+  {
+    const std::string base = (dir / "3000-step-").string();
+    std::vector<float> qfile(size_t(n) * n, 0.f);
+    qfile[5] = 9.0f;  // deliberately NOT depth*vel*cell_m, so a wrongly-taken
+                       // fallback path would read something else here
+    write(base + "Q.f32", qfile);
+    Field q;
+    const bool loaded = LoadOrComputeQ(base, n, cell_m, q);
+    const bool ok = loaded && q.v[5] == 9.0f;
+    Check("Q.f32 read verbatim when present (phase-0 tag)", ok,
+          loaded ? F("Q[5]=%.3f want 9.000", double(q.v[5]))
+                 : std::string("LoadOrComputeQ failed"));
+  }
+
+  fs::remove_all(dir, ec);
+}
+
 int RunAll() {
   std::printf("select sanity\n");
   PlainsExcludeWater();
   GatesReject();
   SuppressionDedups();
+  QFallsBackToDepthVelWhenMissing();
   std::printf("\n  %d passed, %d failed\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;
 }
@@ -521,7 +626,7 @@ int main(int argc, char** argv) {
   const std::string base = p.in + "/" + p.tag + "-";
   if (!LoadField(base + "height.f32", p.src_res, h)) return 1;
   if (!LoadField(base + "water.f32", p.src_res, w)) return 1;
-  if (!LoadField(base + "Q.f32", p.src_res, q)) return 1;
+  if (!LoadOrComputeQ(base, p.src_res, cell_m, q)) return 1;
 
   std::printf("select: source %dx%d at %.1f m (%.0f m world)\n"
               "  window %.0f m = %d source cells\n",

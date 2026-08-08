@@ -427,10 +427,31 @@ bool ReadRaster(const std::string& path, size_t count, std::vector<float>& out,
   return true;
 }
 
+// Formats a manifest `cycles` count the same way tools/protogen/protogen.cpp
+// names a phase-1 snapshot ("%04d-cycle", zero-padded to at least 4 digits,
+// wider if `cycles` itself is): the exact string LoadCoarseWorldPatchSource
+// needs to go straight to the phase-1-finished tag without scanning the
+// directory (see its own comment on why scanning is not safe here).
+std::string CycleTag(int cycles) {
+  std::string s = std::to_string(cycles);
+  if (s.size() < 4) s = std::string(4 - s.size(), '0') + s;
+  return s + "-cycle";
+}
+
 // Picks the lexicographically LAST "*-height.f32" in `dir` and strips the
 // suffix to recover the tag. Tags are zero-padded step counts ("0060-step",
 // see tools/protogen/protogen.cpp's Dump/snprintf("%04d-step", step)), so
 // lexicographic order is numeric order and the last one names the final step.
+//
+// FALLBACK ONLY, as of the code-review fix below: this tie-break cannot
+// distinguish a "%04d-step" snapshot from a same-numbered "%04d-cycle" one
+// (a run given `--steps 3000 --cycles 3000` leaves both families on disk),
+// and 's' sorts after 'c' lexicographically, so it silently preferred the
+// phase-0 bed over a phase-1-finished one at the same numeric tag -- a
+// mismatched render (phase-0 bed, phase-1 rivers/cutoffs) with no
+// diagnostic. LoadCoarseWorldPatchSource now only reaches this scan when
+// the manifest's `cycles` field is absent/zero, i.e. there is no phase-1
+// snapshot to prefer in the first place -- see its own comment.
 std::string FindLatestTag(const std::string& dir, std::string* error) {
   constexpr const char* kSuffix = "-height.f32";
   const size_t suffix_len = std::char_traits<char>::length(kSuffix);
@@ -575,7 +596,19 @@ std::unique_ptr<CoarseWorldPatchSource> LoadCoarseWorldPatchSource(
 
   std::string use_tag = tag;
   if (use_tag.empty()) {
-    use_tag = FindLatestTag(dir, error);
+    // Manifest-driven pick, mirroring RunExtractRivers
+    // (tools/protogen/protogen.cpp): if phase 1 ran, the true final state
+    // is the "%04d-cycle" snapshot at the completed cycle count, not
+    // whichever "*-height.f32" happens to sort last. FindLatestTag's
+    // numeric-then-lexical scan cannot tell a "%04d-cycle" tag apart from a
+    // same-numbered "%04d-step" one left over from phase 0 (see its own
+    // comment for the concrete "--steps 3000 --cycles 3000" case this
+    // fixes) -- going straight to the manifest's own count sidesteps that
+    // ambiguity entirely rather than trying to out-guess it. Manifests
+    // without phase-1 provenance (predating it, or a phase-0-only run, both
+    // read as `cycles == 0`) keep the scan; there is no phase-1 snapshot to
+    // prefer in that case.
+    use_tag = man->cycles > 0 ? CycleTag(man->cycles) : FindLatestTag(dir, error);
     if (use_tag.empty()) return nullptr;
   }
 

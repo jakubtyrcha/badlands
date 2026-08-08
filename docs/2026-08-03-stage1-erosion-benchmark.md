@@ -12,6 +12,14 @@ benchmark and lists where it diverges from the reference it claims to follow.
 
 [art]: https://nickmcd.me/2023/12/12/meandering-rivers-in-particle-based-hydraulic-erosion-simulations/
 
+**Line refs predate the file split.** This report's inline `protogen.cpp:NNN`
+citations were taken when `protogen.cpp` was the single TU; a later task split
+it into `protogen.cpp` (phase 0 + driver), `protogen_swe.cpp` (phase 1), and
+`protogen_tests.cpp` (the `--test` suite) — see `tools/protogen/README.md`'s
+file map. The line numbers (and in some cases the file) no longer match;
+treat every `protogen.cpp:NNN` below as "as of the pre-split single file",
+not as a live pointer.
+
 ---
 
 ## 1. Benchmark run
@@ -19,11 +27,14 @@ benchmark and lists where it diverges from the reference it claims to follow.
 Reproduce exactly:
 
 ```sh
-c++ -O3 -std=c++23 -I src -I third_party/FastNoiseLite -I third_party/glm \
-  -I build/_deps/taskflow-src \
-  tools/protogen/protogen.cpp src/core/parallel.cpp \
+# Current (post file-split) build line -- see tools/protogen/README.md.
+c++ -O3 -std=c++23 \
+  -I src -I third_party/FastNoiseLite -I third_party/glm -I build/_deps/taskflow-src \
+  tools/protogen/protogen.cpp tools/protogen/protogen_swe.cpp tools/protogen/protogen_tests.cpp \
+  src/core/parallel.cpp \
   src/mapgen/hydrology.cpp src/mapgen/river_graph.cpp src/mapgen/river_prune.cpp \
-  src/mapgen/coarse_io.cpp src/mapgen/river_io.cpp -o /tmp/protogen
+  src/mapgen/coarse_io.cpp src/mapgen/river_io.cpp \
+  -o /tmp/protogen
 
 mkdir -p /tmp/pg16 && /tmp/protogen --res 1024 --world 16384 --steps 3000 \
   --drops 4096 --snapshot-every 500 --out /tmp/pg16
@@ -31,7 +42,9 @@ python3 tools/protogen/show.py /tmp/pg16
 ```
 
 Seed 1, 1024² cells, 16 km world (16 m cells), 900 m initial relief,
-3000 steps × 4096 drops = 12.3 M particles. `--test` is green (27/27).
+3000 steps × 4096 drops = 12.3 M particles. `--test` was green (27/27) at the
+time of this report — the single-TU build line above the file split; see the
+"line refs predate the file split" note above.
 
 ### Evolution
 
