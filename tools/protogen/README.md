@@ -89,7 +89,7 @@ cycles, in batches of `--snapshot-every` (reused as a cycle cadence once
 | `protogen.hpp` | shared types (`Params`, `Grid`, `SimStats`) and the handful of functions crossing a TU boundary |
 | `protogen.cpp` | phase 0 (particle walk, cascade), the whole-sim driver (`main`), the output boundary (`world.txt`/`rivers.bin`), run diagnostics, perf report |
 | `protogen_swe.cpp` | phase 1: the SWE fluid passes, the Exner/talus morpho passes, `SweWarmStart`, `ClassifyBoundaryWater` |
-| `protogen_tests.cpp` | the `--test` sanity suite (85 assertions) |
+| `protogen_tests.cpp` | the `--test` sanity suite (87 assertions) |
 | `select.cpp` | phase 2a: gameplay-window scanner (standalone, no CMake, stdlib only) |
 | `show.py` / `soil.py` | render a dump: hillshade + rivers + lakes, depth/velocity (phase-1 only), the soil-cover raster |
 | `lakes.py` / `lakestats.py` | post-hoc priority-flood lake analysis on a bare heightmap — independent of the sim's own `water.f32`, still useful for a phase-0-only dump |
@@ -279,7 +279,7 @@ ripple into the other.
 
 ## Verification
 
-`protogen --test` — **85 assertions** on 32–1024 cell grids at (mostly) the
+`protogen --test` — **87 assertions** on 32–1024 cell grids at (mostly) the
 production 16 m cell size, run in ~22 s (wall time on the reference machine;
 this suite grew from ~6 s across Tasks 5-8 as the phase-1 SWE/warm-start/morpho
 sections were added, and it is machine-load-sensitive -- treat it as an order
@@ -289,7 +289,7 @@ of magnitude, not a regression gate):
 |---|---|
 | mass conservation, determinism, knob liveness, discharge/valley/repose/lobe/bedrock/substrate/symmetry/resolution (phase 0 core) | 21 |
 | physics invariants (some `PEND` until a mechanism lands) | 15 |
-| phase-1 SWE fluid (virtual-pipes shallow water) | 11 |
+| phase-1 SWE fluid (virtual-pipes shallow water) | 13 |
 | phase-0 → phase-1 warm start | 2 |
 | phase-1 morphodynamics (Exner + advection + talus) | 29 |
 | driver, output boundary | 7 |

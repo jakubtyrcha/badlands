@@ -1460,35 +1460,44 @@ void SweTripwire() {
     // cycle (or the initial state, for cycle 0)". That left the FINAL
     // cycle's own substeps completely unchecked -- there is no next cycle's
     // top to catch them at -- so a fault born during the last cycle's
-    // substeps rode out as `ok=true`. The fix checks AFTER every cycle's
-    // substeps (see RunSweCycles's header comment), including the last.
+    // substeps rode out as `ok=true`. The fix checked AFTER every cycle's
+    // substeps; the owner ruling ("CFL staleness" finding) checks AFTER
+    // EVERY SUBSTEP now instead (see RunSweCycles's header comment), which
+    // only makes this test's own promptness guarantee STRICTER -- what
+    // used to be caught at the end of the cycle is now caught right after
+    // the first substep that produces it.
     //
     // To test that specifically, the seed must be INVISIBLE to the check
-    // that runs BEFORE this cycle's substeps (which only inspects `g.h`/
-    // `g.height`) yet cause corruption BY THE END of the substeps that
-    // follow. Poisoning `g.h` directly does not do this -- it is exactly
-    // what the pre-check exists to catch, immediately, at cycle 0 (that is
-    // the FIRST case in this test). Poisoning `g.flux` directly does not
-    // work either, and this is worth recording: SweFlux's own
-    // `if (f_free > 0.f)` gate evaluates false for a NaN operand (as does
-    // `if (f_free < 0.f)`), so ANY NaN flowing into `f_free` -- whether from
-    // a poisoned `flux[i][k]`, a poisoned `h[i]`, or anywhere else feeding
-    // that expression -- gets silently replaced by the branch's untaken-else
-    // default of 0.0, never surviving to be written back. This is a real
-    // (accidental) robustness property of the comparison structure, and it
-    // means "corruption born from otherwise-clean grid state, purely via
-    // normal substep arithmetic" is hard to construct as a test at all.
+    // that runs BEFORE any substep runs at all (the pre-loop starting-state
+    // check, which only inspects `g.h`/`g.height`) yet cause corruption
+    // DURING the substep that follows. Poisoning `g.h` directly does not do
+    // this -- it is exactly what the pre-check exists to catch, immediately,
+    // at cycle 0 (that is the FIRST case in this test). Poisoning `g.flux`
+    // directly does not work either, and this is worth recording: SweFlux's
+    // own `if (f_free > 0.f)` gate evaluates false for a NaN operand (as
+    // does `if (f_free < 0.f)`), so ANY NaN flowing into `f_free` -- whether
+    // from a poisoned `flux[i][k]`, a poisoned `h[i]`, or anywhere else
+    // feeding that expression -- gets silently replaced by the branch's
+    // untaken-else default of 0.0, never surviving to be written back. This
+    // is a real (accidental) robustness property of the comparison
+    // structure, and it means "corruption born from otherwise-clean grid
+    // state, purely via normal substep arithmetic" is hard to construct as
+    // a test at all.
     //
     // What DOES reach `h` is a NaN in `dt` itself, which the grid-only check
     // cannot see (it never inspects Params) and which the dt_floor_s check
     // also cannot catch (`NaN < dt_floor_s` is false, same reason NaN never
     // trips a `<` guard). A NaN `cfl_number` produces exactly that: dt is
-    // computed from a clean grid, comes out NaN, and SweDepth's own h-update
-    // line (`g.h[i] + dt*(...)  + rain_rate*dt`) has no comparison guarding
-    // it -- NaN propagates straight through to `h_b[i]` and, after the
-    // swap, to `g.h[i]`. This is what the OLD code would have returned
-    // ok=true for for a single-cycle call (no next cycle's top to catch it);
-    // the fix's post-substep check catches it in the SAME call.
+    // computed (now every substep, from `red`, but `red` is clean and
+    // `p.cfl_number` alone is the poison, so this happens identically on
+    // substep 0) and comes out NaN, and SweDepth's own h-update line
+    // (`g.h[i] + dt*(...)  + rain_rate*dt`) has no comparison guarding it --
+    // NaN propagates straight through to `h_b[i]` and, after the swap, to
+    // `g.h[i]`. This is what the pre-Task-7-fix code would have returned
+    // ok=true for on a single-cycle call (no next cycle's top to catch it);
+    // the per-substep check now catches it after substep 0 of the SAME
+    // call, without needing 49 more substeps of the same poisoned dt to run
+    // first.
     Params p;
     p.res = 24;
     p.world_m = 16.0f * float(p.res);
@@ -1502,15 +1511,107 @@ void SweTripwire() {
     std::fill(g.h.begin(), g.h.end(), 0.5f);  // clean, finite starting state
     SweRunResult r = RunSweCycles(g, p, 1);
     const bool named_post =
-        r.reason.find("after this cycle's substeps") != std::string::npos;
+        r.reason.find("substep 0: non-finite") != std::string::npos;
     char buf[300];
     std::snprintf(buf, sizeof(buf), "ok=%d aborted_cycle=%d reason=\"%s\"",
                   r.ok, r.aborted_cycle, r.reason.c_str());
-    Check("SweTripwire: fault invisible to the pre-substep check (NaN dt from "
-          "a poisoned cfl_number) is still caught after this cycle's "
-          "substeps",
+    Check("SweTripwire: fault invisible to the pre-loop starting-state check "
+          "(NaN dt from a poisoned cfl_number) is still caught after the "
+          "first substep it corrupts",
           !r.ok && r.aborted_cycle == 0 && named_post, buf);
   }
+  {
+    // Owner ruling (post-PR, "CFL staleness" finding): dt is now recomputed
+    // EVERY SUBSTEP, so a dt-floor trip must be reachable MID-CYCLE, not
+    // only at a cycle's first substep -- which is all the dt-floor case
+    // above ever exercised (it starts already-wet specifically to fail
+    // immediately). This fixture starts bone DRY instead (dt floored at
+    // `eps_wet`, comfortably above `dt_floor_s`) and rains hard enough that
+    // `h_max` grows past the point where the gravity-wave bound collapses
+    // below `dt_floor_s` within the substeps that follow -- but the very
+    // FIRST substep still uses dt computed from the clean, dry starting
+    // state (from BEFORE any rain fell), so it cannot be the one that
+    // trips. A trip naming substep > 0 is therefore direct evidence the
+    // floor check is live INSIDE a cycle, not only at its boundary.
+    Params p;
+    p.res = 24;
+    p.world_m = 16.0f * float(p.res);
+    p.relief_m = 1.0f;
+    p.out = "";
+    p.dt_floor_s = 10.0f;
+    // FLUID-ONLY fixture: see the note in SweWellBalancedness.
+    p.morfac = 0.f;
+    // Absurdly heavy, deliberately -- a stress fixture for the dt collapse,
+    // not a physically plausible climate. Flat terrain + uniform rain means
+    // every cell tracks identically (no flux, no spatial variation), so
+    // this needs no precise threshold reasoning: it only has to overshoot
+    // the ~0.065 m depth (at cell_m=16, cfl_number=0.5) where dt crosses
+    // 10 s, which it does within a handful of substeps.
+    p.runoff_m_per_yr = 5.0e6f;
+    Grid g(p.res);
+    InitTerrain(g, p);
+    // g.h defaults to 0 (bone dry) -- left as-is, unlike the dt-floor case
+    // above, which starts wet specifically to fail on substep 0.
+    SweRunResult r = RunSweCycles(g, p, 1);
+    const bool named_floor = r.reason.find("dt-floor") != std::string::npos;
+    int substep = -1;
+    {
+      const size_t pos = r.reason.find("substep ");
+      if (pos != std::string::npos)
+        substep = std::atoi(r.reason.c_str() + pos + 8);
+    }
+    const bool mid_cycle = substep > 0;
+    char buf[300];
+    std::snprintf(buf, sizeof(buf),
+                 "ok=%d aborted_cycle=%d substep=%d reason=\"%s\"",
+                 r.ok, r.aborted_cycle, substep, r.reason.c_str());
+    Check("SweTripwire: a dt-floor trip is reachable MID-CYCLE (depth grows "
+          "across substeps, not only at a cycle's first substep)",
+          !r.ok && r.aborted_cycle == 0 && named_floor && mid_cycle, buf);
+  }
+}
+
+// --- S5b. CFL dt is recomputed every substep, not frozen at cycle start ----
+// Owner ruling (post-PR, "CFL staleness" finding): the per-cycle dt this
+// function used to compute once and hold fixed across all `swe_substeps`
+// could exceed the gravity-wave stability bound once depth grew enough
+// MID-cycle, producing a bounded checkerboard oscillation the non-finite
+// tripwire could not see. The fix recomputes dt from the CURRENT depth
+// field before every substep -- this is the cheapest direct pin of that,
+// using SweRunResult::first_dt_s/last_dt_s (owner ruling): a fixture where
+// depth grows substantially within ONE cycle must show `last_dt_s`
+// measurably smaller than `first_dt_s`. Under the pre-ruling behaviour
+// (dt computed once, held for the whole cycle) the two would be IDENTICAL
+// by construction, since both would just be reading the same one value.
+void SwePerSubstepDt() {
+  Params p;
+  p.res = 24;
+  p.world_m = 16.0f * float(p.res);
+  p.relief_m = 1.0f;
+  p.out = "";
+  p.swe_substeps = 50;
+  // Default dt_floor_s (1e-5 s) -- nowhere near what this fixture reaches,
+  // so the dt-floor tripwire (pinned separately, above) does not fire here;
+  // this test is purely about the MAGNITUDE of dt, not an abort path.
+  p.morfac = 0.f;  // FLUID-ONLY fixture: see the note in SweWellBalancedness.
+  // Heavy but sub-tripwire rain: grows h_max from bone dry to several
+  // metres over the cycle's 50 substeps, which at cell_m=16 shrinks dt by
+  // roughly an order of magnitude (dt ~ 1/sqrt(h)) -- comfortably past the
+  // 2x margin this test asserts, with no risk of the dt-floor case above.
+  p.runoff_m_per_yr = 5.0e5f;
+  Grid g(p.res);
+  InitTerrain(g, p);
+  SweRunResult r = RunSweCycles(g, p, 1);
+  const bool shrank = r.ok && r.first_dt_s > 0.f && r.last_dt_s > 0.f &&
+                      r.last_dt_s < 0.5f * r.first_dt_s;
+  char buf[220];
+  std::snprintf(buf, sizeof(buf),
+               "ok=%d first_dt_s=%.4f last_dt_s=%.4f (want last < half of "
+               "first -- dt genuinely shrank as depth grew, not frozen)",
+               r.ok, double(r.first_dt_s), double(r.last_dt_s));
+  Check("SwePerSubstepDt: CFL dt shrinks across substeps as depth grows "
+        "within one cycle, not frozen at the cycle-start value",
+        shrank, buf);
 }
 
 // --- S6. the wet-dry front is stable ----------------------------------------
@@ -4174,6 +4275,7 @@ int RunAll() {
   SweWaterLedger();
   SweDeterminism();
   SweTripwire();
+  SwePerSubstepDt();
   SweWetDryFrontStability();
   SweLakeMomentumDissipation();
   SweManningConvergence();

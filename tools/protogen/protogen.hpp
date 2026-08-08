@@ -340,24 +340,35 @@ struct Params {
 
   // --- phase-1 SWE fluid: virtual-pipes shallow water (protogen_swe.cpp) ---
   //
-  // Substeps run per RunSweCycles cycle, each Flux->Depth->Velocity. 50 is a
-  // starting point, not derived: the substep's OWN dt already comes from CFL,
-  // this just says how many of them run before the morpho hook (SedExchange
-  // -> SedAdvect -> TalusFlux -> TalusApply, active since Task 6) gets a turn.
+  // Substeps run per RunSweCycles cycle, each CFL dt -> Flux->Depth->Velocity.
+  // 50 is a starting point, not derived: this just says how many of them run
+  // before the morpho hook (SedExchange -> SedAdvect -> TalusFlux ->
+  // TalusApply, active since Task 6) gets a turn.
   int swe_substeps = 50;
   // CFL number for the substep dt: dt = cfl_number * cell_m / sqrt(g*h_max).
   // 0.5 is the standard shallow-water safety factor -- explicit virtual-pipes
   // schemes are stable up to ~1.0; 0.5 leaves headroom for the implicit drag
   // term's own stiffness and for MORFAC-scaled bed change later.
   //
-  // NAMED OMISSION: the bound uses the wave speed sqrt(g*h) alone, not the
-  // full advective CFL speed |u|+sqrt(g*h) a textbook shallow-water scheme
-  // would use. In practice the margin still holds -- SweFlux's own export
-  // clamp caps a substep's outflow at the water the cell actually holds
-  // regardless of what dt implies, and the drag term is solved implicitly,
-  // so the two together carry the advective contribution this dt bound
-  // itself does not account for. Not proof the margin holds at every
-  // possible velocity, just the reason it has not needed to be exact.
+  // RECOMPUTED EVERY SUBSTEP (owner ruling, post-PR "CFL staleness"
+  // finding), from `h_max` as it stands at that substep -- NOT once per
+  // cycle and held fixed across all `swe_substeps` of it. A per-cycle dt
+  // could exceed this stability bound once depth grew enough MID-cycle (a
+  // converging flow raising `h_max` after the cycle's one-and-only
+  // reduction had already run), producing a BOUNDED checkerboard
+  // oscillation the non-finite tripwire could not see, since it is not a
+  // NaN. Per-substep recomputation closes that at the cost of one extra
+  // deterministic max-reduction per substep (see the perf report).
+  //
+  // NAMED OMISSION, STILL TRUE either way: the bound uses the wave speed
+  // sqrt(g*h) alone, not the full advective CFL speed |u|+sqrt(g*h) a
+  // textbook shallow-water scheme would use. In practice the margin still
+  // holds -- SweFlux's own export clamp caps a substep's outflow at the
+  // water the cell actually holds regardless of what dt implies, and the
+  // drag term is solved implicitly, so the two together carry the
+  // advective contribution this dt bound itself does not account for. Not
+  // proof the margin holds at every possible velocity, just the reason it
+  // has not needed to be exact.
   float cfl_number = 0.5f;
   // Manning roughness for the SWE fluid passes. A SEPARATE knob from
   // `manning_n` (the phase-0 particle walk's), not an alias, even though the
@@ -686,8 +697,11 @@ struct SimStats {
   // the one call site instead.
   double t_swe_warm_start = 0;
   // Phase-1 SWE cycle timers, one bucket per dispatch-list pass plus the
-  // per-cycle CFL/tripwire reduction. RunSweCycles fills them in when given
-  // a non-null SimStats*; wired into the driver as of Task 7.
+  // CFL/tripwire reduction -- now run once per SUBSTEP rather than once per
+  // cycle (owner ruling, "CFL staleness" finding), so this bucket grows
+  // roughly `swe_substeps`-fold; see the perf report for the measured
+  // delta. RunSweCycles fills them in when given a non-null SimStats*;
+  // wired into the driver as of Task 7.
   double t_swe_reduce = 0, t_swe_flux = 0, t_swe_depth = 0, t_swe_velocity = 0;
   // Morpho hook buckets (Task 6), same shape and same caveat: filled in by
   // RunSweCycles when given a non-null SimStats*, zero while `morfac` is 0
@@ -785,11 +799,26 @@ void SweWarmStart(Grid& g, const Params& p);
 // `reason` name where and why, so a caller (test or, from Task 7, the
 // driver) can report it rather than merely detect it. `aborted_cycle` is
 // always in the caller's GLOBAL cycle numbering -- see `cycle_offset` on
-// RunSweCycles below -- not merely relative to whichever call found it.
+// RunSweCycles below -- not merely relative to whichever call found it;
+// `reason` additionally names the SUBSTEP for a fluid-side abort (the dt
+// floor, or a non-finite state caught mid-cycle), since dt is now recomputed
+// every substep (owner ruling, "CFL staleness" finding) and a fault can
+// therefore land partway through a cycle, not only at its boundary.
+//
+// `first_dt_s`/`last_dt_s` (owner ruling): the CFL dt actually used by the
+// FIRST and LAST substep this call ran (0 if none ran, e.g. `cycles == 0`).
+// Diagnostic, not load-bearing to any pass -- exists so a caller/test can
+// confirm dt is genuinely being recomputed from the CURRENT depth field
+// every substep rather than frozen at the cycle's starting value: if depth
+// grows substantially over the run, `last_dt_s` must come out measurably
+// smaller than `first_dt_s` (the gravity-wave bound shrinks as h_max
+// grows). See SwePerSubstepDt (protogen_tests.cpp) for exactly that check.
 struct SweRunResult {
   bool ok = true;
   int aborted_cycle = -1;
   std::string reason;
+  float first_dt_s = 0.0f;
+  float last_dt_s = 0.0f;
 };
 
 // The sediment-mass audit's starting point (Task 7 fix round 1). Captured
@@ -823,11 +852,20 @@ struct SweAuditBaseline {
   double base_fix_residual_m3 = 0.0;
 };
 
-// Runs `cycles` SWE cycles (CFL dt -> swe_substeps x Flux/Depth/Velocity ->
-// morpho hook) starting from Grid `g`'s current `h`/`flux` state --
+// Runs `cycles` SWE cycles (swe_substeps x [CFL dt -> Flux/Depth/Velocity]
+// -> morpho hook) starting from Grid `g`'s current `h`/`flux` state --
 // callable standalone, independent of RunSim/phase-0 (Task 5 supplies the
 // warm start that seeds `h` from phase-0's finished bed; nothing here
 // requires it). `stats`, if non-null, accumulates per-pass wall time.
+//
+// CFL dt is recomputed EVERY SUBSTEP (owner ruling, post-PR "CFL staleness"
+// finding), from the depth field as it stands at that substep -- not once
+// per cycle and held fixed. A per-cycle dt could exceed the gravity-wave
+// stability bound once depth grew enough mid-cycle (a converging flow), and
+// the resulting bounded checkerboard oscillation is not a NaN, so the
+// existing finite-state tripwire could not see it. See RunSweCycles's own
+// definition (protogen_swe.cpp) for the substep loop this runs in and
+// SweRunResult::first_dt_s/last_dt_s for a cheap way to observe it.
 //
 // THE MORPHO HOOK IS GATED ON `p.morfac > 0`: a run with morfac == 0 is a
 // FLUID-ONLY run, and every pre-Task-6 SWE fixture in protogen_tests.cpp

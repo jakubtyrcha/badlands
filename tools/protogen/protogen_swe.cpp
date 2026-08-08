@@ -1498,8 +1498,10 @@ namespace {
 
 // ------------------------------------------------------- deterministic CFL
 
-// Result of the once-per-cycle max-depth reduction: the value the CFL dt is
-// based on, and whether any non-finite `h`/`height` was found along the way.
+// Result of the max-depth reduction: the value the CFL dt is based on, and
+// whether any non-finite `h`/`height` was found along the way. Owner ruling
+// (post-PR, "CFL staleness" finding): run once per SUBSTEP now, not once per
+// cycle -- see RunSweCycles's own comment for why.
 struct ReduceResult {
   float h_max = 0.f;
   bool nonfinite = false;
@@ -1655,9 +1657,10 @@ void WriteAbortSnapshot(const Grid& g, const Params& p, int cycle) {
 namespace pg {
 
 // Times one DeterministicMaxDepth call into `stats->t_swe_reduce` (if
-// `stats` is non-null) and returns its result -- shared by the initial
-// pre-loop check and the post-substep check inside the loop below, so the
-// two call sites can't drift into timing one and not the other.
+// `stats` is non-null) and returns its result -- shared by every call site
+// in RunSweCycles below (the initial pre-loop check, the per-substep check,
+// and the post-morpho-hook check), so none of them can drift into timing
+// one and not the other.
 ReduceResult TimedReduce(const Grid& g, const Params& p, SimStats* stats) {
   const auto t0 = std::chrono::steady_clock::now();
   const ReduceResult red = DeterministicMaxDepth(g, p);
@@ -1674,20 +1677,33 @@ SweRunResult RunSweCycles(Grid& g, const Params& p, int cycles,
   SweRunResult result;
 
   // Validate the STARTING state before running anything -- the only check in
-  // this function that runs before a cycle's substeps rather than after.
-  // Everything below checks AFTER a cycle's own substeps, on purpose: an
-  // earlier version checked at the TOP of the NEXT cycle instead, which (a)
-  // left the FINAL cycle's own corruption completely unchecked (there is no
-  // "next cycle" for it to be caught at the top of, so the function returned
-  // ok=true regardless of what the last cycle's substeps produced), and (b)
-  // mislabeled every other cycle's fault too (a NaN born during cycle k's
-  // substeps was reported as "cycle k+1", the cycle that happened to notice
-  // it, not the one that caused it). Checking after every cycle -- including
-  // silently reusing that SAME check as the next cycle's CFL input, and
-  // running one extra time up front for the initial state -- fixes both:
-  // `aborted_cycle` now always names the cycle whose substeps actually
-  // produced the fault (or, for a bad starting state, the cycle that fault
-  // would have blocked), and no cycle is special-cased out of the check.
+  // this function that runs before a SUBSTEP rather than after one. Every
+  // other check below runs AFTER the substep/hook it validates, on purpose:
+  // an earlier version checked at the TOP of the NEXT unit of work instead,
+  // which (a) left the FINAL substep of the FINAL cycle's own corruption
+  // completely unchecked (there is no "next" for it to be caught at the top
+  // of, so the function returned ok=true regardless of what the last work
+  // produced), and (b) mislabeled every fault's origin too (a NaN born
+  // during unit k was reported as "unit k+1", the one that happened to
+  // notice it, not the one that caused it). Checking after every unit of
+  // work -- including silently reusing that SAME check as the next unit's
+  // CFL input, and running one extra time up front for the initial state --
+  // fixes both, and applies at whatever granularity the checks run at below.
+  //
+  // OWNER RULING (post-PR, "CFL staleness" finding): that granularity is now
+  // the SUBSTEP, not the cycle. The per-CYCLE dt this function used to
+  // compute once and hold fixed across all `swe_substeps` of that cycle
+  // could exceed the gravity-wave stability bound once depth grew enough
+  // MID-cycle (a converging flow raising `h_max`, which only the reduction
+  // AT THE START of the cycle had seen) -- producing a BOUNDED checkerboard
+  // oscillation, not a NaN, so the existing tripwire (which only ever
+  // caught non-finite state) could not see it. Recomputing dt from the
+  // CURRENT depth field before every substep closes that: see the substep
+  // loop below for where the reduction now runs, and its own comment for
+  // the finite-check promptness this preserves (a fault must still abort no
+  // LATER than it did per-cycle -- in practice strictly earlier now, since
+  // a fluid substep's own corruption is caught right after THAT substep
+  // instead of waiting for the rest of the cycle to finish).
   ReduceResult red = TimedReduce(g, p, stats);
   if (red.nonfinite) {
     result.ok = false;
@@ -1765,28 +1781,47 @@ SweRunResult RunSweCycles(Grid& g, const Params& p, int cycles,
   const double audit_base_fix_residual = ab.base_fix_residual_m3;
 
   for (int cycle = 0; cycle < cycles; ++cycle) {
-    // h_max floored at eps_wet: a bone-dry grid has zero wave speed, which
-    // would divide by zero below. Flooring at the wet threshold gives a
-    // finite, bounded dt instead of an arbitrary one -- physically, nothing
-    // is moving fast enough to constrain dt tighter than "a barely-wet cell
-    // would."
-    const float h_for_cfl = std::max(red.h_max, p.eps_wet);
-    const float dt =
-        p.cfl_number * cell_m / std::sqrt(kGravityMS2 * h_for_cfl);
-
-    if (dt < p.dt_floor_s) {
-      result.ok = false;
-      result.aborted_cycle = cycle_offset + cycle;
-      char buf[192];
-      std::snprintf(buf, sizeof(buf),
-                    "cycle %d: dt-floor -- CFL dt %.3e s below dt_floor_s %.3e s",
-                    cycle_offset + cycle, double(dt), double(p.dt_floor_s));
-      result.reason = buf;
-      WriteAbortSnapshot(g, p, cycle_offset + cycle);
-      return result;
-    }
+    // Represented fluid time this cycle's substeps actually cover -- the
+    // SUM of each substep's own dt, not `swe_substeps * dt` (that identity
+    // only held while dt was frozen for the whole cycle). Everything
+    // downstream that used to read "the cycle's dt" -- the morpho hook's
+    // `dt_morpho`, SedAdvect's backtrace distance, the bed-clock conversion
+    // `dt_bed = morfac * dt_morpho` -- reads this sum instead, so a
+    // shrinking-dt cycle still hands the morpho/bed side the TRUE elapsed
+    // fluid time, not an overcount from the (now-stale) first substep's dt.
+    float dt_morpho_sum = 0.0f;
 
     for (int s = 0; s < p.swe_substeps; ++s) {
+      // OWNER RULING (post-PR, "CFL staleness" finding): dt is recomputed
+      // HERE, from `red` as of the END of the PREVIOUS substep (or, for the
+      // very first substep this call ever runs, the pre-loop starting-state
+      // reduction above) -- not held fixed for the whole cycle. h_max
+      // floored at eps_wet: a bone-dry grid has zero wave speed, which
+      // would divide by zero below. Flooring at the wet threshold gives a
+      // finite, bounded dt instead of an arbitrary one -- physically,
+      // nothing is moving fast enough to constrain dt tighter than "a
+      // barely-wet cell would."
+      const float h_for_cfl = std::max(red.h_max, p.eps_wet);
+      const float dt =
+          p.cfl_number * cell_m / std::sqrt(kGravityMS2 * h_for_cfl);
+
+      if (dt < p.dt_floor_s) {
+        result.ok = false;
+        result.aborted_cycle = cycle_offset + cycle;
+        char buf[224];
+        std::snprintf(buf, sizeof(buf),
+                      "cycle %d substep %d: dt-floor -- CFL dt %.3e s below "
+                      "dt_floor_s %.3e s",
+                      cycle_offset + cycle, s, double(dt),
+                      double(p.dt_floor_s));
+        result.reason = buf;
+        WriteAbortSnapshot(g, p, cycle_offset + cycle);
+        return result;
+      }
+
+      if (result.first_dt_s == 0.0f) result.first_dt_s = dt;
+      result.last_dt_s = dt;
+
       auto ta = std::chrono::steady_clock::now();
       SweFlux(g, p, dt);
       auto tb = std::chrono::steady_clock::now();
@@ -1799,16 +1834,38 @@ SweRunResult RunSweCycles(Grid& g, const Params& p, int cycles,
         stats->t_swe_depth += std::chrono::duration<double>(tc - tb).count();
         stats->t_swe_velocity += std::chrono::duration<double>(td - tc).count();
       }
+      dt_morpho_sum += dt;
+
+      // Per-SUBSTEP validity check, replacing the old once-per-cycle
+      // post-substep check: recomputes `red` from the state THIS substep
+      // just produced, both (a) as this substep's own finite-state check
+      // (a NaN born here now aborts right here, not at the end of the
+      // whole cycle) and (b) as the NEXT substep's CFL input -- see this
+      // function's header comment for why checking after the unit of work
+      // it validates, every time, is the right shape. TimedReduce times
+      // itself into `stats->t_swe_reduce`, same as every other call site.
+      red = TimedReduce(g, p, stats);
+      if (red.nonfinite) {
+        result.ok = false;
+        result.aborted_cycle = cycle_offset + cycle;
+        result.reason = "cycle " + std::to_string(cycle_offset + cycle) +
+                        " substep " + std::to_string(s) +
+                        ": non-finite h or height detected after this "
+                        "substep";
+        WriteAbortSnapshot(g, p, cycle_offset + cycle);
+        return result;
+      }
     }
 
     // Morpho hook (Task 6). ONCE per cycle, after the fluid has advanced
     // `swe_substeps` times -- that is the staggering the whole design rests
-    // on: the fluid runs at its CFL dt, the bed sees one update per cycle
-    // covering all of it. `dt_morpho` is therefore the cycle's total fluid
-    // time, and the passes are sequenced HERE and nowhere else (no pass
-    // calls another).
+    // on: the fluid runs at its (now per-substep) CFL dt, the bed sees one
+    // update per cycle covering all of it. `dt_morpho` is therefore the
+    // cycle's TOTAL fluid time -- `dt_morpho_sum`, the actual sum of what
+    // ran, not an assumption that every substep used the same dt -- and the
+    // passes are sequenced HERE and nowhere else (no pass calls another).
     if (morpho) {
-      const float dt_morpho = float(p.swe_substeps) * dt;
+      const float dt_morpho = dt_morpho_sum;
       auto m0 = std::chrono::steady_clock::now();
       SedExchange(g, p, dt_morpho);
       auto m1 = std::chrono::steady_clock::now();
@@ -1893,20 +1950,27 @@ SweRunResult RunSweCycles(Grid& g, const Params& p, int cycles,
       }
     }
 
-    // Post-substep validity check -- see this function's header comment for
-    // why this runs after EVERY cycle, including the last, rather than only
-    // at the top of a next one that might not exist. Its result also becomes
-    // next iteration's CFL input, so this is not an extra pass over the grid
-    // beyond what computing next cycle's dt already needed.
-    red = TimedReduce(g, p, stats);
-    if (red.nonfinite) {
-      result.ok = false;
-      result.aborted_cycle = cycle_offset + cycle;
-      result.reason = "cycle " + std::to_string(cycle_offset + cycle) +
-                      ": non-finite h or height detected after this cycle's "
-                      "substeps";
-      WriteAbortSnapshot(g, p, cycle_offset + cycle);
-      return result;
+    // POST-MORPHO validity check. Only the morpho hook can still change
+    // `height` (bed) after the fluid substep loop's own per-substep checks
+    // already ran one for each substep above -- when `morpho` is false,
+    // `red` already IS this cycle's own last-substep result (nothing has
+    // touched `h`/`height` since), so re-reducing here would be a wasted
+    // duplicate pass over a grid that has not changed. Same promptness
+    // guarantee the old once-per-cycle check gave: a morpho-introduced NaN
+    // must abort THIS cycle, not be silently deferred to next cycle's first
+    // substep (see this function's header comment for the general
+    // "check after the unit of work it validates" argument).
+    if (morpho) {
+      red = TimedReduce(g, p, stats);
+      if (red.nonfinite) {
+        result.ok = false;
+        result.aborted_cycle = cycle_offset + cycle;
+        result.reason = "cycle " + std::to_string(cycle_offset + cycle) +
+                        ": non-finite h or height detected after this "
+                        "cycle's morpho hook";
+        WriteAbortSnapshot(g, p, cycle_offset + cycle);
+        return result;
+      }
     }
   }
 
